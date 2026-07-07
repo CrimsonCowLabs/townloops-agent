@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "TownloopsResearchDraft",
+  "description": "Envelope for a Townloops entity draft researched from a URL. `kind` picks which payload shape is required. Validation is intentionally loose — leave fields null when uncertain (null beats wrong).",
+  "type": "object",
+  "required": ["kind", "payload", "_source_url"],
+  "properties": {
+    "kind": {
+      "type": "string",
+      "enum": ["venue", "business", "community", "performer", "creator"]
+    },
+    "payload": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "slug": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "address": { "type": ["string", "null"] },
+        "website": { "type": ["string", "null"] },
+        "phone": { "type": ["string", "null"] },
+        "accessibility_notes": { "type": ["string", "null"] },
+        "meeting_info": { "type": ["string", "null"] },
+        "category_slug": { "type": ["string", "null"] },
+        "kind": { "type": ["string", "null"], "description": "sub-kind (band/dj/comedian for performer; other/podcaster/writer for creator; group/club for community)" },
+        "bio": { "type": ["string", "null"] },
+        "instagram": { "type": ["string", "null"] },
+        "spotify_url": { "type": ["string", "null"] },
+        "youtube_url": { "type": ["string", "null"] },
+        "image_path": { "type": ["string", "null"], "format": "uri" },
+        "image_alt": { "type": ["string", "null"] }
+      },
+      "additionalProperties": true
+    },
+    "_source_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "The URL the user handed us. Keys the row in drafts.db."
+    },
+    "_fetched_from": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri" },
+      "description": "URLs actually pulled by the agent while researching."
+    },
+    "_note": {
+      "type": ["string", "null"],
+      "description": "Free-text note for future you."
+    },
+    "_extras": {
+      "type": "object",
+      "description": "Any per-kind data captured that Townloops doesn't accept (e.g. image_url on business/community if API rejects image_path there).",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

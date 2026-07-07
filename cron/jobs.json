@@ -1,0 +1,53 @@
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "event-collect-am",
+      "name": "Morning event ingest + ship",
+      "schedule": "0 6 * * *",
+      "skills": ["event-ingest"],
+      "deliver": "local",
+      "prompt": "Run the morning event pipeline. (1) `python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest` — pull every configured source into state/townloops.db. Per-source failures must not abort the run. (2) `python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship` — POST/PATCH deltas to TownLoops. Emit a one-line JSON status with per-source and per-kind counts. Do NOT contact the operator unless a hard credential failure occurs."
+    },
+    {
+      "id": "enrichment-sweep",
+      "name": "Daily enrichment sweep (venue + business + performer)",
+      "schedule": "0 9 * * *",
+      "skills": ["venue-enrichment", "business-enrichment", "performer-enrichment"],
+      "deliver": "local",
+      "prompt": "Run the enrichment sweep. In sequence, execute: `venue-enrichment/enrich.py sweep --limit 20 --firecrawl`, then `venue-enrichment/enrich.py ship`, then the same pair for `business-enrichment` and `performer-enrichment`. Any single kind's failure must not stop the others. Emit a one-line JSON status with per-kind (claimed, filled, shipped, errors)."
+    },
+    {
+      "id": "event-collect-pm",
+      "name": "Evening event ingest + ship",
+      "schedule": "0 18 * * *",
+      "skills": ["event-ingest"],
+      "deliver": "local",
+      "prompt": "Same as event-collect-am. Run ingest then ship; emit a one-line JSON status."
+    },
+    {
+      "id": "newsletter-compose",
+      "name": "Sunday: compose the coming week's newsletter draft",
+      "schedule": "0 8 * * 0",
+      "skills": ["newsletter-weekly"],
+      "deliver": "telegram",
+      "prompt": "Compute next week's ISO week (Mon-Sun ahead). Run `newsletter-weekly/newsletter.py compose --week <ISO>`. Read the draft body path from the JSON output; do NOT paste the whole HTML into Telegram. Send a summary: week label, event count, draft path, and a reminder that `push` requires operator approval. Do NOT push."
+    },
+    {
+      "id": "newsletter-push-reminder",
+      "name": "Sunday evening: nudge the operator to push the newsletter",
+      "schedule": "0 20 * * 0",
+      "skills": ["newsletter-weekly"],
+      "deliver": "telegram",
+      "prompt": "Look up the current draft newsletter (this week's ISO week) via `newsletter-weekly/newsletter.py show`. If status is 'draft', message the operator with the exact `push --week <ISO>` command to run and ask for approval. If status is already 'scheduled' or 'sent', do nothing. Do NOT push without explicit operator instruction."
+    },
+    {
+      "id": "sponsor-audit",
+      "name": "Monday: sponsor placement audit",
+      "schedule": "0 10 * * 1",
+      "skills": ["sponsor-management"],
+      "deliver": "telegram",
+      "prompt": "Run `sponsor-management/sponsors.py audit`. Format the JSON as a short digest: (1) 'Expiring soon' — one line per ad_spot with placement + ends_at; (2) 'Unbound sponsors' — sponsors with no active placement. If both lists are empty, send a single line 'sponsors: all clear'. Do NOT take action; the operator drives assignments."
+    }
+  ]
+}

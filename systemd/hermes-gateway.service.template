@@ -1,0 +1,19 @@
+[Unit]
+Description=TownLoops town operations Hermes agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+# Edit these two lines for your deployment.
+WorkingDirectory=/home/CLIENT/townloops-agent
+EnvironmentFile=/home/CLIENT/townloops-agent/.env
+
+Environment=HERMES_HOME=/home/CLIENT/townloops-agent/state
+Environment=PYTHONPATH=/home/CLIENT/townloops-agent
+ExecStart=/usr/bin/env python -m hermes_cli.main gateway run --replace
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

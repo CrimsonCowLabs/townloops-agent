@@ -1,0 +1,29 @@
+# Hermes agent configuration for the TownLoops town operations agent.
+# Trimmed toolset; cron enabled; kanban dispatch out-of-band.
+
+display:
+  personality: default
+
+memory:
+  memory_char_limit: 3000
+
+kanban:
+  dispatch_in_gateway: false
+
+cron:
+  wrap_response: true
+  max_parallel_jobs: 1
+
+platform_toolsets:
+  cli:
+    enabled: true
+  browser:
+    enabled: false
+  vision:
+    enabled: false
+  delegation:
+    enabled: false
+
+skills:
+  # Bind-mounted from repo ./skills → /home/agent/.hermes/skills; auto-discovered.
+  # No external_dirs needed under this layout.

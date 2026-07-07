@@ -1,0 +1,54 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>This week in {{ town_slug }} — {{ week_of }}</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; color: #222; max-width: 640px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 22px; margin-bottom: 4px; }
+  .lede { color: #666; margin-bottom: 24px; }
+  .ad { margin: 24px 0; padding: 16px; background: #f5f5f5; border-radius: 8px; text-align: center; }
+  .ad img { max-width: 100%; height: auto; }
+  .event { padding: 16px 0; border-bottom: 1px solid #eee; }
+  .event .name { font-weight: 600; font-size: 16px; }
+  .event .when { color: #555; font-size: 14px; }
+  .event .venue { color: #777; font-size: 14px; }
+  .event .desc { font-size: 14px; margin-top: 6px; }
+  .footer { margin-top: 32px; color: #999; font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+
+{% for ad in ads.get('newsletter-header', []) %}
+<div class="ad">
+  <a href="{{ ad.click_url }}"><img src="{{ ad.asset_url }}" alt="{{ ad.alt_text or '' }}"></a>
+</div>
+{% endfor %}
+
+<h1>This week in {{ town_slug }}</h1>
+<div class="lede">{{ week_of }} · {{ events|length }} event{{ '' if events|length == 1 else 's' }}</div>
+
+{% for e in events %}
+<div class="event">
+  <div class="name"><a href="{{ e.url or e.source_url or '#' }}">{{ e.title }}</a></div>
+  <div class="when">{{ e.start_at }}{% if e.end_at %} – {{ e.end_at }}{% endif %}</div>
+  {% if e.venue_name %}<div class="venue">{{ e.venue_name }}</div>{% endif %}
+  {% if e.description %}<div class="desc">{{ e.description|truncate(200) }}</div>{% endif %}
+</div>
+{% else %}
+<p>No events published for this week yet. Reply if you have one to add.</p>
+{% endfor %}
+
+{% for ad in ads.get('newsletter-footer', []) %}
+<div class="ad">
+  <a href="{{ ad.click_url }}"><img src="{{ ad.asset_url }}" alt="{{ ad.alt_text or '' }}"></a>
+</div>
+{% endfor %}
+
+<div class="footer">
+  Sent by the {{ town_slug }} TownLoops assistant.
+  <br><a href="{{ unsubscribe_url|default('#') }}">Unsubscribe</a>
+</div>
+
+</body>
+</html>

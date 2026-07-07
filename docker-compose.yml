@@ -1,0 +1,18 @@
+services:
+  agent:
+    image: nousresearch/hermes-agent:v2026.5.16
+    container_name: townloops-agent
+    restart: unless-stopped
+    env_file: .env
+    working_dir: /app
+    environment:
+      HERMES_HOME: /home/agent/.hermes
+      PYTHONPATH: /app
+    volumes:
+      - ./skills:/home/agent/.hermes/skills:ro
+      - ./config.yaml:/home/agent/.hermes/config.yaml:ro
+      - ./SOUL.md:/home/agent/.hermes/SOUL.md:ro
+      - ./cron:/home/agent/.hermes/cron:ro
+      - ./engine:/app/engine:ro
+      - ./state:/home/agent/.hermes/state
+    command: python -m hermes_cli.main gateway run --replace
