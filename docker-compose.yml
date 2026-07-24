@@ -1,18 +1,170 @@
+# townloops-agent + bundled Firecrawl stack
+# =========================================
+#
+# Runs the town-ops agent AND a self-hosted Firecrawl instance in one project.
+# `docker compose up -d` brings the whole thing up. No separate Firecrawl clone
+# needed — services below use pullable images from ghcr.io/firecrawl.
+#
+# The upstream Firecrawl compose (github.com/firecrawl/firecrawl/blob/main/docker-compose.yaml)
+# is the source of truth. This file inlines the essential services with the
+# pullable-image variant (skipping the experimental FoundationDB backend since
+# NUQ_BACKEND defaults to postgres). When updating: re-check upstream's
+# service list and env vars; nuq-postgres + postgres remain the queue backend
+# for now.
+#
+# The agent talks to Firecrawl via Docker service DNS on the shared
+# `firecrawl-net` network — see FIRECRAWL_API_URL default below.
+
 services:
+  # ─────────────────────────────────────────────────────────────────────
+  # Town operations agent
+  # ─────────────────────────────────────────────────────────────────────
   agent:
-    image: nousresearch/hermes-agent:v2026.5.16
+    # Local build wraps the base hermes-agent image with the Python deps our
+    # skills need (feedparser, jinja2, firecrawl-py, etc). See Dockerfile.
+    # Pull-only deploys break with ModuleNotFoundError — always build.
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: townloops-agent:local
     container_name: townloops-agent
+    # Per-host identity — `_worker_tag()` in engine/enrichment.py reads this
+    # via socket.gethostname() and stamps it into enrichment_queue.claimed_by
+    # and log lines. On thinkpad, override with `hostname: townloops-agent-thinkpad`
+    # via a docker-compose.override.yml; on macneo it's `townloops-agent-macneo`.
+    # Do NOT hardcode a specific host name here — this line documents the
+    # extension point; the actual value comes from the override.
+    # hostname: townloops-agent-<host-tag>
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - .env
     working_dir: /app
     environment:
       HERMES_HOME: /home/agent/.hermes
       PYTHONPATH: /app
+      # Default points at the bundled Firecrawl on the shared network. Override
+      # in .env if you want to use cloud Firecrawl instead.
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl-api:3002}
+    depends_on:
+      firecrawl-api:
+        condition: service_started
+    networks:
+      - firecrawl-net
     volumes:
-      - ./skills:/home/agent/.hermes/skills:ro
+      # Mount our skills UNDER a `business/` subdir so the base image can
+      # still seed its bundled skills (apple/, creative/, autonomous-ai-agents/,
+      # etc.) into /home/agent/.hermes/skills/ at boot. If you bind ./skills
+      # over the whole skills dir, the read-only mount blocks the seed and
+      # you lose the bundled apple-notes / imessage / macos-computer-use
+      # skills that the base image ships. Discovered 2026-07-10 on macneo.
+      - ./skills/business:/home/agent/.hermes/skills/business:ro
       - ./config.yaml:/home/agent/.hermes/config.yaml:ro
       - ./SOUL.md:/home/agent/.hermes/SOUL.md:ro
       - ./cron:/home/agent/.hermes/cron:ro
       - ./engine:/app/engine:ro
       - ./state:/home/agent/.hermes/state
     command: python -m hermes_cli.main gateway run --replace
+
+  # ─────────────────────────────────────────────────────────────────────
+  # Firecrawl stack — inlined from upstream self-host compose.
+  # 5 services (api + playwright + redis + rabbitmq + nuq-postgres).
+  # FoundationDB backend intentionally excluded — nuq-postgres is stable.
+  # ─────────────────────────────────────────────────────────────────────
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: firecrawl-api
+    restart: unless-stopped
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    networks:
+      - firecrawl-net
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+    environment:
+      HOST: "0.0.0.0"
+      PORT: 3002
+      INTERNAL_PORT: 3002
+      EXTRACT_WORKER_PORT: 3004
+      WORKER_PORT: 3005
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      POSTGRES_HOST: firecrawl-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${FIRECRAWL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${FIRECRAWL_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${FIRECRAWL_POSTGRES_DB:-postgres}
+      USE_DB_AUTHENTICATION: ${FIRECRAWL_USE_DB_AUTHENTICATION:-false}
+      NUM_WORKERS_PER_QUEUE: ${FIRECRAWL_NUM_WORKERS_PER_QUEUE:-8}
+      CRAWL_CONCURRENT_REQUESTS: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS:-10}
+      MAX_CONCURRENT_JOBS: ${FIRECRAWL_MAX_CONCURRENT_JOBS:-5}
+      BROWSER_POOL_SIZE: ${FIRECRAWL_BROWSER_POOL_SIZE:-5}
+      LOGGING_LEVEL: ${FIRECRAWL_LOGGING_LEVEL:-info}
+      BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY:-}
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      ENV: local
+    # Loopback publish only — external tools can hit http://127.0.0.1:8302
+    # for debugging; the agent uses in-network DNS (firecrawl-api:3002).
+    ports:
+      - "127.0.0.1:8302:3002"
+    command: node dist/src/harness.js --start-docker
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    container_name: firecrawl-playwright
+    restart: unless-stopped
+    networks:
+      - firecrawl-net
+    environment:
+      PORT: 3000
+      MAX_CONCURRENT_PAGES: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS:-10}
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=1g
+    cpus: 2.0
+    mem_limit: 4G
+
+  firecrawl-redis:
+    image: redis:alpine
+    container_name: firecrawl-redis
+    restart: unless-stopped
+    networks:
+      - firecrawl-net
+    command: redis-server --bind 0.0.0.0
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: firecrawl-rabbitmq
+    restart: unless-stopped
+    networks:
+      - firecrawl-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    container_name: firecrawl-postgres
+    restart: unless-stopped
+    networks:
+      - firecrawl-net
+    environment:
+      POSTGRES_USER: ${FIRECRAWL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${FIRECRAWL_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${FIRECRAWL_POSTGRES_DB:-postgres}
+    volumes:
+      - firecrawl-postgres-data:/var/lib/postgresql/data
+
+networks:
+  firecrawl-net:
+    driver: bridge
+
+volumes:
+  firecrawl-postgres-data:

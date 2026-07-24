@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+# townloops-agent-add — scaffold a per-town townloops-agent instance.
+#
+# Usage: bin/townloops-agent-add <slug> [--target-dir DIR]
+#
+# Creates ~/townloops-agents/{slug}/ (or --target-dir/{slug}) with:
+#   docker-compose.yml    — hardened per-town compose (references the shared repo)
+#   .env                  — from templates/env.example (with {{SLUG}} substituted)
+#   town-profile.yaml     — from templates/town-profile.example.yaml
+#   cron/jobs.json        — bootstrap + steady-state cron entries
+#   cron/jobs.empty.json  — optional follower-mode override target
+#   state/                — empty; agent creates state/townloops.db + others on first tick
+#
+# Idempotent: refuses to overwrite existing files. Missing shared stacks
+# are reported as warnings — the docker compose up will fail with a clear
+# error until they're brought up.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+BASE_DIR="${TOWNLOOPS_AGENTS_ROOT:-$HOME/townloops-agents}"
+
+usage() {
+  echo "usage: $0 <slug> [--target-dir DIR]" >&2
+  echo "  <slug>              lowercase alphanumeric + hyphens (matches TownLoops)" >&2
+  echo "  --target-dir DIR    override BASE_DIR (default: \$HOME/townloops-agents)" >&2
+  exit 2
+}
+
+if [[ $# -lt 1 ]]; then
+  usage
+fi
+
+SLUG=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --target-dir)
+      BASE_DIR="$2"; shift 2 ;;
+    -h|--help)
+      usage ;;
+    -*)
+      echo "unknown option: $1" >&2; usage ;;
+    *)
+      if [[ -n "$SLUG" ]]; then
+        echo "positional slug given twice ($SLUG, $1)" >&2; usage
+      fi
+      SLUG="$1"; shift ;;
+  esac
+done
+
+if [[ -z "$SLUG" ]]; then usage; fi
+if [[ ! "$SLUG" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
+  echo "slug must be lowercase alphanumeric + hyphens (no leading/trailing hyphen)" >&2
+  exit 2
+fi
+
+TARGET="$BASE_DIR/$SLUG"
+if [[ -e "$TARGET" ]]; then
+  echo "refusing to overwrite existing $TARGET" >&2
+  exit 3
+fi
+
+mkdir -p "$TARGET/state" "$TARGET/cron"
+
+TEMPLATES="$REPO/templates"
+
+render() {
+  local src="$1" dest="$2"
+  if [[ ! -f "$src" ]]; then
+    echo "missing template: $src" >&2; exit 4
+  fi
+  sed "s|{{SLUG}}|$SLUG|g" "$src" > "$dest"
+}
+
+render "$TEMPLATES/per-town-agent.docker-compose.yml.tmpl" "$TARGET/docker-compose.yml"
+render "$TEMPLATES/env.example"                            "$TARGET/.env.example"
+render "$TEMPLATES/town-profile.example.yaml"              "$TARGET/town-profile.yaml"
+
+# Copy the .env template so operator can edit in-place; block-copy so the
+# real .env isn't populated with placeholders that ship secrets.
+cp "$TARGET/.env.example" "$TARGET/.env"
+
+# Cron: default = full onboarding schedule. Follower mode: `mv cron/jobs.empty.json cron/jobs.json`.
+cat > "$TARGET/cron/jobs.json" <<'EOF'
+{
+  "version": 1,
+  "jobs": [
+    {
+      "id": "onboarding-tick",
+      "name": "Onboarding orchestrator tick",
+      "schedule": {"kind": "cron", "expr": "0 * * * *"},
+      "skills": ["onboarding-orchestrator"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/onboarding-orchestrator/orchestrate.py tick"
+    },
+    {
+      "id": "api-check",
+      "name": "Daily TownLoops OpenAPI snapshot + breaking-change check",
+      "schedule": {"kind": "cron", "expr": "15 4 * * *"},
+      "skills": ["townloops-api"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/townloops-api/api.py check"
+    },
+    {
+      "id": "event-collect-am",
+      "name": "Morning event ingest + ship",
+      "schedule": {"kind": "cron", "expr": "0 6 * * *"},
+      "skills": ["event-ingest"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
+    },
+    {
+      "id": "enrichment-sweep",
+      "name": "Daily enrichment sweep",
+      "schedule": {"kind": "cron", "expr": "0 9 * * *"},
+      "skills": ["venue-enrichment", "business-enrichment", "performer-enrichment"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "for k in venue business performer; do python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py sweep --limit 20 --firecrawl && python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py ship; done"
+    },
+    {
+      "id": "event-collect-pm",
+      "name": "Evening event ingest + ship",
+      "schedule": {"kind": "cron", "expr": "0 18 * * *"},
+      "skills": ["event-ingest"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
+    },
+    {
+      "id": "discovery-resweep-weekly",
+      "name": "Weekly discovery resweep (steady state)",
+      "schedule": {"kind": "cron", "expr": "0 4 * * 1"},
+      "skills": ["business-discovery", "community-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/business-discovery/discover.py sweep && python /home/agent/.hermes/skills/business/community-discovery/discover.py sweep"
+    },
+    {
+      "id": "newsletter-compose",
+      "name": "Sunday: compose next week's newsletter",
+      "schedule": {"kind": "cron", "expr": "0 8 * * 0"},
+      "skills": ["newsletter-weekly"],
+      "deliver": "telegram",
+      "prompt": "Compute next week's ISO week (Mon-Sun ahead). Run `newsletter-weekly/newsletter.py compose --week <ISO>`. Send a Telegram summary; do NOT push."
+    },
+    {
+      "id": "newsletter-push-reminder",
+      "name": "Sunday evening: nudge operator to push this week's newsletter",
+      "schedule": {"kind": "cron", "expr": "0 20 * * 0"},
+      "skills": ["newsletter-weekly"],
+      "deliver": "telegram",
+      "prompt": "Look up this week's newsletter draft (state/newsletters/<iso-week>.html). Post a brief Telegram reminder that the draft is ready and the operator should review + push via `newsletter-weekly/newsletter.py push --week <ISO> --yes-really-send`."
+    },
+    {
+      "id": "sponsor-audit",
+      "name": "Monday morning: audit sponsor placements + expiries",
+      "schedule": {"kind": "cron", "expr": "0 10 * * 1"},
+      "skills": ["sponsor-management"],
+      "deliver": "telegram",
+      "prompt": "Run `sponsor-management/sponsors.py audit`. Summarize expiring placements and any orphan ad-spots in a short Telegram digest. Gated by SPONSORS_ENABLED — if disabled, note that and stop."
+    },
+    {
+      "id": "nightly-summary",
+      "name": "Nightly successes/failures digest (report file + Telegram)",
+      "schedule": {"kind": "cron", "expr": "0 21 * * *"},
+      "skills": ["onboarding-orchestrator"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/onboarding-orchestrator/orchestrate.py summary"
+    }
+  ]
+}
+EOF
+
+cat > "$TARGET/cron/jobs.empty.json" <<'EOF'
+{ "version": 1, "jobs": [] }
+EOF
+
+# Sanity checks for shared stacks (advisory).
+if ! docker network inspect firecrawl-shared-net >/dev/null 2>&1; then
+  echo "warning: docker network firecrawl-shared-net not found — start the shared Firecrawl stack first:" >&2
+  echo "  docker compose -f $TEMPLATES/_shared/firecrawl/docker-compose.yml up -d" >&2
+fi
+if ! docker network inspect egress-net >/dev/null 2>&1; then
+  echo "warning: docker network egress-net not found — start the shared egress stack first:" >&2
+  echo "  docker compose -f $TEMPLATES/_shared/egress/docker-compose.yml up -d" >&2
+fi
+
+cat <<EOF
+scaffolded: $TARGET
+
+Next:
+  1. Fill $TARGET/.env with real credentials (Anthropic key, TownLoops bearer, Telegram, Listmonk).
+  2. Edit $TARGET/town-profile.yaml — the town's name, region, allowed_hosts,
+     and per-kind query seeds. Match categories to the town's live snapshot.
+  3. Bring up:
+       cd $TARGET
+       docker compose up -d
+  4. Watch the loop:
+       docker compose logs -f agent
+     (First tick will run town-init setup; hourly ticks drive discovery → verify
+      → research → enrich → ship → steady_state.)
+
+Follower mode: mv cron/jobs.empty.json cron/jobs.json && docker compose restart agent
+EOF

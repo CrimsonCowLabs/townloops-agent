@@ -15,11 +15,21 @@ import os
 import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, "/app")
 from engine import db, listmonk_api, townloops_api  # noqa: E402
+from engine.log import get_logger  # noqa: E402
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape  # noqa: E402
+
+
+log = get_logger("newsletter")
+
+
+def _agent_tz() -> ZoneInfo:
+    """IANA timezone per $AGENT_TZ (default America/Los_Angeles for legacy SLT parity)."""
+    return ZoneInfo(os.environ.get("AGENT_TZ", "America/Los_Angeles"))
 
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
@@ -72,7 +82,7 @@ def cmd_compose(args) -> int:
         )
     )
     if not events:
-        sys.stderr.write(f"[newsletter] 0 events for {args.week} — nothing to send.\n")
+        log.warning("no events for week", extra={"week": args.week})
     events.sort(key=lambda e: e.get("start_at") or "")
 
     env = Environment(
@@ -118,12 +128,34 @@ def cmd_push(args) -> int:
         "SELECT * FROM newsletters WHERE iso_week = ?", (args.week,)
     ).fetchone()
     if not row:
-        sys.stderr.write(f"[newsletter] no compose for {args.week}. run compose first.\n")
+        log.error("no compose for week", extra={"week": args.week,
+                                                  "hint": "run compose first"})
         return 2
     body = Path(row["body_path"]).read_text()
 
     monday, _ = _iso_week_dates(args.week)
-    send_at = args.send_at or f"{monday}T07:00:00-08:00"
+    # Monday 07:00 in the agent's local timezone. zoneinfo produces the right
+    # offset for the date (handles DST) — no more hardcoded -08:00 that sends
+    # newsletters 3 hours early during PDT or on east-coast deployments.
+    send_at = args.send_at or datetime(
+        monday.year, monday.month, monday.day, 7, 0, 0, tzinfo=_agent_tz()
+    ).isoformat()
+
+    # Safety gate — this creates a real Listmonk campaign scheduled to hit
+    # every subscriber. Default is preview-only; require an explicit opt-in
+    # to actually schedule. A stray `newsletter push --week ...` cron edit
+    # or a typo in --week should never send a real campaign.
+    if not args.yes_really_send:
+        print(json.dumps({
+            "dry_run": True,
+            "week": args.week,
+            "planned_send_at": send_at,
+            "subject": f"This week in {os.environ['TOWNLOOPS_TOWN_SLUG']}",
+            "listmonk_list_id": int(os.environ["LISTMONK_LIST_ID"]),
+            "body_bytes": len(body),
+            "note": "Pass --yes-really-send to actually create + schedule the campaign.",
+        }, indent=2))
+        return 0
 
     lm = listmonk_api.Client()
     list_id = int(os.environ["LISTMONK_LIST_ID"])
@@ -133,7 +165,14 @@ def cmd_push(args) -> int:
         lists=[list_id],
         body=body,
     )
-    campaign_id = campaign.get("id") or campaign.get("data", {}).get("id")
+    # listmonk_api.Client._req already unwraps the outer {data: ...} envelope,
+    # so the response IS the campaign row. Missing `id` is a hard error — do
+    # not fall through to `schedule_campaign(None, ...)` silently.
+    campaign_id = campaign.get("id") if isinstance(campaign, dict) else None
+    if not campaign_id:
+        log.error("Listmonk create_campaign returned no id",
+                    extra={"response_sample": json.dumps(campaign, default=str)[:400]})
+        return 3
     lm.schedule_campaign(campaign_id, send_at)
 
     conn.execute(
@@ -165,7 +204,10 @@ def main() -> int:
 
     ph = sub.add_parser("push")
     ph.add_argument("--week", required=True)
-    ph.add_argument("--send-at", dest="send_at", help="ISO datetime with tz; default Mon 07:00 -08:00")
+    ph.add_argument("--send-at", dest="send_at",
+                     help="ISO datetime with tz; default Mon 07:00 in $AGENT_TZ (America/Los_Angeles if unset)")
+    ph.add_argument("--yes-really-send", dest="yes_really_send", action="store_true",
+                     help="Actually create + schedule the Listmonk campaign. Without this flag, `push` prints a preview and exits.")
     ph.set_defaults(func=cmd_push)
 
     sh = sub.add_parser("show")

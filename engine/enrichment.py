@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from typing import Iterable
 
 from engine import db as _db
+from engine import lock as _lock
 from engine import research as _research
 from engine import townloops_api
 
@@ -29,6 +30,11 @@ class KindSpec:
     fillable: tuple[str, ...]
 
 
+# Fillable = payload keys enrichment may populate on rows where the field is
+# currently NULL. Names match the OpenAPI payload contract exactly (bare
+# `youtube` for business/community/performer; `youtube_url` on creator).
+_SOCIAL_FIELDS = ("instagram", "facebook", "tiktok", "twitter", "youtube", "linkedin")
+
 SPECS: dict[str, KindSpec] = {
     "venue": KindSpec(
         "venue",
@@ -40,13 +46,29 @@ SPECS: dict[str, KindSpec] = {
         "business",
         "businesses",
         "businesses",
-        ("description", "address", "website", "phone", "image_path", "image_alt"),
+        ("description", "address", "website", "phone", "image_path", "image_alt",
+         *_SOCIAL_FIELDS),
     ),
     "performer": KindSpec(
         "performer",
         "performers",
         "performers",
-        ("description", "website", "instagram", "spotify_url", "image_path", "image_alt"),
+        ("description", "website", "instagram", "spotify_url", "image_path", "image_alt",
+         "facebook", "tiktok", "twitter", "youtube", "linkedin"),
+    ),
+    "community": KindSpec(
+        "community",
+        "communities",
+        "communities",
+        ("description", "website", "meeting_info", "image_path", "image_alt",
+         *_SOCIAL_FIELDS),
+    ),
+    "creator": KindSpec(
+        "creator",
+        "creators",
+        "creators",
+        ("bio", "website", "instagram", "youtube_url", "image_path", "image_alt",
+         "facebook", "tiktok", "twitter", "linkedin"),
     ),
 }
 
@@ -111,6 +133,13 @@ def apply(kind: str, queue_ids: list[int], *, use_firecrawl: bool = False,
             continue
 
         result = _research.research_url(research_url, use_firecrawl=use_firecrawl)
+        # YouTube is `youtube` on business/community/performer and `youtube_url`
+        # on creator (per the OpenAPI payload contracts). Mirror both spellings
+        # so the per-kind fillable tuple below picks up whichever it expects.
+        if "youtube" in result.payload:
+            result.payload.setdefault("youtube_url", result.payload["youtube"])
+        if "youtube_url" in result.payload:
+            result.payload.setdefault("youtube", result.payload["youtube_url"])
         merged = {}
         for key in spec.fillable:
             if not row.get(key) and result.payload.get(key):
@@ -181,6 +210,97 @@ def ship(kind: str, *, batch: int = 100, conn: sqlite3.Connection | None = None)
     return {"kind": kind, "shipped": len(shipped), "errors": errors}
 
 
+def resync_from_remote(kind: str, *, limit: int | None = None,
+                        conn: sqlite3.Connection | None = None) -> dict:
+    """Pull live TownLoops state for rows we've already shipped and copy remote
+    field values into the local row.
+
+    Fixes the enrichment overwrite risk: without this, `apply()` only writes
+    fields that are locally NULL, so if the operator edits a field directly
+    on TownLoops (via admin UI), the local row still looks blank and the next
+    sweep re-fills it (potentially with worse data) and PATCHes it back over
+    the operator edit. With resync, "local field is NULL" means "the field is
+    genuinely blank on TownLoops" — enrichment's fill-blanks-only semantics
+    are safe again.
+
+    Runs read-only against TownLoops (GET only), writes only to the local DB.
+    Only touches rows with a non-NULL townloops_slug (already shipped).
+    """
+    spec = SPECS[kind]
+    conn = conn or _db.connect()
+    tl = townloops_api.Client()
+
+    # Discover the local table's column set so we can copy any remote key
+    # that has a matching local column, without hardcoding a list.
+    local_cols = {r["name"] for r in conn.execute(
+        f"PRAGMA table_info({spec.table})"
+    ).fetchall()}
+    # Don't overwrite bookkeeping fields — only entity payload data.
+    protected = {"entity_uid", "content_hash", "pushed_at", "pushed_hash",
+                 "first_seen_at", "source", "source_kind", "source_url",
+                 "enrichment_status", "enriched_at", "extra_json",
+                 "last_seen_at", "last_modified_at", "townloops_slug"}
+    copyable = local_cols - protected
+
+    sql = f"SELECT entity_uid, townloops_slug FROM {spec.table} " \
+          f"WHERE townloops_slug IS NOT NULL ORDER BY entity_uid"
+    params: list = []
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
+
+    updated = 0
+    remote_missing = 0
+    errors: list[dict] = []
+    for row in rows:
+        slug = row["townloops_slug"]
+        try:
+            remote = tl.get(spec.resource, slug)
+        except townloops_api.TownloopsError as exc:
+            if exc.status == 404:
+                remote_missing += 1
+                continue
+            errors.append({"entity_uid": row["entity_uid"], "slug": slug,
+                           "code": exc.code, "msg": exc.message})
+            continue
+        if not isinstance(remote, dict):
+            errors.append({"entity_uid": row["entity_uid"], "slug": slug,
+                           "note": "remote shape not a dict"})
+            continue
+        # Build the update set: any copyable column whose remote value is
+        # non-None. We do NOT skip cols where local matches remote — that's
+        # a no-op UPDATE, cheap enough not to bother filtering.
+        updates = {k: remote[k] for k in copyable
+                   if k in remote and remote[k] is not None and remote[k] != ""}
+        if not updates:
+            continue
+        set_clause = ", ".join(f"{k} = ?" for k in updates)
+        with conn:
+            conn.execute(
+                f"UPDATE {spec.table} SET {set_clause}, "
+                f"last_modified_at = ? WHERE entity_uid = ?",
+                list(updates.values()) + [_now(), row["entity_uid"]],
+            )
+            # After resync, the local row now matches remote — recompute
+            # content_hash by treating the current row values as the source.
+            # Ship logic uses content_hash != pushed_hash to decide PATCH;
+            # aligning them here prevents a spurious PATCH round-trip.
+            conn.execute(
+                f"UPDATE {spec.table} SET pushed_hash = content_hash "
+                f"WHERE entity_uid = ? AND pushed_at IS NOT NULL",
+                (row["entity_uid"],),
+            )
+        updated += 1
+    return {
+        "kind": kind,
+        "scanned": len(rows),
+        "updated": updated,
+        "remote_missing_404": remote_missing,
+        "errors": errors,
+    }
+
+
 def enqueue(kind: str, entity_uid: str, conn: sqlite3.Connection | None = None) -> bool:
     """Idempotently push an entity onto the queue."""
     conn = conn or _db.connect()
@@ -193,6 +313,48 @@ def enqueue(kind: str, entity_uid: str, conn: sqlite3.Connection | None = None) 
         return True
     except sqlite3.IntegrityError:
         return False
+
+
+def sweep(kind: str, limit: int, *, use_firecrawl: bool = False,
+          conn: sqlite3.Connection | None = None) -> dict:
+    """Claim + apply in one call, guarded by an exclusive lock scoped to `kind`.
+
+    If a prior sweep of the same kind is still running, returns a `skipped`
+    result instead of piling on. This is the entry point cron should call.
+
+    Always includes the per-run Firecrawl meter (`firecrawl`) in the summary
+    so operators see when the invoice is climbing without correlating logs.
+    """
+    # Cross-town guard: fail-fast if $TOWNLOOPS_TOWN_SLUG doesn't match this
+    # deployment's categories snapshot (prevents writing to the wrong town's
+    # tables under a misconfigured env). Cached per-process, so cheap after
+    # the first call.
+    townloops_api.Client().verify_town()
+    lock_name = f"enrichment-{kind}"
+    stats_before = _research.firecrawl_stats()
+    try:
+        with _lock.acquire(lock_name):
+            ids = claim(kind, limit, conn=conn)
+            if not ids:
+                return {"kind": kind, "claimed": 0, "results": [],
+                        "queue_depth": queue_depth(kind, conn=conn),
+                        "firecrawl": _diff_stats(stats_before, _research.firecrawl_stats())}
+            results = apply(kind, ids, use_firecrawl=use_firecrawl, conn=conn)
+            return {"kind": kind, "claimed": len(ids), "results": results,
+                    "firecrawl": _diff_stats(stats_before, _research.firecrawl_stats())}
+    except _lock.LockHeld as e:
+        return {"kind": kind, "skipped": True, "reason": str(e),
+                "queue_depth": queue_depth(kind, conn=conn)}
+
+
+def _diff_stats(before: dict, after: dict) -> dict:
+    return {
+        "calls": after["calls"] - before["calls"],
+        "ok": after["ok"] - before["ok"],
+        "http_error": after["http_error"] - before["http_error"],
+        "network_error": after["network_error"] - before["network_error"],
+        "last_error": after["last_error"],
+    }
 
 
 def queue_depth(kind: str, conn: sqlite3.Connection | None = None) -> int:

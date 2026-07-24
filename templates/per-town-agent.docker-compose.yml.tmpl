@@ -1,0 +1,110 @@
+# Per-town townloops-agent — HARDENED for autonomous / YOLO mode.
+# =============================================================
+# Rendered per-town by `bin/townloops-agent-add {slug}` into
+# ~/townloops-agents/{slug}/docker-compose.yml.
+#
+# Prerequisites (both from templates/_shared/):
+#   - firecrawl stack up (creates external network `firecrawl-shared-net`)
+#   - egress   stack up (creates external network `egress-net` with squid)
+#
+# Differences vs the repo root docker-compose.yml (single-town bundled):
+#   - no `network_mode: host` — attaches to two well-known external nets
+#   - no /var/run/docker.sock mount
+#   - non-root user, read-only rootfs, tmpfs /tmp, cap_drop ALL
+#   - HTTP egress routed through Squid allowlist (env HTTP_PROXY/HTTPS_PROXY)
+#   - Listmonk reached via host.docker.internal (no host networking needed)
+#   - HERMES_YOLO_MODE=1 so cron ticks can act without approval prompts
+
+services:
+  agent:
+    build:
+      context: /home/aaron/workspace/townloops-agent
+      dockerfile: Dockerfile
+    image: townloops-agent:local
+    container_name: townloops-agent-{{SLUG}}
+    hostname: townloops-agent-{{SLUG}}
+    restart: unless-stopped
+    env_file:
+      - .env
+    working_dir: /app
+
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=256m
+      - /home/agent/.cache:size=64m
+      # Hermes runtime creates sessions/logs/hooks/memories/skins/plans/
+      # workspace/home under $HERMES_HOME on boot; rootfs is read-only, so
+      # give it a writable tmpfs at the parent. The bind mounts below
+      # (config, SOUL, skills, cron, state, town-profile, .codex) layer on
+      # top of this tmpfs.
+      - /home/agent/.hermes:size=256m,uid=1000,gid=1000
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+    environment:
+      HERMES_HOME: /home/agent/.hermes
+      PYTHONPATH: /app
+      # Autonomous / dangerous mode — cron ticks must not sit at prompts.
+      HERMES_YOLO_MODE: "1"
+      # Per-town identity — stamps _worker_tag() output and orchestrator logs.
+      # Overridable via .env if you're running two boxes for the same town.
+      TOWNLOOPS_AGENT_HOSTNAME: townloops-agent-{{SLUG}}
+      # In-network Firecrawl reachable by shared-stack DNS; bypasses proxy.
+      FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl-api:3002}
+      # Listmonk on the host (self-hosted) — reachable via host.docker.internal.
+      LISTMONK_URL: ${LISTMONK_URL:-http://host.docker.internal:9090}
+      # All *other* HTTP egress goes via Squid allowlist.
+      HTTP_PROXY:  http://squid.egress-net:3128
+      HTTPS_PROXY: http://squid.egress-net:3128
+      NO_PROXY:    firecrawl-api,firecrawl-api-1,localhost,127.0.0.1,host.docker.internal
+      # Profile loader defaults to $HERMES_HOME/../town-profile.yaml. We
+      # mount the profile under .hermes/ for container-file locality, so
+      # point the loader at where it actually lives.
+      TOWN_PROFILE_PATH: /home/agent/.hermes/town-profile.yaml
+
+    depends_on: []
+
+    networks:
+      - firecrawl-shared-net
+      - egress-net
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+    volumes:
+      # Repo mounted read-only by absolute path. `git pull` on the repo
+      # updates every per-town stack on next `docker compose up -d`.
+      - /home/aaron/workspace/townloops-agent/skills/business:/home/agent/.hermes/skills/business:ro
+      - /home/aaron/workspace/townloops-agent/config.yaml:/home/agent/.hermes/config.yaml:ro
+      - /home/aaron/workspace/townloops-agent/SOUL.md:/home/agent/.hermes/SOUL.md:ro
+      - /home/aaron/workspace/townloops-agent/engine:/app/engine:ro
+      # Per-town cron file lives in this per-town dir so a follower can
+      # bind an empty jobs.json without changing the shared repo. RW —
+      # Hermes needs to create cron/output/ and write next_run/last_run
+      # state back into jobs.json when the scheduler advances.
+      - ./cron:/home/agent/.hermes/cron:rw
+      # State is writable — SQLite DB, categories snapshot, locks, drafts.
+      - ./state:/home/agent/.hermes/state
+      # Per-town profile — read by discovery skills for seed URLs + terms.
+      - ./town-profile.yaml:/home/agent/.hermes/town-profile.yaml:ro
+      # OpenAI Codex CLI session auth. RW so the CLI can refresh tokens
+      # in-container. Same trust boundary as the TownLoops bearer in .env
+      # — do not mount for containers you wouldn't trust with either.
+      - /home/aaron/.codex:/home/agent/.codex:rw
+
+    command: python -m hermes_cli.main gateway run --replace
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+
+networks:
+  firecrawl-shared-net:
+    external: true
+  egress-net:
+    external: true

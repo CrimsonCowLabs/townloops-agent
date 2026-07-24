@@ -6,7 +6,15 @@ drafts-DB plumbing is intentionally omitted; consumers here are the
 enrichment skills (venue/business/performer) that manage their own queues.
 
 Env:
-  FIRECRAWL_API_KEY  optional; falls back to plain requests when absent
+  FIRECRAWL_API_KEY  cloud bearer (or self-hosted bearer if the instance
+                     validates keys). Optional when FIRECRAWL_API_URL is set —
+                     a placeholder bearer is sent so self-hosted requests
+                     satisfy the schema.
+  FIRECRAWL_API_URL  base URL (no /v1). Default: https://api.firecrawl.dev.
+                     Set to e.g. http://localhost:8302 for self-hosted.
+                     Also unblocks firecrawl_fetch when no API key is set.
+  When both are missing, firecrawl_fetch returns (None, None) and consumers
+  fall back to plain requests via research_url()'s degrade path.
 """
 
 from __future__ import annotations
@@ -20,8 +28,35 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from engine.log import get_logger
+
+log = get_logger("research")
+
 
 UA = "townloops-agent/1.0 (+https://townloops.com)"
+FIRECRAWL_DEFAULT_BASE = "https://api.firecrawl.dev"
+
+
+class FirecrawlAuthError(RuntimeError):
+    """Raised on 401/403 — the API key is bad; retrying won't help. Fatal."""
+
+
+# Per-process meter. Read via firecrawl_stats(); skills print it in their
+# sweep summaries so operators see when the invoice is climbing.
+_STATS = {"calls": 0, "ok": 0, "http_error": 0, "network_error": 0, "last_error": None}
+
+
+def firecrawl_stats() -> dict:
+    return dict(_STATS)
+
+
+def _firecrawl_base() -> str:
+    """Base URL. Honors $FIRECRAWL_API_URL for self-hosted; strips a trailing /v1
+    since we always append /v1/... ourselves."""
+    raw = (os.environ.get("FIRECRAWL_API_URL") or FIRECRAWL_DEFAULT_BASE).rstrip("/")
+    if raw.endswith("/v1"):
+        raw = raw[:-3]
+    return raw
 
 
 @dataclass
@@ -48,22 +83,69 @@ def fetch_html(url: str, timeout: float = 20.0) -> tuple[Optional[str], Optional
 
 
 def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
-    """Firecrawl fallback for JS-heavy or bot-blocked pages."""
-    key = os.environ.get("FIRECRAWL_API_KEY")
-    if not key:
+    """Firecrawl fallback for JS-heavy or bot-blocked pages.
+
+    Returns (html, final_url) on success, (None, None) on failure.
+    Increments the module-level meter regardless. Logs every non-2xx to
+    stderr so a rotated/wrong API key doesn't silently drain the invoice.
+    Raises FirecrawlAuthError on 401/403 — the caller should escalate,
+    not silently degrade for the rest of the sweep.
+    """
+    # 2026-07-10: honor self-hosted mode when FIRECRAWL_API_URL is set — the
+    # docstring above always said "optional; falls back to plain requests",
+    # but the old key check silently no-op'd for self-hosted deployments too.
+    # Now: real key takes priority; otherwise, if URL is set (self-hosted),
+    # send a placeholder bearer that satisfies Firecrawl's schema. Only both-
+    # missing is a real "not configured" state.
+    key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
+    self_hosted = bool((os.environ.get("FIRECRAWL_API_URL") or "").strip())
+    if not key and not self_hosted:
+        _STATS["http_error"] += 1
+        _STATS["last_error"] = "FIRECRAWL_API_KEY not set and no FIRECRAWL_API_URL"
         return None, None
+    _STATS["calls"] += 1
+    endpoint = f"{_firecrawl_base()}/v1/scrape"
+    bearer = key or "self-hosted"
     try:
         r = requests.post(
-            "https://api.firecrawl.dev/v1/scrape",
+            endpoint,
             json={"url": url, "formats": ["html"]},
-            headers={"Authorization": f"Bearer {key}"},
+            headers={"Authorization": f"Bearer {bearer}"},
             timeout=45,
         )
-    except requests.RequestException:
+    except requests.RequestException as exc:
+        _STATS["network_error"] += 1
+        _STATS["last_error"] = f"{type(exc).__name__}: {exc}"
+        log.warning("firecrawl network error",
+                     extra={"endpoint": endpoint, "target": url,
+                            "err_kind": type(exc).__name__, "err": str(exc)})
         return None, None
+    if r.status_code in (401, 403):
+        _STATS["http_error"] += 1
+        _STATS["last_error"] = f"{r.status_code}: {r.text[:200]}"
+        log.error("firecrawl auth rejected",
+                   extra={"endpoint": endpoint, "http_status": r.status_code,
+                          "body_sample": r.text[:200]})
+        raise FirecrawlAuthError(
+            f"Firecrawl rejected the API key (HTTP {r.status_code}): {r.text[:200]}"
+        )
     if r.status_code >= 400:
+        _STATS["http_error"] += 1
+        _STATS["last_error"] = f"{r.status_code}: {r.text[:200]}"
+        log.warning("firecrawl http error",
+                     extra={"endpoint": endpoint, "target": url,
+                            "http_status": r.status_code,
+                            "body_sample": r.text[:200]})
         return None, None
-    data = r.json().get("data", {})
+    _STATS["ok"] += 1
+    try:
+        data = r.json().get("data", {})
+    except ValueError:
+        _STATS["http_error"] += 1
+        _STATS["last_error"] = "non-JSON 2xx body"
+        log.warning("firecrawl non-JSON 2xx",
+                     extra={"endpoint": endpoint, "target": url})
+        return None, None
     return data.get("html"), url
 
 
@@ -267,13 +349,37 @@ def research_url(url: str, *, use_firecrawl: bool = False) -> ResearchResult:
     return result
 
 
+# Maps a sameAs URL's hostname to the payload field name it fills. Keys are
+# lowercased; both bare and www-prefixed variants are listed so we don't have
+# to normalize on every lookup.
+#
+# Note the two YouTube keys: `youtube_url` is what the creator payload uses,
+# `youtube` is what business/community/performer use. Callers write to the
+# correct field per kind — this map is a superset containing both spellings.
+# _fill_from_ldjson only writes the first-seen key, so we keep both here and
+# let per-kind post-processing pick the right one when both spellings exist
+# on the target row.
 _SOCIAL_HOSTS = {
     "instagram.com": "instagram",
     "www.instagram.com": "instagram",
+    "facebook.com": "facebook",
+    "www.facebook.com": "facebook",
+    "m.facebook.com": "facebook",
+    "tiktok.com": "tiktok",
+    "www.tiktok.com": "tiktok",
+    "twitter.com": "twitter",
+    "www.twitter.com": "twitter",
+    "x.com": "twitter",
+    "www.x.com": "twitter",
+    "linkedin.com": "linkedin",
+    "www.linkedin.com": "linkedin",
     "spotify.com": "spotify_url",
     "open.spotify.com": "spotify_url",
-    "youtube.com": "youtube_url",
-    "www.youtube.com": "youtube_url",
+    # Bare `youtube`, per the current payload spec for business/community/performer.
+    # Creator wants `youtube_url`; enrichment SPECS handle the split at fill-time.
+    "youtube.com": "youtube",
+    "www.youtube.com": "youtube",
+    "youtu.be": "youtube",
 }
 
 

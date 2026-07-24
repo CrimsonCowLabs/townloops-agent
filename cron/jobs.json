@@ -2,12 +2,31 @@
   "version": 1,
   "jobs": [
     {
+      "id": "onboarding-tick",
+      "name": "Onboarding orchestrator tick (hourly; no-op after steady_state)",
+      "schedule": "0 * * * *",
+      "skills": ["onboarding-orchestrator"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/onboarding-orchestrator/orchestrate.py tick"
+    },
+    {
+      "id": "api-check",
+      "name": "Daily TownLoops OpenAPI snapshot + breaking-change check",
+      "schedule": "15 4 * * *",
+      "skills": ["townloops-api"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/townloops-api/api.py check"
+    },
+    {
       "id": "event-collect-am",
       "name": "Morning event ingest + ship",
       "schedule": "0 6 * * *",
       "skills": ["event-ingest"],
       "deliver": "local",
-      "prompt": "Run the morning event pipeline. (1) `python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest` — pull every configured source into state/townloops.db. Per-source failures must not abort the run. (2) `python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship` — POST/PATCH deltas to TownLoops. Emit a one-line JSON status with per-source and per-kind counts. Do NOT contact the operator unless a hard credential failure occurs."
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
     },
     {
       "id": "enrichment-sweep",
@@ -15,7 +34,8 @@
       "schedule": "0 9 * * *",
       "skills": ["venue-enrichment", "business-enrichment", "performer-enrichment"],
       "deliver": "local",
-      "prompt": "Run the enrichment sweep. In sequence, execute: `venue-enrichment/enrich.py sweep --limit 20 --firecrawl`, then `venue-enrichment/enrich.py ship`, then the same pair for `business-enrichment` and `performer-enrichment`. Any single kind's failure must not stop the others. Emit a one-line JSON status with per-kind (claimed, filled, shipped, errors)."
+      "no_agent": true,
+      "prompt": "for k in venue business performer; do python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py sweep --limit 20 --firecrawl && python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py ship; done"
     },
     {
       "id": "event-collect-pm",
@@ -23,7 +43,17 @@
       "schedule": "0 18 * * *",
       "skills": ["event-ingest"],
       "deliver": "local",
-      "prompt": "Same as event-collect-am. Run ingest then ship; emit a one-line JSON status."
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
+    },
+    {
+      "id": "discovery-resweep-weekly",
+      "name": "Weekly discovery resweep (steady state; picks up new listings)",
+      "schedule": "0 4 * * 1",
+      "skills": ["business-discovery", "community-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/business-discovery/discover.py sweep && python /home/agent/.hermes/skills/business/community-discovery/discover.py sweep"
     },
     {
       "id": "newsletter-compose",

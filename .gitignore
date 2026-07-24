@@ -9,3 +9,11 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+.pytest_cache/
+
+# Per-host compose overrides — leader/follower cron split, hostname stamp,
+# etc. See README "Second instance / failover". These stay per-host and
+# never enter git.
+docker-compose.override.yml
+docker-compose.override.yaml
+cron/jobs.empty.json

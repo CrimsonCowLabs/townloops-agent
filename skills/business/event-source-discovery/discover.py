@@ -150,6 +150,88 @@ def cmd_approve(args) -> int:
     return 0
 
 
+def cmd_auto_approve(args) -> int:
+    """Auto-approve candidates whose probe returned a canonical feed AND
+    whose host is on `town-profile.yaml → allowed_hosts`.
+
+    Gated by env `AUTO_APPROVE_EVENT_SOURCES=1` — refuses to run otherwise,
+    so accidental invocations from an interactive session are no-ops.
+
+    Written for the orchestrator's `discovering` phase — after `probe`
+    flips candidates to `needs_review`, this immediately advances them to
+    `approved` when the source is trustworthy (host allowlist + a real feed
+    parser). Non-allowlisted or firecrawl-only candidates stay as
+    `needs_review` for later operator inspection.
+    """
+    if os.environ.get("AUTO_APPROVE_EVENT_SOURCES", "").strip() != "1":
+        print(json.dumps({"skipped": "AUTO_APPROVE_EVENT_SOURCES != 1"}))
+        return 0
+
+    profile_path = Path(os.environ.get(
+        "TOWN_PROFILE_PATH",
+        HERMES_HOME.parent / "town-profile.yaml",
+    ))
+    allowed_hosts: set[str] = set()
+    if profile_path.exists():
+        try:
+            data = yaml.safe_load(profile_path.read_text()) or {}
+            for h in (data.get("allowed_hosts") or []):
+                if isinstance(h, str):
+                    allowed_hosts.add(h.lower().lstrip("."))
+        except (OSError, yaml.YAMLError):
+            pass
+    if not allowed_hosts:
+        print(json.dumps({"skipped": "town-profile.yaml has empty allowed_hosts"}))
+        return 0
+
+    conn = _connect()
+    rows = conn.execute(
+        """
+        SELECT c.url, p.ical_url, p.rss_url, p.jsonld_events
+        FROM candidates c
+        JOIN probes p ON p.url = c.url
+        WHERE c.status = 'needs_review'
+        """
+    ).fetchall()
+
+    approved = 0
+    skipped_host = 0
+    skipped_no_feed = 0
+    for r in rows:
+        host = (urlparse(r["url"]).netloc or "").lower().lstrip("www.")
+        host_allowed = any(host == a or host.endswith("." + a) for a in allowed_hosts)
+        if not host_allowed:
+            skipped_host += 1
+            continue
+        # Pick a parser from the probe; only canonical formats qualify.
+        parser = None
+        feed = None
+        if r["ical_url"]:
+            parser, feed = "ical", r["ical_url"]
+        elif r["jsonld_events"]:
+            parser, feed = "jsonld", r["url"]
+        elif r["rss_url"]:
+            parser, feed = "rss", r["rss_url"]
+        if not parser:
+            skipped_no_feed += 1
+            continue
+        conn.execute(
+            "UPDATE candidates SET status='approved', approved_feed_url=?, "
+            "approved_parser=? WHERE url = ?",
+            (feed, parser, r["url"]),
+        )
+        approved += 1
+    conn.commit()
+
+    print(json.dumps({
+        "approved": approved,
+        "skipped_host_not_allowed": skipped_host,
+        "skipped_no_canonical_feed": skipped_no_feed,
+        "processed": len(rows),
+    }))
+    return 0
+
+
 def cmd_reject(args) -> int:
     conn = _connect()
     conn.execute(
@@ -350,6 +432,14 @@ def main() -> int:
     rj.add_argument("url")
     rj.add_argument("--reason")
     rj.set_defaults(func=cmd_reject)
+
+    aa = sub.add_parser(
+        "auto-approve",
+        help="auto-approve needs_review rows whose host is in "
+             "town-profile.yaml.allowed_hosts AND that surface a canonical feed. "
+             "Gated by AUTO_APPROVE_EVENT_SOURCES=1.",
+    )
+    aa.set_defaults(func=cmd_auto_approve)
 
     pb = sub.add_parser("probe", help="probe candidates for iCal / JSON-LD / RSS")
     pb.add_argument("--limit", type=int)

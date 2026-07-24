@@ -1,0 +1,112 @@
+# Shared Firecrawl stack — brought up ONCE for the whole host.
+# All per-town townloops-agent stacks attach to the `firecrawl-shared-net`
+# external network created here and reach the API at `firecrawl-api:3002`.
+#
+# Extracted from the repo root docker-compose.yml (single-town bundled)
+# for the multi-town model — one Firecrawl instance serves every town's
+# discovery + enrichment sweeps rather than duplicating the 5-container
+# stack per town.
+#
+# Bring up:  docker compose -f templates/_shared/firecrawl/docker-compose.yml up -d
+# Health:    docker compose ps  (all 5 must be Up)
+# Access:    from any container on firecrawl-shared-net → http://firecrawl-api:3002
+#            from the host (debugging)                    → http://127.0.0.1:8302
+
+services:
+  firecrawl-api:
+    image: ghcr.io/firecrawl/firecrawl:latest
+    container_name: firecrawl-api
+    restart: unless-stopped
+    ulimits:
+      nofile: { soft: 65535, hard: 65535 }
+    networks:
+      - firecrawl-shared-net
+    depends_on:
+      firecrawl-redis:
+        condition: service_started
+      firecrawl-playwright:
+        condition: service_started
+      firecrawl-rabbitmq:
+        condition: service_healthy
+    environment:
+      HOST: "0.0.0.0"
+      PORT: 3002
+      INTERNAL_PORT: 3002
+      EXTRACT_WORKER_PORT: 3004
+      WORKER_PORT: 3005
+      REDIS_URL: redis://firecrawl-redis:6379
+      REDIS_RATE_LIMIT_URL: redis://firecrawl-redis:6379
+      PLAYWRIGHT_MICROSERVICE_URL: http://firecrawl-playwright:3000/scrape
+      POSTGRES_HOST: firecrawl-postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${FIRECRAWL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${FIRECRAWL_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${FIRECRAWL_POSTGRES_DB:-postgres}
+      USE_DB_AUTHENTICATION: ${FIRECRAWL_USE_DB_AUTHENTICATION:-false}
+      NUM_WORKERS_PER_QUEUE: ${FIRECRAWL_NUM_WORKERS_PER_QUEUE:-8}
+      CRAWL_CONCURRENT_REQUESTS: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS:-10}
+      MAX_CONCURRENT_JOBS: ${FIRECRAWL_MAX_CONCURRENT_JOBS:-5}
+      BROWSER_POOL_SIZE: ${FIRECRAWL_BROWSER_POOL_SIZE:-5}
+      LOGGING_LEVEL: ${FIRECRAWL_LOGGING_LEVEL:-info}
+      BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY:-}
+      NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      ENV: local
+    ports:
+      - "127.0.0.1:8302:3002"
+    command: node dist/src/harness.js --start-docker
+
+  firecrawl-playwright:
+    image: ghcr.io/firecrawl/playwright-service:latest
+    container_name: firecrawl-playwright
+    restart: unless-stopped
+    networks:
+      - firecrawl-shared-net
+    environment:
+      PORT: 3000
+      MAX_CONCURRENT_PAGES: ${FIRECRAWL_CRAWL_CONCURRENT_REQUESTS:-10}
+    tmpfs:
+      - /tmp/.cache:noexec,nosuid,size=1g
+    cpus: 2.0
+    mem_limit: 4G
+
+  firecrawl-redis:
+    image: redis:alpine
+    container_name: firecrawl-redis
+    restart: unless-stopped
+    networks:
+      - firecrawl-shared-net
+    command: redis-server --bind 0.0.0.0
+
+  firecrawl-rabbitmq:
+    image: rabbitmq:3-management
+    container_name: firecrawl-rabbitmq
+    restart: unless-stopped
+    networks:
+      - firecrawl-shared-net
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "check_running"]
+      interval: 5s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+
+  firecrawl-postgres:
+    image: ghcr.io/firecrawl/nuq-postgres:latest
+    container_name: firecrawl-postgres
+    restart: unless-stopped
+    networks:
+      - firecrawl-shared-net
+    environment:
+      POSTGRES_USER: ${FIRECRAWL_POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${FIRECRAWL_POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${FIRECRAWL_POSTGRES_DB:-postgres}
+    volumes:
+      - firecrawl-postgres-data:/var/lib/postgresql/data
+
+networks:
+  firecrawl-shared-net:
+    driver: bridge
+    name: firecrawl-shared-net
+
+volumes:
+  firecrawl-postgres-data:

@@ -1,0 +1,29 @@
+# Egress allowlist for per-town townloops-agent stacks.
+# =====================================================
+# Per-town agents set HTTP_PROXY / HTTPS_PROXY to `http://squid.egress-net:3128`.
+# Squid's allowlist (squid.conf) restricts CONNECT to a small set of hosts
+# the agent legitimately needs (Anthropic, TownLoops, Telegram, Listmonk,
+# Firecrawl cloud fallback, and per-town allowed_hosts from the profile).
+#
+# The container itself is intentionally simple — squid, plain config, no
+# TLS interception, no logging beyond stderr. If you add capabilities to
+# the agent, extend squid.conf here.
+#
+# Bring up: docker compose -f templates/_shared/egress/docker-compose.yml up -d
+
+services:
+  squid:
+    image: ubuntu/squid:latest
+    container_name: squid-egress
+    hostname: squid
+    restart: unless-stopped
+    networks:
+      - egress-net
+    volumes:
+      - ./squid.conf:/etc/squid/squid.conf:ro
+    # No ports published — reachable only from egress-net.
+
+networks:
+  egress-net:
+    driver: bridge
+    name: egress-net

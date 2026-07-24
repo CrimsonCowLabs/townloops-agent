@@ -1,0 +1,64 @@
+# Per-town profile — read by the discovery skills and the orchestrator.
+# Place at ~/townloops-agents/{slug}/town-profile.yaml.
+
+slug:   "{{SLUG}}"
+name:   "PLACEHOLDER — the town's display name, e.g. \"South Lake Tahoe\""
+region: "PLACEHOLDER — state/province, e.g. \"California\""
+
+# Hosts the agent may talk to for discovery / seed scrapes. Also feeds
+# event-source-discovery auto-approve (only sources on this list get
+# auto-approved) AND the Squid egress allowlist per §_shared/egress/squid.conf.
+# Add carefully — every entry is an implicit trust decision.
+allowed_hosts:
+  - "example-chamber.org"
+  - "visitexample.com"
+
+discovery:
+  # Business sweeps: category-based web-search + directory scrapes.
+  business:
+    # Free-form terms fanned out as `{term} in {name}, {region}` /
+    # `best {term} {name}` / `local {term} {name}`. Draw from the
+    # town's live business categories, adjusted for local vocab.
+    category_query_terms:
+      - "restaurants"
+      - "coffee shops"
+      - "outfitters"
+      - "boutiques"
+    # Seed directory pages whose outbound links are candidate businesses.
+    # Blocked link classes (site utilities, PDFs, generic section pages)
+    # are filtered by engine/discovery.directory_link_block_reason.
+    seed_directories:
+      - "https://visitexample.com/things-to-do/"
+    # Optional Facebook page search — `site:facebook.com "{town}" {term}`.
+    # Comment out to skip the Facebook source entirely.
+    # facebook_terms: ["cafe", "brewery"]
+
+  # Community sweeps: nonprofit + city gov + civic-org fanout.
+  # Each query_group's terms are tagged with the group's category_slug so
+  # the promotion step files each candidate under the right category. The
+  # slugs must exist in the town's live categories snapshot (municipal,
+  # nonprofit, community-group, …) — see engine/policy.has_category.
+  community:
+    query_groups:
+      - category_slug: "municipal"
+        terms:
+          - "city government"
+          - "town hall"
+          - "city council"
+          - "chamber of commerce"
+      - category_slug: "nonprofit"
+        terms:
+          - "nonprofit organizations"
+          - "501c3"
+          - "foundation"
+      - category_slug: "community-group"
+        terms:
+          - "civic organizations"
+          - "community association"
+    seed_directories: []
+
+# Optional overrides for engine/policy caps. Omit for defaults
+# (businesses=30/day, venues=15, communities=15, performers=15, creators=15).
+# post_caps:
+#   businesses: 20
+#   communities: 10
