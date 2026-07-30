@@ -62,6 +62,10 @@ services:
       - ./SOUL.md:/home/agent/.hermes/SOUL.md:ro
       - ./cron:/home/agent/.hermes/cron:ro
       - ./engine:/app/engine:ro
+      # Cron wrappers referenced by cron/jobs.json (workqueue-heartbeat,
+      # nightly-digest). Mounted alongside engine on PYTHONPATH=/app so their
+      # `from engine import ...` resolves.
+      - ./scripts:/app/scripts:ro
       - ./state:/home/agent/.hermes/state
     command: python -m hermes_cli.main gateway run --replace
 

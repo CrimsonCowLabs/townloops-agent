@@ -1,6 +1,6 @@
 # townloops-agent
 
-A standalone Hermes agent that runs the ongoing operations of a single TownLoops town: event ingest, entity enrichment, weekly Listmonk newsletter, and (once endpoints ship) sponsor / ad-spot management.
+A standalone Hermes agent that runs the ongoing operations of a single TownLoops town: event seed discovery → find → derive/enrich venues, hosts, and people → ship to TownLoops, plus a weekly Listmonk newsletter and sponsor / ad-spot management.
 
 > **Running this on a VPS and don't want to read code?** Start with
 > **[docs/vps-quickstart.md](docs/vps-quickstart.md)** — a plain-English,
@@ -30,7 +30,7 @@ docker-compose logs -f agent
 
 The first successful boot runs `town-init setup` automatically (verifies credentials, snapshots category taxonomy, migrates the state DB).
 
-The taxonomy classifier (`entity-research`) uses **your ChatGPT account via the OpenAI Codex CLI** — no separate API key. Run `codex login` on the host once; the per-town compose mounts `~/.codex` into the container so tokens can refresh. If the CLI is missing or throttled, classifier calls no-op and are retried on the next hourly orchestrator tick.
+The LLM steps (`event-seed-discovery`, `event-find`) use **your ChatGPT account via the OpenAI Codex CLI** — no separate API key. Run `codex login` on the host once; the per-town compose mounts `~/.codex` into the container so tokens can refresh. If the CLI is missing or throttled, those calls no-op and are retried on the next scheduled run.
 
 ## Operator dashboard
 
@@ -48,12 +48,13 @@ docker compose up -d dashboard
 open http://127.0.0.1:8090              # log in with the plaintext password
 ```
 
-What the dashboard covers:
-- **Overview** — phase, tick count, LLM health, per-kind entity counts, source-run stats. Force-tick, sweep, and nightly-digest buttons.
-- **Candidates** — filter/paginate `discovery_candidates`; approve/reject inline via htmx. Bulk-approve all new candidates from a given source signal (fixes the 50-row-click problem).
-- **Entities** — read-only view of businesses/venues/communities/performers/creators with `pushed_at` timestamps.
-- **Sources** — event sources with approve action.
-- **Newsletter** — preview current-week HTML draft (sandboxed iframe); "Push to Listmonk" with `yes-push-live` typed-confirmation.
+The dashboard has two views:
+
+- **`/v2` — event-first (current).** Workqueue depth, event counts by approval/state, in-flight/shipped/stuck panels, seed approval (proposed → approved), per-event approve/decline, "Run event-find" / "Discover seeds" / requeue actions, and the **Hermes chat panel** (talks to the agent over `/v1/chat/completions`; renders Confirm widgets for bulk approve/decline — see `SOUL.md` §"Operator chat").
+- **`/` — legacy entity-first.** Overview, Candidates, Entities, Sources — still mounted for the older discovery flow.
+
+Shared panels:
+- **Newsletter** — preview current-week HTML draft (sandboxed iframe); "Push to Listmonk" with typed confirmation.
 - **Reports** — renders nightly-digest markdown files as HTML.
 - **Blocked** — squid egress log tail, grouped by denied host → guides which domains to add to `allowed_hosts` + the squid ACL.
 
@@ -64,15 +65,14 @@ Auth is single-password bcrypt with a signed session cookie (`HttpOnly`, `SameSi
 If `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USERS` are set in `.env`, the Hermes gateway registers each skill as a slash command. From your phone:
 
 ```
-/onboarding-orchestrator status     — current phase + tick count
-/onboarding-orchestrator tick       — force a tick
-/onboarding-orchestrator summary    — nightly digest on demand
+/operator-status                    — event / seed / workqueue counts
+/operator-list-events --status pending
+/onboarding-orchestrator tick       — force a workqueue drain
+/event-seed-discovery --show        — current seeds
 /newsletter-weekly show             — see this week's draft
-/business-discovery list --status new
-/event-source-discovery approve <host>
 ```
 
-The agent also **outbound-Telegrams** on: phase transitions, LLM healthy↔throttled flips, and the nightly digest (21:00 UTC).
+The agent also **outbound-Telegrams** on: shipped-event cycles, LLM healthy↔throttled flips, and the nightly digest.
 
 ### Without Docker
 
@@ -87,18 +87,52 @@ You must also `pip install jinja2 requests pyyaml firecrawl-py` into the interpr
 
 ## Skills
 
+The event pipeline is **event-first**: a per-event state machine
+(`found → metadata-extracted → approved → venue-derived → hosts-derived →
+people-derived → entities-enriched → shipped`) drained by a workqueue
+heartbeat. Each state transition is one skill invoked with `--event-uid`.
+See `engine/event_state.py` for the machine and `docs/skill-inventory.md`
+for the full catalog + CLI invocations.
+
+**Event-first pipeline (seed-driven, LLM):**
+
+| Skill | Workqueue action | Purpose |
+|---|---|---|
+| `event-seed-discovery` | — | LLM proposes seed source URLs (chamber, city, library, venues) → `event_seeds` for operator approval. |
+| `event-find` | — | Scrape every approved seed, LLM-extract events → land at `metadata-extracted / pending`. |
+| `event-derive-venue` | `extract-venue` | Match or create a shell `venues` row from the event's venue signal. |
+| `event-derive-hosts` | `extract-hosts` | Identify the hosting business/community (NULL is legit). |
+| `event-derive-people` | `extract-people` | Extract performers/creators referenced in the event. |
+| `event-enrich-entities` | `enrich-entities` | Fill NULL entity fields (v1: pass-through marker). |
+| `event-ship` | `ship` | POST derived entities then the event to TownLoops (venue → host → people → event). |
+
+**Legacy structured-source pipeline (LLM-free, `sources.yaml`):**
+
+| Skill | Purpose |
+|---|---|
+| `event-ingest` | Parse configured feeds (iCal/JSON-LD/RSS/HTML/Firecrawl), mine venues/businesses/communities/performers/creators, dedupe, POST/PATCH deltas to TownLoops. Fork of SLT's aggregator; see `docs/fork-extraction.md`. |
+
+**Operator (dashboard chat + Telegram):**
+
+| Skill | Purpose |
+|---|---|
+| `operator-status` | Headline event / seed / workqueue counts. |
+| `operator-list-events` | Filtered event listing (status / date / source). |
+| `operator-review-event` | Fuzzy single-event lookup by title / venue / uid prefix. |
+| `operator-bulk-approve` / `operator-bulk-decline` | **Propose** a mass approve/decline — read-only; execution requires a dashboard Confirm widget (see `SOUL.md` §"Operator chat"). |
+| `operator-requeue` | Reset one stuck workqueue row so the heartbeat retries it. |
+
+**Platform, newsletter & sponsors:**
+
 | Skill | Purpose |
 |---|---|
 | `town-init` | Bootstrap: verify keys, snapshot categories, migrate SQLite. |
-| `event-source-discovery` | Build the town's `sources.yaml` — search → probe → review → compile. |
-| `event-ingest` | Fetch feeds, mine venues/businesses/performers, POST/PATCH to TownLoops. |
-| `venue-enrichment` | Web-research thin venues to fill address/phone/website/image. |
-| `business-enrichment` | Same, for businesses (seeded from venue research + manual adds). |
-| `performer-enrichment` | Same, for performers (bio, spotify, socials). |
-| `newsletter-weekly` | Compose weekly HTML campaign, push to Listmonk. |
-| `sponsor-management` | CRUD sponsors + ad_spots. Disabled until TownLoops endpoints ship. |
+| `townloops-api` | Snapshot + breaking-change check of the TownLoops OpenAPI; freeze frozen resources; read-through queries. |
+| `onboarding-orchestrator` | `tick` now drains the workqueue (legacy phase-machine names retained for compat). |
+| `newsletter-weekly` | Compose weekly HTML campaign, push to Listmonk (operator-gated). |
+| `sponsor-management` | CRUD sponsors + ad_spots. Live against TownLoops endpoints; gated by `SPONSORS_ENABLED`. |
 
-See `docs/skill-inventory.md` for the full skill catalog and CLI invocations.
+**Scheduled runs** (`cron/jobs.json`, all `no_agent` unless noted): `workqueue-heartbeat` drains the per-event derive/enrich/ship queue every 10 min; `event-find-am/pm` scrape approved seeds at 06:00/18:00; `event-seed-discovery-weekly` (Sun 04:00) proposes new seeds; `api-check` (04:15) snapshots the OpenAPI contract; `nightly-digest` (21:00) reports event/workqueue state; and the LLM-backed `newsletter-compose` (Sun 08:00), `newsletter-push-reminder` (Sun 20:00), and `sponsor-audit` (Mon 10:00) deliver over Telegram. The engine-level jobs run the cron wrappers under `scripts/` (mounted at `/app/scripts` in `docker-compose.yml`); those same wrappers (`workqueue_heartbeat.py`, `onboarding_summary.py`, `event_find.py`, `event_seed_discovery.py`) are also the standalone entrypoints for non-cron / bare-systemd use.
 
 ## Tests
 
@@ -108,9 +142,9 @@ Run the suite from the repo root:
 pytest
 ```
 
-178 tests covering `engine/` — db migrations, ingest_core parsers, townloops_api client, enrichment state machine, research heuristics, lock contention. All in-process, no network, ~3s wall-clock. See `docs/STATUS.md` § "Test suite" for the coverage map.
+~250 tests covering `engine/` — db migrations, event state machine, workqueue claim/rate-limiting, ingest_core parsers, townloops_api client, enrichment, research heuristics, lock contention. All in-process, no network, ~3s wall-clock.
 
-**Note**: proactive web sweeps for new businesses in a town live on the CMO Hermes at `~/.hermes/skills/business/townloops-business-discovery/`, not in this repo. This repo's `business-enrichment` skill only fills details on existing rows. See `docs/STATUS.md` § "Business discovery" for the split.
+**Note**: proactive web sweeps for new businesses in a town live on the CMO Hermes at `~/.hermes/skills/business/townloops-business-discovery/`, not in this repo. This repo only mines/derives entities as an event side-effect (`event-ingest`, `event-derive-*`) and fills their details (`event-enrich-entities`); it does not scan the web for new discoverable businesses. See `docs/STATUS.md` § "Business discovery" for the split.
 
 ## Sponsors
 

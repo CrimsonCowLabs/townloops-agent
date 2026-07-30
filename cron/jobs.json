@@ -2,13 +2,40 @@
   "version": 1,
   "jobs": [
     {
-      "id": "onboarding-tick",
-      "name": "Onboarding orchestrator tick (hourly; no-op after steady_state)",
-      "schedule": "0 * * * *",
-      "skills": ["onboarding-orchestrator"],
+      "id": "workqueue-heartbeat",
+      "name": "Event-first workqueue drain (every 10 min; per-event derive/enrich/ship)",
+      "schedule": "*/10 * * * *",
+      "skills": ["event-derive-venue", "event-derive-hosts", "event-derive-people", "event-enrich-entities", "event-ship"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/onboarding-orchestrator/orchestrate.py tick"
+      "prompt": "python /app/scripts/workqueue_heartbeat.py"
+    },
+    {
+      "id": "event-find-am",
+      "name": "Morning event-find (scrape approved seeds, LLM-extract → pending)",
+      "schedule": "0 6 * * *",
+      "skills": ["event-find"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-find/find.py"
+    },
+    {
+      "id": "event-find-pm",
+      "name": "Evening event-find (scrape approved seeds, LLM-extract → pending)",
+      "schedule": "0 18 * * *",
+      "skills": ["event-find"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-find/find.py"
+    },
+    {
+      "id": "event-seed-discovery-weekly",
+      "name": "Weekly seed discovery (LLM proposes seed URLs → operator approves)",
+      "schedule": "0 4 * * 0",
+      "skills": ["event-seed-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-seed-discovery/discover.py discover --limit 15"
     },
     {
       "id": "api-check",
@@ -20,40 +47,13 @@
       "prompt": "python /home/agent/.hermes/skills/business/townloops-api/api.py check"
     },
     {
-      "id": "event-collect-am",
-      "name": "Morning event ingest + ship",
-      "schedule": "0 6 * * *",
-      "skills": ["event-ingest"],
+      "id": "nightly-digest",
+      "name": "Nightly digest (events by state, workqueue depth, seeds) → report + Telegram",
+      "schedule": "0 21 * * *",
+      "skills": ["onboarding-orchestrator"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
-    },
-    {
-      "id": "enrichment-sweep",
-      "name": "Daily enrichment sweep (venue + business + performer)",
-      "schedule": "0 9 * * *",
-      "skills": ["venue-enrichment", "business-enrichment", "performer-enrichment"],
-      "deliver": "local",
-      "no_agent": true,
-      "prompt": "for k in venue business performer; do python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py sweep --limit 20 --firecrawl && python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py ship; done"
-    },
-    {
-      "id": "event-collect-pm",
-      "name": "Evening event ingest + ship",
-      "schedule": "0 18 * * *",
-      "skills": ["event-ingest"],
-      "deliver": "local",
-      "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
-    },
-    {
-      "id": "discovery-resweep-weekly",
-      "name": "Weekly discovery resweep (steady state; picks up new listings)",
-      "schedule": "0 4 * * 1",
-      "skills": ["business-discovery", "community-discovery"],
-      "deliver": "local",
-      "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/business-discovery/discover.py sweep && python /home/agent/.hermes/skills/business/community-discovery/discover.py sweep"
+      "prompt": "python /app/scripts/onboarding_summary.py"
     },
     {
       "id": "newsletter-compose",
