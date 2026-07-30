@@ -157,7 +157,10 @@ def fetch_all(
     for src in _scrapeable_sources(sources):
         if only and src["name"] not in only:
             continue
-        parser_name = src.get("parser")
+        # `parser` is the canonical key; `type` is a legacy alias emitted by
+        # older event-source-discovery compile output (2026-07-25 fix
+        # standardized on `parser`). Accept both for one release cycle.
+        parser_name = src.get("parser") or src.get("type")
         parser = PARSERS.get(parser_name)
         if not parser:
             print(f"[skip] {src['name']}: unknown parser {parser_name!r}", file=sys.stderr)

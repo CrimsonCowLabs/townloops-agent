@@ -10,6 +10,7 @@ __pycache__/
 .venv/
 .DS_Store
 .pytest_cache/
+.claude/
 
 # Per-host compose overrides — leader/follower cron split, hostname stamp,
 # etc. See README "Second instance / failover". These stay per-host and

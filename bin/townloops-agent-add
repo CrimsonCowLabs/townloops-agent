@@ -81,6 +81,9 @@ render "$TEMPLATES/town-profile.example.yaml"              "$TARGET/town-profile
 cp "$TARGET/.env.example" "$TARGET/.env"
 
 # Cron: default = full onboarding schedule. Follower mode: `mv cron/jobs.empty.json cron/jobs.json`.
+# NB: no_agent jobs use `script:` (relative path under $HERMES_HOME/scripts/,
+# bind-mounted read-only from the repo's scripts/ dir). Hermes rejects
+# no_agent jobs that use `prompt:` — see /opt/hermes/cron/scheduler.py:1055.
 cat > "$TARGET/cron/jobs.json" <<'EOF'
 {
   "version": 1,
@@ -92,7 +95,7 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["onboarding-orchestrator"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/onboarding-orchestrator/orchestrate.py tick"
+      "script": "onboarding_tick.py"
     },
     {
       "id": "api-check",
@@ -101,7 +104,7 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["townloops-api"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/townloops-api/api.py check"
+      "script": "api_check.py"
     },
     {
       "id": "event-collect-am",
@@ -110,7 +113,7 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["event-ingest"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
+      "script": "event_collect.sh"
     },
     {
       "id": "enrichment-sweep",
@@ -119,7 +122,7 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["venue-enrichment", "business-enrichment", "performer-enrichment"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "for k in venue business performer; do python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py sweep --limit 20 --firecrawl && python /home/agent/.hermes/skills/business/${k}-enrichment/enrich.py ship; done"
+      "script": "enrichment_sweep.sh"
     },
     {
       "id": "event-collect-pm",
@@ -128,7 +131,7 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["event-ingest"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-ingest/ingest.py ingest && python /home/agent/.hermes/skills/business/event-ingest/ingest.py ship"
+      "script": "event_collect.sh"
     },
     {
       "id": "discovery-resweep-weekly",
@@ -137,7 +140,16 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["business-discovery", "community-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/business-discovery/discover.py sweep && python /home/agent/.hermes/skills/business/community-discovery/discover.py sweep"
+      "script": "discovery_resweep.sh"
+    },
+    {
+      "id": "event-source-harvest-weekly",
+      "name": "Weekly: re-harvest event feeds from entities",
+      "schedule": {"kind": "cron", "expr": "0 5 * * 6"},
+      "skills": ["event-source-harvest"],
+      "deliver": "local",
+      "no_agent": true,
+      "script": "harvest_events.py"
     },
     {
       "id": "newsletter-compose",
@@ -170,7 +182,7 @@ cat > "$TARGET/cron/jobs.json" <<'EOF'
       "skills": ["onboarding-orchestrator"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/onboarding-orchestrator/orchestrate.py summary"
+      "script": "onboarding_summary.py"
     }
   ]
 }

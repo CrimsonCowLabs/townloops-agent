@@ -445,6 +445,7 @@ def verify_candidate(
     *,
     town_name: str,
     region: str = "",
+    aliases: list[str] | None = None,
 ) -> dict:
     """Adversarial verify: scrape the candidate URL, decide whether it's a
     real customer-facing entity in the target town.
@@ -482,13 +483,36 @@ def verify_candidate(
     tn = (town_name or "").lower()
     rg = (region or "").lower()
 
+    # Build the list of "in-town" tokens to match. Start with the exact
+    # town name + region, then extend with any operator-provided aliases
+    # (from town-profile.yaml → name_aliases). Also treat region strings
+    # containing "/" as multi-region ("California/Nevada" → ["california",
+    # "nevada"]) so cross-state towns match either side.
+    tokens: list[str] = []
+    if tn:
+        tokens.append(tn)
+    for a in (aliases or []):
+        a_lower = (a or "").strip().lower()
+        if a_lower:
+            tokens.append(a_lower)
+    if rg:
+        if "/" in rg:
+            tokens.extend(part.strip() for part in rg.split("/") if part.strip())
+        else:
+            tokens.append(rg)
+
     in_town = False
-    if tn and re.search(rf"\b{re.escape(tn)}\b", md_lower):
-        in_town = True
-    if not in_town and rg and re.search(rf"\b{re.escape(rg)}\b", md_lower):
-        in_town = True
+    matched_token = None
+    for tok in tokens:
+        if re.search(rf"\b{re.escape(tok)}\b", md_lower):
+            in_town = True
+            matched_token = tok
+            break
     if not in_town:
-        reasons_reject.append(f"no mention of {town_name!r} or {region!r} on page")
+        # Short summary in the reject reason — the operator will see which
+        # tokens the verifier tried and none matched.
+        listed = ", ".join(repr(t) for t in tokens[:5]) or "(no tokens)"
+        reasons_reject.append(f"no mention of any of {listed} on page")
 
     for marker in CLOSURE_MARKERS:
         if marker in md_lower:
