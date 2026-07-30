@@ -1,0 +1,24 @@
+{% if empty_state %}
+  <div class="v2-empty-state">
+    <div class="v2-empty-msg">{{ empty_state.message }}</div>
+    {% if empty_state.action_label %}
+      {% if empty_state.action_method == 'post' %}
+        <form method="post" action="{{ empty_state.action_url }}">
+          <button class="v2-btn v2-btn-primary" type="submit">{{ empty_state.action_label }}</button>
+        </form>
+      {% else %}
+        <a class="v2-btn v2-btn-primary" href="{{ empty_state.action_url }}">{{ empty_state.action_label }}</a>
+      {% endif %}
+    {% endif %}
+  </div>
+{% elif events %}
+  <div class="v2-event-grid">
+    {% for e in events %}
+      {% include "v2/_partials/_event_card.html" %}
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="v2-empty muted">
+    No events in this bucket yet.
+  </div>
+{% endif %}

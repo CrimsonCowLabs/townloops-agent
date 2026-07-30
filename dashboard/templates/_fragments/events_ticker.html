@@ -1,0 +1,24 @@
+<section id="frag-events-ticker" class="live-widget"
+         hx-get="/fragments/events/ticker"
+         hx-trigger="every 8s"
+         hx-swap="outerHTML">
+  <h3>Recently ingested</h3>
+  {% if recent %}
+    <ul class="ticker">
+      {% for e in recent %}
+        <li>
+          <span class="ticker-when">{% if e.first_seen_at %}<time datetime="{{ e.first_seen_at }}">{{ e.first_seen_at }}</time>{% else %}?{% endif %}</span>
+          <span class="ticker-name">{{ e.name or "(untitled)" }}</span>
+          <span class="muted ticker-detail">
+            {% if e.date %}on <time datetime="{{ e.date }}">{{ e.date }}</time>{% endif %}
+            {% if e.venue_name %}at {{ e.venue_name }}{% endif %}
+            · via <strong>{{ e.source_label }}</strong>
+            {% if e.source_host and e.source_host != e.source_label %}({{ e.source_host }}){% endif %}
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="muted">No events ingested yet.</p>
+  {% endif %}
+</section>

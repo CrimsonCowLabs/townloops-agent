@@ -1,0 +1,22 @@
+<tr id="cand-{{ row.candidate_uid }}" class="status-{{ row.status }}">
+  <td>{{ row.kind }}</td>
+  <td><span class="pill pill-{{ row.status }}">{{ row.status }}</span></td>
+  <td>{{ row.display_name or "—" }}</td>
+  <td><a href="{{ row.canonical_url }}" target="_blank" rel="noopener">{{ row.canonical_url|truncate(60) }}</a></td>
+  <td><code class="src">{{ row.source_signal or "—" }}</code></td>
+  <td class="actions">
+    {% if row.status in ('new', 'rejected') %}
+      <button
+        hx-post="/candidates/{{ row.candidate_uid }}/approve"
+        hx-target="#cand-{{ row.candidate_uid }}"
+        hx-swap="outerHTML">Approve</button>
+    {% endif %}
+    {% if row.status != 'rejected' %}
+      <button class="danger"
+        hx-post="/candidates/{{ row.candidate_uid }}/reject"
+        hx-target="#cand-{{ row.candidate_uid }}"
+        hx-swap="outerHTML"
+        hx-confirm="Reject this candidate?">Reject</button>
+    {% endif %}
+  </td>
+</tr>

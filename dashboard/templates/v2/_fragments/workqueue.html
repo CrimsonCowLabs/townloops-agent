@@ -1,0 +1,29 @@
+{% if wq_counts %}
+  <ul class="v2-wq-list">
+    {% for row in wq_counts %}
+      <li class="v2-wq-row">
+        <span class="v2-wq-label">{{ row.next_action }}</span>
+        <span class="v2-wq-bar"><span class="v2-wq-fill" style="width: {{ (row.n * 100 / wq_max)|round }}%"></span></span>
+        <span class="v2-wq-count num">{{ row.n }}</span>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="v2-empty">
+    <div class="v2-empty-icon">✓</div>
+    <div class="muted">No approved events in flight. Seed discovery + event finding run separately — watch <b>Live activity →</b></div>
+  </div>
+{% endif %}
+
+<div class="v2-wq-states">
+  <div class="v2-panel-hd" style="margin-top:.6rem;border:none;padding:0"><h4 class="v2-h4">Events by state</h4></div>
+  {% if state_counts %}
+    <ul class="v2-tags">
+      {% for r in state_counts %}
+        <li class="v2-tag v2-tag-state" title="{{ r.state }}"><span>{{ r.state }}</span> <b>{{ r.n }}</b></li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="muted small">No events yet.</div>
+  {% endif %}
+</div>

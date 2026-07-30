@@ -1,0 +1,81 @@
+{# One chat row. `m` = dict from chat_db.history():
+   message_id, role, ts, body, status, tool_call_json, error #}
+{% set envelope = m.tool_call_json | fromjson if m.tool_call_json else None %}
+{% set proposal = envelope.proposal if envelope else None %}
+{% set widget_state = envelope.state if envelope else None %}
+
+<div class="chat-msg chat-msg-{{ m.role }} chat-msg-status-{{ m.status }}"
+     id="chat-msg-{{ m.message_id }}">
+  <div class="chat-msg-meta">
+    <span class="chat-msg-role">{{ m.role }}</span>
+    <time datetime="{{ m.ts }}" class="chat-msg-ts">{{ m.ts[11:19] }}</time>
+    {% if m.status == 'processing' %}
+      <span class="chat-msg-spinner" aria-label="thinking">…</span>
+      {# Live elapsed counter — JS tick in _chat.html updates the text
+         every second so the operator sees "thinking · 28s" while Hermes
+         chews on a 60-90s tool-invoking turn. #}
+      <span class="chat-msg-elapsed" data-since="{{ m.ts }}">thinking</span>
+    {% elif m.status == 'failed' %}
+      <span class="chat-msg-failed">failed</span>
+    {% endif %}
+  </div>
+
+  {% if m.body %}<div class="chat-msg-body">{{ m.body }}</div>{% endif %}
+
+  {% if proposal %}
+    <div class="chat-toolcall chat-toolcall-{{ widget_state or 'proposed' }}">
+      <div class="chat-toolcall-hd">
+        {% if proposal.kind == 'decline_events' %}
+          Proposed action: <b>decline {{ proposal.count }} events</b>
+        {% elif proposal.kind == 'approve_events' %}
+          Proposed action: <b>approve {{ proposal.count }} events</b>
+        {% else %}
+          Proposed action: <b>{{ proposal.kind }}</b>
+        {% endif %}
+        {% if widget_state == 'confirmed' %}<span class="chat-toolcall-badge">confirmed…</span>
+        {% elif widget_state == 'executed'  %}<span class="chat-toolcall-badge chat-toolcall-badge-ok">executed</span>
+        {% elif widget_state == 'cancelled' %}<span class="chat-toolcall-badge chat-toolcall-badge-cancel">cancelled</span>
+        {% elif widget_state == 'failed'    %}<span class="chat-toolcall-badge chat-toolcall-badge-err">failed</span>
+        {% endif %}
+      </div>
+
+      {% if envelope.preview %}
+        <details class="chat-toolcall-preview">
+          <summary>{{ envelope.preview|length }} event{{ '' if envelope.preview|length == 1 else 's' }} — show list</summary>
+          <ul>
+            {% for p in envelope.preview[:10] %}
+              <li><span class="muted">{{ p.date[:16] }}</span> · {{ p.title }}{% if p.source %} <span class="muted">({{ p.source }})</span>{% endif %}</li>
+            {% endfor %}
+            {% if envelope.preview|length > 10 %}
+              <li class="muted">… and {{ envelope.preview|length - 10 }} more</li>
+            {% endif %}
+          </ul>
+        </details>
+      {% endif %}
+
+      {% if widget_state == 'proposed' %}
+        <div class="chat-toolcall-actions">
+          <form hx-post="/v2/chat/confirm" hx-swap="none"
+                onsubmit="return confirm('Really run this action on {{ proposal.count }} events?')">
+            <input type="hidden" name="message_id" value="{{ m.message_id }}">
+            <input type="hidden" name="thread_id" value="default">
+            <button type="submit" class="chat-toolcall-btn chat-toolcall-confirm">✓ Confirm</button>
+          </form>
+          <form hx-post="/v2/chat/cancel" hx-swap="none">
+            <input type="hidden" name="message_id" value="{{ m.message_id }}">
+            <input type="hidden" name="thread_id" value="default">
+            <button type="submit" class="chat-toolcall-btn chat-toolcall-cancel">✗ Cancel</button>
+          </form>
+        </div>
+      {% endif %}
+
+      {% if envelope.error %}
+        <div class="chat-toolcall-error">{{ envelope.error }}</div>
+      {% endif %}
+    </div>
+  {% endif %}
+
+  {% if m.error and m.status == 'failed' %}
+    <div class="chat-msg-error">{{ m.error }}</div>
+  {% endif %}
+</div>

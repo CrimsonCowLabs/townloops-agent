@@ -1,0 +1,15 @@
+{% if events %}
+  <ul class="v2-flow">
+    {% for e in events %}
+      <li class="v2-flow-row">
+        <span class="v2-flow-state v2-flow-state-ok">shipped</span>
+        <span class="v2-flow-title">{{ e.title }}</span>
+        {% if e.category_slug %}<span class="v2-tag">{{ e.category_slug }}</span>{% endif %}
+        <span class="v2-flow-when muted">{{ e.date_display or '—' }}</span>
+        <time class="muted small" datetime="{{ e.shipped_at }}">{{ e.shipped_at }}</time>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="v2-empty muted">No events have shipped yet.</div>
+{% endif %}

@@ -1,0 +1,16 @@
+<section id="frag-live-strip" class="live-strip live-widget"
+         hx-get="/fragments/live-strip"
+         hx-trigger="every 3s"
+         hx-swap="outerHTML">
+  {% if running %}
+    <span class="live-dot live-dot-active"></span>
+    <strong>Agent is running a tick right now.</strong>
+    <span class="muted">Orchestrator lock held — a phase handler is mid-work. Watch <a href="/activity">Activity</a> for cron history.</span>
+  {% else %}
+    <span class="live-dot live-dot-idle"></span>
+    <span class="muted">Agent idle.</span>
+    {% if next_fires %}
+      Next cron: <strong>{{ next_fires[0].id }}</strong> at {{ next_fires[0].next_run_at|local_time }}.
+    {% endif %}
+  {% endif %}
+</section>

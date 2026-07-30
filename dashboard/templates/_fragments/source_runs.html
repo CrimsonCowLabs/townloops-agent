@@ -1,0 +1,24 @@
+<section id="frag-source-runs" class="live-widget"
+         hx-get="/fragments/source-runs"
+         hx-trigger="every 8s"
+         hx-swap="outerHTML">
+  <h2>Source runs — last 24h</h2>
+  <p class="muted">Per-source ingest stats. Updates live during a running discovery / event-ingest tick.</p>
+  <table>
+    <thead><tr><th>Source</th><th class="num">Runs</th><th class="num">OK</th><th class="num">Fetched</th><th class="num">Inserted</th><th class="num">Updated</th></tr></thead>
+    <tbody>
+      {% for r in source_runs %}
+        <tr>
+          <td><code>{{ r.source }}</code></td>
+          <td class="num">{{ r.runs }}</td>
+          <td class="num">{{ r.ok or 0 }}</td>
+          <td class="num">{{ r.fetched or 0 }}</td>
+          <td class="num">{{ r.inserted or 0 }}</td>
+          <td class="num">{{ r.updated or 0 }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="6" class="muted">No source runs in the last 24h.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>

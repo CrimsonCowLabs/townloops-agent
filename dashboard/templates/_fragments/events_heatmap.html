@@ -1,0 +1,24 @@
+<section id="frag-events-heatmap" class="events-heatmap live-widget"
+         hx-get="/fragments/events/heatmap"
+         hx-trigger="every 60s"
+         hx-swap="outerHTML">
+  <h3>Next {{ window }} days</h3>
+  <div class="heatmap-grid">
+    {% for d in days %}
+      {% set intensity = (d.count / max_count * 100) | int if max_count else 0 %}
+      <div class="heatmap-cell"
+           title="{{ d.day }}: {{ d.count }} event{{ 's' if d.count != 1 else '' }}"
+           style="background: color-mix(in srgb, var(--accent) {{ intensity }}%, transparent);">
+        <span class="heatmap-day">{{ d.day[-2:] }}</span>
+        {% if d.count %}<span class="heatmap-count">{{ d.count }}</span>{% endif %}
+      </div>
+    {% endfor %}
+  </div>
+  <p class="muted heatmap-legend">
+    {% if max_count == 0 %}
+      No events in the window. See empty-state below.
+    {% else %}
+      Densest day: {{ max_count }} events. Empty cells = coverage gaps.
+    {% endif %}
+  </p>
+</section>

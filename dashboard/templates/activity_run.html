@@ -1,0 +1,7 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Cron run: <code>{{ job_id }}</code></h1>
+<p class="muted">{{ filename }} · <a href="/activity?job={{ job_id }}">← back to job history</a></p>
+
+<pre class="cron-output">{{ body }}</pre>
+{% endblock %}

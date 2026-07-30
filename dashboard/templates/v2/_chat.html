@@ -1,0 +1,147 @@
+{# Floating chat button + slide-in panel. Included once from
+   overview.html so every /v2 page paint shows it. State (open/closed)
+   is browser-side via localStorage.tl_chat_open. #}
+
+<button id="chat-toggle" class="chat-fab" type="button"
+        aria-label="Open chat with agent">
+  <span class="chat-fab-icon">💬</span>
+  <span id="chat-badge" class="chat-badge"
+        hx-get="/v2/fragments/chat-badge"
+        hx-trigger="load, every 15s"
+        hx-swap="innerHTML"></span>
+</button>
+
+<aside id="chat-panel" class="chat-panel" hidden aria-label="Chat with agent">
+  <header class="chat-panel-hd">
+    <h3 class="chat-panel-title">Chat with agent</h3>
+    <button id="chat-close" class="chat-close" type="button"
+            aria-label="Close chat">×</button>
+  </header>
+
+  <div id="chat-list" class="chat-list"
+       hx-get="/v2/fragments/chat-history"
+       hx-trigger="load, every 2s, chat-updated from:body"
+       hx-swap="innerHTML"></div>
+
+  <div class="chat-suggestions" aria-label="Slash-command suggestions">
+    {% for s in ['/help', '/status', '/pending', '/stuck', '/seeds approved'] %}
+      <button type="button" class="chat-suggestion" data-cmd="{{ s }}">{{ s }}</button>
+    {% endfor %}
+  </div>
+
+  <form id="chat-form" class="chat-form"
+        hx-post="/v2/chat/send"
+        hx-swap="none">
+    <textarea id="chat-input" name="text" rows="1" autocomplete="off"
+              placeholder="Ask, or tap a suggestion below..."
+              maxlength="4000"></textarea>
+    <button type="submit" class="chat-send" aria-label="Send">↑</button>
+  </form>
+</aside>
+
+<script>
+(function () {
+  const toggleBtn = document.getElementById('chat-toggle');
+  const panel     = document.getElementById('chat-panel');
+  const closeBtn  = document.getElementById('chat-close');
+  const badge     = document.getElementById('chat-badge');
+  const list      = document.getElementById('chat-list');
+  const form      = document.getElementById('chat-form');
+  const input     = document.getElementById('chat-input');
+
+  function setOpen(open) {
+    panel.hidden = !open;
+    toggleBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    try { localStorage.tl_chat_open = open ? '1' : ''; } catch (e) {}
+    if (open) {
+      // Force an immediate history refresh + mark-seen
+      htmx.trigger(list, 'chat-updated');
+      markSeen();
+      setTimeout(() => input.focus(), 50);
+    }
+  }
+
+  function markSeen() {
+    const url = '/v2/chat/mark-seen';
+    fetch(url, { method: 'POST', credentials: 'same-origin',
+                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+                 body: 'thread_id=default' })
+      .then(() => { badge.innerHTML = ''; })
+      .catch(() => {});
+  }
+
+  toggleBtn.addEventListener('click', () => setOpen(panel.hidden));
+  closeBtn.addEventListener('click', () => setOpen(false));
+
+  // Restore panel state
+  let wasOpen = false;
+  try { wasOpen = localStorage.tl_chat_open === '1'; } catch (e) {}
+  setOpen(wasOpen);
+
+  // Enter sends; Shift+Enter newline. Textarea grows a little as the
+  // operator types then stops (max 4 rows) to keep the input compact.
+  input.addEventListener('keydown', function (e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+  input.addEventListener('input', function () {
+    input.rows = Math.min(4, Math.max(1, input.value.split('\n').length));
+  });
+
+  // After a successful send: clear the input + trigger a history refresh
+  // (server also set HX-Trigger: chat-updated but a client-side kick is
+  // faster than waiting on the response headers to propagate).
+  form.addEventListener('htmx:afterRequest', function (e) {
+    if (e.detail.xhr && e.detail.xhr.status >= 200 && e.detail.xhr.status < 300) {
+      input.value = '';
+      input.rows = 1;
+      htmx.trigger(list, 'chat-updated');
+    }
+  });
+
+  // Auto-scroll the message list to the bottom whenever it swaps.
+  // Simple version: always scroll to bottom. If operators complain about
+  // being interrupted while reading history, add a "was-at-bottom?"
+  // check before scrolling.
+  document.body.addEventListener('htmx:afterSwap', function (e) {
+    if (e.target && e.target.id === 'chat-list') {
+      e.target.scrollTop = e.target.scrollHeight;
+      // If the panel is visible when a message arrives, keep unread=0.
+      if (!panel.hidden) markSeen();
+    }
+  });
+
+  // Slash-command suggestion chips — tap to prefill the input.
+  document.querySelectorAll('.chat-suggestion').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      input.value = btn.dataset.cmd + ' ';
+      input.focus();
+      // Move caret to end so the operator can type args immediately.
+      input.setSelectionRange(input.value.length, input.value.length);
+    });
+  });
+
+  // Elapsed-time tick — updates every .chat-msg-elapsed span each second.
+  // A processing turn writes ts=<insert time>; we compute now - ts and
+  // render "thinking · 28s" / "thinking · 1m 12s". After htmx swaps the
+  // list, freshly-rendered spans get picked up on the next tick.
+  function fmtElapsed(seconds) {
+    if (seconds < 60) return 'thinking · ' + Math.floor(seconds) + 's';
+    var m = Math.floor(seconds / 60), s = Math.floor(seconds % 60);
+    return 'thinking · ' + m + 'm ' + s + 's';
+  }
+  setInterval(function () {
+    var now = Date.now();
+    document.querySelectorAll('.chat-msg-elapsed').forEach(function (el) {
+      var since = el.dataset.since;
+      if (!since) return;
+      var t = Date.parse(since);
+      if (isNaN(t)) return;
+      var secs = Math.max(0, (now - t) / 1000);
+      el.textContent = fmtElapsed(secs);
+    });
+  }, 1000);
+})();
+</script>

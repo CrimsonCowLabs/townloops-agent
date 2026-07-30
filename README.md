@@ -32,6 +32,48 @@ The first successful boot runs `town-init setup` automatically (verifies credent
 
 The taxonomy classifier (`entity-research`) uses **your ChatGPT account via the OpenAI Codex CLI** — no separate API key. Run `codex login` on the host once; the per-town compose mounts `~/.codex` into the container so tokens can refresh. If the CLI is missing or throttled, classifier calls no-op and are retried on the next hourly orchestrator tick.
 
+## Operator dashboard
+
+Non-technical operators shouldn't need `docker exec`. The per-town compose ships a second service `dashboard` that exposes a web UI on **`http://127.0.0.1:8090`** (bound to loopback — front with nginx/Caddy + TLS for external access).
+
+**First-run bootstrap** (order matters — the hash helper needs the image):
+
+```bash
+cd ~/townloops-agents/<slug>
+docker compose build                    # image must exist before hashing
+../../workspace/townloops-agent/bin/dashboard-hash-password
+# → prompts for password, prints $2b$12$... hash
+# Paste into .env as DASHBOARD_PASSWORD=... (escape any literal $ as $$)
+docker compose up -d dashboard
+open http://127.0.0.1:8090              # log in with the plaintext password
+```
+
+What the dashboard covers:
+- **Overview** — phase, tick count, LLM health, per-kind entity counts, source-run stats. Force-tick, sweep, and nightly-digest buttons.
+- **Candidates** — filter/paginate `discovery_candidates`; approve/reject inline via htmx. Bulk-approve all new candidates from a given source signal (fixes the 50-row-click problem).
+- **Entities** — read-only view of businesses/venues/communities/performers/creators with `pushed_at` timestamps.
+- **Sources** — event sources with approve action.
+- **Newsletter** — preview current-week HTML draft (sandboxed iframe); "Push to Listmonk" with `yes-push-live` typed-confirmation.
+- **Reports** — renders nightly-digest markdown files as HTML.
+- **Blocked** — squid egress log tail, grouped by denied host → guides which domains to add to `allowed_hosts` + the squid ACL.
+
+Auth is single-password bcrypt with a signed session cookie (`HttpOnly`, `SameSite=Strict`, 30-day TTL). Set `DASHBOARD_COOKIE_SECURE=true` in `.env` when fronting with TLS.
+
+## Telegram (operator-on-the-go)
+
+If `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ALLOWED_USERS` are set in `.env`, the Hermes gateway registers each skill as a slash command. From your phone:
+
+```
+/onboarding-orchestrator status     — current phase + tick count
+/onboarding-orchestrator tick       — force a tick
+/onboarding-orchestrator summary    — nightly digest on demand
+/newsletter-weekly show             — see this week's draft
+/business-discovery list --status new
+/event-source-discovery approve <host>
+```
+
+The agent also **outbound-Telegrams** on: phase transitions, LLM healthy↔throttled flips, and the nightly digest (21:00 UTC).
+
 ### Without Docker
 
 Copy `systemd/hermes-gateway.service.template` to `~/.config/systemd/user/hermes-gateway-townloops.service`, edit the `WorkingDirectory` and `EnvironmentFile` paths, then:

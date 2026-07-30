@@ -1,0 +1,27 @@
+{% if seeds %}
+  <table class="v2-tbl">
+    <thead>
+      <tr><th>Name</th><th>Kind</th><th>URL</th><th>Notes</th><th></th></tr>
+    </thead>
+    <tbody>
+    {% for s in seeds %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td><span class="v2-tag">{{ s.kind }}</span></td>
+        <td class="v2-url"><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url|truncate(60) }}</a></td>
+        <td class="muted small">{{ (s.notes or '')|truncate(80) }}</td>
+        <td>
+          <form method="post" action="/v2/seeds/{{ s.seed_id }}/approve" style="display:inline">
+            <button class="v2-btn v2-btn-small v2-btn-primary" type="submit">Approve</button>
+          </form>
+          <form method="post" action="/v2/seeds/{{ s.seed_id }}/reject" style="display:inline">
+            <button class="v2-btn v2-btn-small v2-btn-danger" type="submit">Reject</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+{% else %}
+  <div class="v2-empty muted">No proposed seeds — click <b>Discover more</b> to have the agent find some.</div>
+{% endif %}

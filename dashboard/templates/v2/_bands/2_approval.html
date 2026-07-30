@@ -1,0 +1,20 @@
+<div class="v2-approval-hd">
+  <h2 class="v2-h2">Approval queue</h2>
+  <div class="v2-filter-bar" role="tablist">
+    {% set opts = [('pending', 'Pending'), ('approved', 'Approved'), ('declined', 'Declined'), ('shipped', 'Shipped')] %}
+    {% for k, label in opts %}
+      <a class="v2-filter{% if filter == k %} v2-filter-on{% endif %}"
+         href="/v2?filter={{ k }}"
+         hx-get="/v2/fragments/approval?filter={{ k }}"
+         hx-target="#approval-body"
+         hx-swap="innerHTML"
+         hx-push-url="/v2?filter={{ k }}">
+        {{ label }}
+      </a>
+    {% endfor %}
+  </div>
+</div>
+
+<div id="approval-body">
+  {% include "v2/_fragments/approval.html" %}
+</div>

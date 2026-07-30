@@ -1,0 +1,28 @@
+<section id="frag-events-by-source" class="live-widget"
+         hx-get="/fragments/events/by-source"
+         hx-trigger="every 60s"
+         hx-swap="outerHTML">
+  <h3>Sources producing events (last 30d)</h3>
+  {% if by_source %}
+    <table>
+      <thead><tr><th>Source</th><th class="num">Events</th><th class="num">OK / Total runs</th><th>Last fetch</th></tr></thead>
+      <tbody>
+        {% for s in by_source %}
+          <tr>
+            <td>
+              <div>{{ s.source_label }}</div>
+              {% if s.source_host and s.source_host != s.source_label %}
+                <div class="muted src-host">{{ s.source_host }}</div>
+              {% endif %}
+            </td>
+            <td class="num">{{ s.event_count }}</td>
+            <td class="num muted">{{ s.ok_runs or 0 }} / {{ s.total_runs or 0 }}</td>
+            <td class="muted">{% if s.last_fetched %}<time datetime="{{ s.last_fetched }}">{{ s.last_fetched }}</time>{% else %}—{% endif %}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No source has produced events yet in the last 30 days.</p>
+  {% endif %}
+</section>

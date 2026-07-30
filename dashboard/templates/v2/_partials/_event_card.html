@@ -1,0 +1,44 @@
+<article class="v2-card" id="event-{{ e.event_uid }}">
+  <header class="v2-card-hd">
+    <h3 class="v2-card-title">{{ e.title }}</h3>
+    {% if e.category_slug %}<span class="v2-tag">{{ e.category_slug }}</span>{% endif %}
+  </header>
+
+  <dl class="v2-card-meta">
+    <div><dt>When</dt><dd>{% if e.date_display %}<time datetime="{{ e.date_display }}">{{ e.date_display }}</time>{% else %}<span class="muted">—</span>{% endif %}</dd></div>
+    {% if e.venue %}<div><dt>Venue</dt><dd>{{ e.venue }}</dd></div>{% endif %}
+    {% if e.location %}<div><dt>Location</dt><dd class="muted">{{ e.location }}</dd></div>{% endif %}
+    <div><dt>Source</dt><dd class="muted small">{{ (e.discovered_via or e.source or '—')[:60] }}</dd></div>
+    {% if e.metadata_confidence %}<div><dt>Metadata</dt><dd>{{ e.metadata_confidence }}%</dd></div>{% endif %}
+    {% if e.in_town_confidence %}<div><dt>In-town</dt><dd>{{ e.in_town_confidence }}%</dd></div>{% endif %}
+  </dl>
+
+  {% if e.description %}
+    <p class="v2-card-desc">{{ e.description|truncate(280) }}</p>
+  {% endif %}
+
+  {% if e.rsvp_url %}<a class="muted small" href="{{ e.rsvp_url }}" target="_blank" rel="noopener">RSVP link ↗</a>{% endif %}
+
+  <footer class="v2-card-ft">
+    <span class="v2-card-status v2-card-status-{{ e.approval_status }}">{{ e.approval_status }}</span>
+    {% if e.approval_status == 'pending' %}
+      <form method="post" action="/v2/events/{{ e.event_uid }}/approve"
+            hx-post="/v2/events/{{ e.event_uid }}/approve"
+            hx-target="#event-{{ e.event_uid }}" hx-swap="outerHTML"
+            style="display:inline">
+        <button class="v2-btn v2-btn-primary" type="submit">✓ Approve</button>
+      </form>
+      <form method="post" action="/v2/events/{{ e.event_uid }}/decline"
+            hx-post="/v2/events/{{ e.event_uid }}/decline"
+            hx-target="#event-{{ e.event_uid }}" hx-swap="outerHTML"
+            style="display:inline">
+        <button class="v2-btn v2-btn-danger" type="submit">✗ Decline</button>
+      </form>
+    {% elif e.approval_at %}
+      <span class="muted small">
+        {{ e.approval_status }} · <time datetime="{{ e.approval_at }}">{{ e.approval_at }}</time>
+        {% if e.approval_note %} · {{ e.approval_note }}{% endif %}
+      </span>
+    {% endif %}
+  </footer>
+</article>

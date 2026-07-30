@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Candidates</h1>
+
+<form method="get" action="/candidates" class="filters">
+  <label>Kind
+    <select name="kind">
+      <option value="" {% if not kind %}selected{% endif %}>any</option>
+      <option value="business" {% if kind == 'business' %}selected{% endif %}>business</option>
+      <option value="community" {% if kind == 'community' %}selected{% endif %}>community</option>
+    </select>
+  </label>
+  <label>Status
+    <select name="status">
+      <option value="" {% if not status %}selected{% endif %}>any</option>
+      <option value="new" {% if status == 'new' %}selected{% endif %}>new</option>
+      <option value="verified" {% if status == 'verified' %}selected{% endif %}>verified</option>
+      <option value="promoted" {% if status == 'promoted' %}selected{% endif %}>promoted</option>
+      <option value="rejected" {% if status == 'rejected' %}selected{% endif %}>rejected</option>
+    </select>
+  </label>
+  <button>Filter</button>
+</form>
+
+<details class="bulk">
+  <summary>Bulk-approve by source ({{ sources|length }} distinct source signals with new rows)</summary>
+  <p class="muted">
+    <strong>Approve</strong> flips a candidate directly to <code>status='verified'</code> — it does NOT run the Firecrawl-verify step.
+    You're vouching that the URL is a real business/community. The next tick will promote from there.
+  </p>
+  <table>
+    <thead><tr><th>Source signal</th><th>Kind</th><th class="num">Count</th><th></th></tr></thead>
+    <tbody>
+      {% for s in sources[:30] %}
+        <tr>
+          <td><code>{{ s.source_signal }}</code></td>
+          <td>{{ s.kind }}</td>
+          <td class="num">{{ s.n }}</td>
+          <td>
+            <form method="post" action="/candidates/bulk-approve"
+                  onsubmit="return confirm('Approve all {{ s.n }} new {{ s.kind }} candidates from this source?')">
+              <input type="hidden" name="kind" value="{{ s.kind }}">
+              <input type="hidden" name="source" value="{{ s.source_signal }}">
+              <button>Approve all {{ s.n }}</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</details>
+
+<table class="candidates">
+  <thead>
+    <tr>
+      <th>Kind</th>
+      <th>Status</th>
+      <th>Name</th>
+      <th>URL</th>
+      <th>Source</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+      {% include "_candidate_row.html" %}
+    {% else %}
+      <tr><td colspan="6" class="muted">No matching candidates.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+
+<nav class="pager">
+  {% if page > 0 %}
+    <a href="/candidates?kind={{ kind }}&status={{ status }}&page={{ page - 1 }}">← Prev</a>
+  {% endif %}
+  <span>Page {{ page + 1 }}</span>
+  {% if rows|length == 50 %}
+    <a href="/candidates?kind={{ kind }}&status={{ status }}&page={{ page + 1 }}">Next →</a>
+  {% endif %}
+</nav>
+{% endblock %}

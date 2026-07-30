@@ -1,0 +1,22 @@
+<section id="frag-recent-cron" class="live-widget"
+         hx-get="/fragments/recent-cron"
+         hx-trigger="every 12s"
+         hx-swap="outerHTML">
+  <h2>Recent cron runs</h2>
+  <p class="muted"><a href="/activity">See full activity →</a></p>
+  <table>
+    <thead><tr><th></th><th>When</th><th>Job</th><th>Run</th></tr></thead>
+    <tbody>
+      {% for f in recent_cron %}
+        <tr>
+          <td><span class="pill pill-{{ f.status }}">{{ f.status }}</span></td>
+          <td class="muted">{{ f.filename[:19].replace('_', ' ') }}</td>
+          <td><code>{{ f.job_id }}</code></td>
+          <td><a href="/activity/{{ f.job_id }}/{{ f.filename }}">view</a> · <span class="muted">{{ f.size }}B</span></td>
+        </tr>
+      {% else %}
+        <tr><td colspan="4" class="muted">No cron output yet.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>

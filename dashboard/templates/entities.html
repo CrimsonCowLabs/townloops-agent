@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Entities — {{ kind }}</h1>
+
+<nav class="tabs">
+  {% for k in ('business', 'venue', 'community', 'performer', 'creator') %}
+    <a href="/entities/{{ k }}" class="{% if k == kind %}active{% endif %}">{{ k }}</a>
+  {% endfor %}
+</nav>
+
+<p class="muted">Read-only. Entities are populated by the agent's promote step from verified candidates + mined from event sources. Shipping to the TownLoops platform is automatic.</p>
+
+<table>
+  <thead>
+    <tr>
+      <th>Name</th>
+      <th>Category</th>
+      <th>Source URL</th>
+      <th>First seen</th>
+      <th>Shipped</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for row in rows %}
+      <tr>
+        <td>{{ row.name or "—" }}</td>
+        <td>{{ row.category_slug or "—" }}</td>
+        <td><a href="{{ row.source_url }}" target="_blank" rel="noopener">{{ (row.source_url or "")|truncate(60) }}</a></td>
+        <td class="muted">{{ row.first_seen_at|local_time }}</td>
+        <td>{{ row.pushed_at|local_time }}</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">No {{ kind }} entities yet.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

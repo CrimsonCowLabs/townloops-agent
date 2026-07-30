@@ -1,0 +1,13 @@
+<div class="empty-state empty-branch-{{ empty_state.branch }}">
+  <p class="empty-headline">No events yet.</p>
+  <p class="empty-body">{{ empty_state.message }}</p>
+  {% if empty_state.action_label %}
+    <form method="post" action="{{ empty_state.action_url }}" class="empty-action">
+      {% if empty_state.action_kind %}
+        <input type="hidden" name="kind" value="{{ empty_state.action_kind }}">
+      {% endif %}
+      <button>{{ empty_state.action_label }}</button>
+    </form>
+  {% endif %}
+  <p class="muted empty-hint">Branch: <code>{{ empty_state.branch }}</code></p>
+</div>

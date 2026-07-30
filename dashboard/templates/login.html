@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Sign in — townloops-agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <main class="login">
+    <h1>townloops-agent</h1>
+    <p class="sub">{{ town }}</p>
+    {% if flashes.error %}<div class="flash flash-error">{{ flashes.error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <label>Password
+        <input type="password" name="password" autofocus required>
+      </label>
+      <button type="submit">Sign in</button>
+    </form>
+  </main>
+</body>
+</html>

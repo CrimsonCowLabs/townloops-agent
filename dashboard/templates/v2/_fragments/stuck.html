@@ -1,0 +1,18 @@
+{% if stuck %}
+  <ul class="v2-flow">
+    {% for s in stuck %}
+      <li class="v2-flow-row v2-flow-row-err">
+        <span class="v2-flow-state v2-flow-state-err">stuck</span>
+        <span class="v2-flow-title">{{ s.event_title or s.event_uid[:12] }}</span>
+        <span class="v2-flow-when muted">action: {{ s.next_action }}</span>
+        <span class="muted small">attempts {{ s.attempts }}</span>
+        {% if s.last_error %}<span class="muted small">{{ s.last_error[:60] }}</span>{% endif %}
+        <form method="post" action="/v2/workqueue/{{ s.queue_id }}/requeue" style="display:inline">
+          <button class="v2-btn v2-btn-small" type="submit">Requeue</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="v2-empty muted">No stuck items.</div>
+{% endif %}

@@ -1,0 +1,22 @@
+<div class="v2-pipeline">
+  <div class="v2-panel">
+    <div class="v2-panel-hd"><h3 class="v2-h3">In-flight</h3><span class="v2-poll-note">every 10s</span></div>
+    <div hx-get="/v2/fragments/in-flight" hx-trigger="load, every 10s" hx-swap="innerHTML">
+      {% include "v2/_fragments/in_flight.html" %}
+    </div>
+  </div>
+
+  <div class="v2-panel">
+    <div class="v2-panel-hd"><h3 class="v2-h3">Recently shipped</h3><span class="v2-poll-note">every 30s</span></div>
+    <div hx-get="/v2/fragments/shipped" hx-trigger="load, every 30s" hx-swap="innerHTML">
+      {% include "v2/_fragments/shipped.html" %}
+    </div>
+  </div>
+
+  <div class="v2-panel">
+    <div class="v2-panel-hd"><h3 class="v2-h3">Stuck / failed</h3><span class="v2-poll-note">every 30s</span></div>
+    <div hx-get="/v2/fragments/stuck" hx-trigger="load, every 30s" hx-swap="innerHTML">
+      {% include "v2/_fragments/stuck.html" %}
+    </div>
+  </div>
+</div>

@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Activity</h1>
+
+<section class="live-strip">
+  {% if running %}
+    <span class="live-dot live-dot-active"></span>
+    <strong>Agent is running a tick right now.</strong>
+  {% else %}
+    <span class="live-dot live-dot-idle"></span>
+    <span class="muted">Agent idle.</span>
+  {% endif %}
+</section>
+
+<div class="two-col">
+  <aside class="index">
+    <h2>Filter by job</h2>
+    <ul>
+      <li><a href="/activity" class="{% if not selected_job %}active{% endif %}">(all)</a></li>
+      {% for jid, n in jobs_seen %}
+        <li>
+          <a href="/activity?job={{ jid }}" class="{% if selected_job == jid %}active{% endif %}">
+            {{ jid }} <span class="muted">({{ n }})</span>
+          </a>
+        </li>
+      {% endfor %}
+    </ul>
+
+    <h2>Upcoming</h2>
+    <table>
+      <tbody>
+        {% for f in next_fires %}
+          <tr>
+            <td><code>{{ f.id }}</code></td>
+            <td class="muted">{{ f.next_run_at|local_time }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </aside>
+
+  <article>
+    <h2>{% if selected_job %}Runs of <code>{{ selected_job }}</code>{% else %}All recent cron runs{% endif %}</h2>
+    <table>
+      <thead><tr><th></th><th>When</th><th>Job</th><th>Run</th><th class="num">Size</th></tr></thead>
+      <tbody>
+        {% for f in files %}
+          <tr class="cron-row cron-status-{{ f.status }}">
+            <td><span class="pill pill-{{ f.status }}">{{ f.status }}</span></td>
+            <td class="muted">{{ f.filename[:19].replace('_', ' ') }}</td>
+            <td><code>{{ f.job_id }}</code></td>
+            <td><a href="/activity/{{ f.job_id }}/{{ f.filename }}">{{ f.filename }}</a></td>
+            <td class="num">{{ f.size }}B</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="5" class="muted">No cron output found. Either no jobs have fired yet, or the cron output dir isn't populated.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</div>
+{% endblock %}

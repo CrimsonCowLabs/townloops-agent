@@ -1,0 +1,25 @@
+<div class="v2-seeds">
+  <div class="v2-panel">
+    <div class="v2-panel-hd">
+      <h3 class="v2-h3">Approved seeds ({{ seeds_approved|length }})</h3>
+      <form method="post" action="/v2/actions/event-find" style="display:inline">
+        <button class="v2-btn v2-btn-primary" type="submit">Find events now</button>
+      </form>
+    </div>
+    <div hx-get="/v2/fragments/seeds-approved" hx-trigger="load, every 60s" hx-swap="innerHTML">
+      {% include "v2/_fragments/seeds_approved.html" %}
+    </div>
+  </div>
+
+  <div class="v2-panel">
+    <div class="v2-panel-hd">
+      <h3 class="v2-h3">Proposed seeds ({{ seeds_proposed|length }})</h3>
+      <form method="post" action="/v2/actions/discover-seeds" style="display:inline">
+        <button class="v2-btn" type="submit">Discover more</button>
+      </form>
+    </div>
+    <div hx-get="/v2/fragments/seeds-proposed" hx-trigger="load, every 30s" hx-swap="innerHTML">
+      {% include "v2/_fragments/seeds_proposed.html" %}
+    </div>
+  </div>
+</div>

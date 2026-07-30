@@ -1,0 +1,131 @@
+"""Execution side of the widget-based operator-confirmation flow.
+
+Hermes proposes destructive actions by emitting a fenced JSON block in
+its chat reply; the chat panel renders a Confirm widget from that
+proposal. When the operator clicks Confirm, `/v2/chat/confirm` calls
+into THIS module — NOT into a Hermes-callable skill. Hermes physically
+cannot reach these functions, which is the entire point.
+
+All handlers mutate the state DB via the same helpers the dashboard's
+per-row buttons use, so the effect is identical to (e.g.) approving
+each event one at a time in the UI.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+from dashboard import db_v2
+from engine import workqueue as _wq
+
+
+# Whitelist of intent kinds. Anything Hermes proposes that isn't in this
+# set is refused by /v2/chat/confirm.
+ALLOWED_KINDS = frozenset({"decline_events", "approve_events"})
+
+
+def _iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def validate_proposal(proposal: Any) -> tuple[bool, str]:
+    """Return (ok, error_message). Called from /v2/chat/confirm before
+    dispatch — a proposal that fails validation never mutates DB."""
+    if not isinstance(proposal, dict):
+        return (False, "proposal must be a JSON object")
+    kind = proposal.get("kind")
+    if kind not in ALLOWED_KINDS:
+        return (False, f"unknown intent kind: {kind!r}")
+    uids = proposal.get("uids")
+    if not isinstance(uids, list) or not uids:
+        return (False, "uids must be a non-empty list")
+    if len(uids) > 500:
+        return (False, "refusing >500 uids in one confirm")
+    for u in uids:
+        if not isinstance(u, str) or not u or len(u) > 100:
+            return (False, "uids must all be non-empty strings ≤ 100 chars")
+    return (True, "")
+
+
+def execute(proposal: dict, *, note: Optional[str] = None) -> dict:
+    """Dispatch to the matching handler. Assumes `validate_proposal`
+    already passed. Returns a summary dict the confirm route writes into
+    the follow-up agent message."""
+    kind = proposal["kind"]
+    uids = proposal["uids"]
+    if kind == "decline_events":
+        return _decline_events(uids, note=note)
+    if kind == "approve_events":
+        return _approve_events(uids, note=note)
+    # Unreachable if validate_proposal was called first.
+    return {"error": f"no handler for kind: {kind}"}
+
+
+# --------------------------------------------------------------------------
+# Individual handlers
+# --------------------------------------------------------------------------
+
+def _decline_events(uids: list[str], *, note: Optional[str] = None) -> dict:
+    """Flip approval_status → declined for each uid that's still `pending`.
+    Uids already in a terminal state (declined, shipped) are skipped and
+    reported."""
+    now = _iso_utc_now()
+    declined = 0
+    skipped: list[str] = []
+    with db_v2.connect() as c:
+        for uid in uids:
+            cur = c.execute(
+                "UPDATE events SET approval_status='declined', "
+                "  approval_note=?, approval_at=?, "
+                "  state='declined', state_updated_at=? "
+                "WHERE event_uid=? AND approval_status='pending'",
+                (note, now, now, uid),
+            )
+            if cur.rowcount:
+                declined += 1
+            else:
+                skipped.append(uid)
+    return {
+        "kind": "decline_events",
+        "declined": declined,
+        "skipped": len(skipped),
+        "skipped_uids": skipped,
+    }
+
+
+def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
+    """Flip approval_status → approved AND enqueue extract-venue for each
+    successful approval. Mirrors the dashboard's per-row approve button."""
+    now = _iso_utc_now()
+    approved = 0
+    enqueued = 0
+    skipped: list[str] = []
+    with db_v2.connect() as c:
+        for uid in uids:
+            cur = c.execute(
+                "UPDATE events SET approval_status='approved', "
+                "  approval_note=?, approval_at=?, "
+                "  state='approved', state_updated_at=? "
+                "WHERE event_uid=? AND approval_status='pending'",
+                (note, now, now, uid),
+            )
+            if cur.rowcount:
+                approved += 1
+                try:
+                    _wq.enqueue(c, uid, "extract-venue")
+                    enqueued += 1
+                except sqlite3.Error:
+                    # Enqueue failure is non-fatal — heartbeat backfill
+                    # will catch it on the next tick.
+                    pass
+            else:
+                skipped.append(uid)
+    return {
+        "kind": "approve_events",
+        "approved": approved,
+        "enqueued_extract_venue": enqueued,
+        "skipped": len(skipped),
+        "skipped_uids": skipped,
+    }

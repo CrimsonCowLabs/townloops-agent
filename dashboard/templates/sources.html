@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Event sources</h1>
+
+<p class="muted">Sources are RSS/iCal/HTML feeds that <code>event-ingest</code> pulls twice daily. Approving a source adds it to the auto-ingest list.</p>
+
+{% if parsed %}
+  <table>
+    <thead>
+      <tr>
+        <th>Host</th>
+        <th>Kind</th>
+        <th>URL</th>
+        <th>Status</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for s in parsed %}
+        <tr>
+          <td>{{ s.host or "—" }}</td>
+          <td>{{ s.kind or "—" }}</td>
+          <td><code>{{ (s.url or "")|truncate(60) }}</code></td>
+          <td>{{ s.status or "—" }}</td>
+          <td>
+            {% if s.status not in ('approved', 'auto-approved') %}
+              <form method="post" action="/sources/{{ s.host }}/approve">
+                <button>Approve</button>
+              </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% elif raw %}
+  <p class="muted">The <code>event-source-discovery list</code> skill doesn't emit JSON (yet). Raw output:</p>
+  <pre>{{ raw }}</pre>
+{% else %}
+  <p class="muted">No sources returned. {{ err }}</p>
+{% endif %}
+{% endblock %}

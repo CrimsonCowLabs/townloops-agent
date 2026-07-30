@@ -1,0 +1,14 @@
+{# Full replacement of #chat-list contents. Polled every 2s while the
+   panel is open; also swapped in response to the `chat-updated` event
+   htmx fires after a successful /v2/chat/send. #}
+{% if messages %}
+  {% for m in messages %}
+    {% include "v2/_partials/_chat_message.html" %}
+  {% endfor %}
+{% else %}
+  <div class="chat-empty">
+    <p>Hi. I'm the operator assistant for <b>{{ town }}</b>.</p>
+    <p>Try <code>/help</code> to see what I can do instantly, or ask me
+       anything in plain English.</p>
+  </div>
+{% endif %}

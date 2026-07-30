@@ -1,0 +1,39 @@
+<tr id="event-{{ e.event_uid }}" class="event-row {% if e.hidden %}event-hidden{% endif %}">
+  <td class="event-when">
+    {% if e.date %}<time datetime="{{ e.date }}">{{ e.date }}</time>{% else %}—{% endif %}
+  </td>
+  <td class="event-name">
+    <div>{{ e.name or "(untitled)" }}</div>
+    {% if e.category_slug %}<span class="pill pill-cat">{{ e.category_slug }}</span>{% endif %}
+  </td>
+  <td class="event-venue">{{ e.venue_name or e.hosting_group or "—" }}</td>
+  <td class="event-source">
+    <div class="src-label">{{ e.source_label }}</div>
+    {% if e.source_host and e.source_host != e.source_label %}
+      <div class="muted src-host">{{ e.source_host }}</div>
+    {% endif %}
+  </td>
+  <td class="event-actions">
+    {% if e.source_url %}
+      <a href="{{ e.source_url }}" target="_blank" rel="noopener" title="Open source">↗</a>
+    {% endif %}
+    {% if e.hidden %}
+      <button
+        hx-post="/events/{{ e.event_uid }}/unhide"
+        hx-target="#event-{{ e.event_uid }}"
+        hx-swap="outerHTML"
+        title="Unhide">show</button>
+    {% else %}
+      <button class="danger"
+        hx-post="/events/{{ e.event_uid }}/hide"
+        hx-target="#event-{{ e.event_uid }}"
+        hx-swap="outerHTML"
+        title="Hide">hide</button>
+    {% endif %}
+    {% if e.source %}
+      <button
+        hx-post="/sources/{{ e.source|urlencode }}/refetch"
+        title="Re-fetch this source">↻</button>
+    {% endif %}
+  </td>
+</tr>

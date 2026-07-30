@@ -1,0 +1,14 @@
+{% if events %}
+  <ul class="v2-flow">
+    {% for e in events %}
+      <li class="v2-flow-row">
+        <span class="v2-flow-state">{{ e.state }}</span>
+        <span class="v2-flow-title">{{ e.title }}</span>
+        <span class="v2-flow-when muted">{{ e.date_display or '—' }}</span>
+        <time class="muted small" datetime="{{ e.state_updated_at }}">{{ e.state_updated_at }}</time>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="v2-empty muted">Nothing in flight.</div>
+{% endif %}

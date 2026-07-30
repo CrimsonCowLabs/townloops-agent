@@ -1,0 +1,39 @@
+<div id="frag-last-tick" class="live-widget"
+     hx-get="/fragments/last-tick"
+     hx-trigger="every 10s"
+     hx-swap="outerHTML">
+  <h2>What the last tick did</h2>
+  {% if last_tick.notes %}
+    {% set n = last_tick.notes %}
+    <p class="muted">phase <strong>{{ last_tick.phase }}</strong> · tick #{{ last_tick.tick_count }} · at {{ last_tick.last_tick_at|local_time }}</p>
+    {% if n.business %}
+      <p><strong>business-discovery</strong>:
+        {% if n.business.error %}
+          <span class="err">error rc={{ n.business.returncode or '?' }}: <code>{{ (n.business.error or '')[:200] }}</code></span>
+        {% else %}
+          seen={{ n.business.seen or 0 }}, inserted={{ n.business.inserted_new or 0 }}
+        {% endif %}
+      </p>
+    {% endif %}
+    {% if n.community %}
+      <p><strong>community-discovery</strong>:
+        {% if n.community.error %}
+          <span class="err">error rc={{ n.community.returncode or '?' }}: <code>{{ (n.community.error or '')[:200] }}</code></span>
+        {% else %}
+          seen={{ n.community.seen or 0 }}, inserted={{ n.community.inserted_new or 0 }}
+        {% endif %}
+      </p>
+    {% endif %}
+    {% if n.harvest %}
+      <p><strong>event-source-harvest</strong>: {{ n.harvest.hits or 0 }} hits, {{ n.harvest.entities_scanned or 0 }} entities</p>
+    {% endif %}
+    {% if n.ship %}
+      <p><strong>ship</strong>: {{ n.ship.per_kind or n.ship }}</p>
+    {% endif %}
+    {% if n.skipped %}<p class="muted">skipped: {{ n.skipped }}</p>{% endif %}
+    {% if n.handler_error %}<p class="err">handler_error: <code>{{ n.handler_error }}</code></p>{% endif %}
+    {% if n.net_new is defined %}<p class="muted">net_new: {{ n.net_new }}</p>{% endif %}
+  {% else %}
+    <p class="muted">No tick has run yet.</p>
+  {% endif %}
+</div>

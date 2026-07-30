@@ -21,9 +21,16 @@ services:
       - egress-net
     volumes:
       - ./squid.conf:/etc/squid/squid.conf:ro
+      # Shared named volume so per-town dashboard containers can read
+      # /var/log/squid/access.log to surface DENIED requests in the UI.
+      - squid-egress-log:/var/log/squid
     # No ports published — reachable only from egress-net.
 
 networks:
   egress-net:
     driver: bridge
     name: egress-net
+
+volumes:
+  squid-egress-log:
+    name: squid-egress-log

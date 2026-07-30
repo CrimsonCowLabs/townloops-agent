@@ -1,0 +1,39 @@
+<section id="frag-coverage-estimates" class="live-widget"
+         hx-get="/fragments/events/coverage-gaps"
+         hx-trigger="every 120s"
+         hx-swap="outerHTML">
+  <h3>Coverage estimates</h3>
+  <p class="muted">
+    Heuristic — matches events to entities by <code>hosting_group</code> or
+    <code>venue_name</code>. Aggregator-sourced events (Eventbrite etc)
+    may not attribute; a listed entity may still have events landing under
+    a different source. Use as a hint, not a scoreboard.
+  </p>
+  {% if gaps %}
+    <table>
+      <thead><tr><th>Entity</th><th>Kind</th><th>Website</th><th></th></tr></thead>
+      <tbody>
+        {% for g in gaps %}
+          <tr>
+            <td>{{ g.name }}</td>
+            <td class="muted">{{ g.kind }}</td>
+            <td>
+              {% if g.website %}
+                <a href="{{ g.website }}" target="_blank" rel="noopener">{{ g.website|truncate(50) }}</a>
+              {% elif g.source_url %}
+                <a href="{{ g.source_url }}" target="_blank" rel="noopener">{{ g.source_url|truncate(50) }}</a>
+              {% else %}—{% endif %}
+            </td>
+            <td>
+              <form method="post" action="/entities/{{ g.kind }}/{{ g.entity_uid }}/harvest">
+                <button>Harvest this entity</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">No coverage gaps identified — either every entity has matching events, or there are no venues in the table yet.</p>
+  {% endif %}
+</section>

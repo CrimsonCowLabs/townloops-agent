@@ -1,0 +1,28 @@
+<section id="frag-events-upcoming" class="events-upcoming live-widget"
+         hx-get="/fragments/events/upcoming"
+         hx-trigger="every 30s"
+         hx-swap="outerHTML">
+  <h3>Upcoming events</h3>
+  {% if events_list %}
+    <table class="events-table">
+      <thead>
+        <tr>
+          <th>When</th>
+          <th>Event</th>
+          <th>Venue</th>
+          <th>Source</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in events_list %}
+          {% include "_partials/_event_row.html" %}
+        {% endfor %}
+      </tbody>
+    </table>
+  {% elif empty_state %}
+    {% include "_fragments/events_empty_state.html" %}
+  {% else %}
+    <p class="muted">No upcoming events in the next {{ window }} days.</p>
+  {% endif %}
+</section>

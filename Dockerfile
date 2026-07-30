@@ -32,9 +32,10 @@ RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get clean && rm -rf /var/lib/apt/lists/*
 RUN npm install -g @openai/codex
 
-# Deps used across skills. Pin nothing — each skill catches its own import
-# error at boot, and freezing versions here breaks base-image upgrades.
-# Add new packages ABOVE the trailing line so the diff stays readable.
+# Deps used across skills + the operator dashboard + Telegram inbound.
+# Pin nothing — each skill catches its own import error at boot, and
+# freezing versions here breaks base-image upgrades. Add new packages
+# ABOVE the trailing line so the diff stays readable.
 RUN uv pip install --system --no-cache --break-system-packages \
     feedparser \
     requests \
@@ -44,4 +45,17 @@ RUN uv pip install --system --no-cache --break-system-packages \
     icalendar \
     jinja2 \
     lxml \
+    fastapi \
+    "uvicorn[standard]" \
+    python-multipart \
+    itsdangerous \
+    bcrypt \
+    markdown \
     firecrawl-py
+
+# python-telegram-bot must be visible to the Hermes gateway, which runs
+# in the /opt/hermes/.venv/ virtualenv (not system Python). Install it
+# directly into that venv. Don't upgrade anything else there — Hermes
+# pins several packages we mustn't disturb.
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache \
+    python-telegram-bot

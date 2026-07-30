@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Blocked egress requests</h1>
+
+<p class="muted">
+  Squid is denying every host not on the allowlist. Add legitimate hosts to
+  <code>town-profile.yaml</code> → <code>allowed_hosts</code> AND to
+  <code>templates/_shared/egress/squid.conf</code>'s <code>tahoe_north</code>
+  ACL (or wherever your town's ACL lives), then restart the egress stack.
+</p>
+
+{% if not log_exists %}
+  <p class="flash flash-error">Squid access log not readable at <code>{{ log_path }}</code>. Check the compose <code>squid-egress-log</code> volume mount.</p>
+{% endif %}
+
+<section class="two-col">
+  <div>
+    <h2>Denied hosts (grouped)</h2>
+    <table>
+      <thead><tr><th>Host</th><th class="num">Denials</th></tr></thead>
+      <tbody>
+        {% for host, n in grouped %}
+          <tr><td><code>{{ host }}</code></td><td class="num">{{ n }}</td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">No denials in the tail we scanned.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div>
+    <h2>Recent denials</h2>
+    <table>
+      <thead><tr><th>When</th><th>Host</th></tr></thead>
+      <tbody>
+        {% for e in entries %}
+          <tr><td class="muted">{{ e.when|local_time }}</td><td><code>{{ e.host }}</code></td></tr>
+        {% else %}
+          <tr><td colspan="2" class="muted">Nothing.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>
+{% endblock %}

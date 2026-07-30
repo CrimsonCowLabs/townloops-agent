@@ -1,0 +1,32 @@
+<section id="frag-silent-sources" class="live-widget"
+         hx-get="/fragments/events/silent-sources"
+         hx-trigger="every 120s"
+         hx-swap="outerHTML">
+  <h3>Quiet sources</h3>
+  <p class="muted">Approved sources with no events landed in 30 days. Could be broken feeds — or genuinely quiet (seasonal, small orgs). Judgment call.</p>
+  {% if silent %}
+    <table>
+      <thead><tr><th>Source</th><th>Parser</th><th class="num">Runs</th><th>Last fetch</th><th></th></tr></thead>
+      <tbody>
+        {% for s in silent %}
+          <tr>
+            <td>
+              <div>{{ s.source_label }}</div>
+              {% if s.source_host %}<div class="muted src-host">{{ s.source_host }}</div>{% endif %}
+            </td>
+            <td><code>{{ s.parser or "—" }}</code></td>
+            <td class="num">{{ s.run_count }}</td>
+            <td class="muted">{% if s.last_fetched %}<time datetime="{{ s.last_fetched }}">{{ s.last_fetched }}</time>{% else %}never{% endif %}</td>
+            <td>
+              <form method="post" action="/sources/{{ s.source_label|urlencode }}/refetch">
+                <button title="Refetch this source">↻ refetch</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="muted">All approved sources have produced events recently.</p>
+  {% endif %}
+</section>

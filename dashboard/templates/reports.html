@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Reports</h1>
+
+<div class="two-col">
+  <aside class="index">
+    <h2>Available</h2>
+    {% if files %}
+      <ul>
+        {% for f in files %}
+          {% set d = f[:-3] %}
+          <li><a href="/reports/{{ d }}" class="{% if d == date %}active{% endif %}">{{ d }}</a></li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p class="muted">No reports yet. The <code>nightly-summary</code> cron writes one daily at 21:00 UTC.</p>
+    {% endif %}
+  </aside>
+
+  <article class="report">
+    {% if body %}
+      <div class="rendered">{{ body|safe }}</div>
+    {% elif date %}
+      <p class="muted">No report file at <code>state/reports/{{ date }}.md</code>.</p>
+    {% else %}
+      <p class="muted">Pick a report from the list.</p>
+    {% endif %}
+  </article>
+</div>
+{% endblock %}

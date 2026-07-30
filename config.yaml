@@ -17,12 +17,30 @@ cron:
 platform_toolsets:
   cli:
     enabled: true
+  api_server:
+    # Dashboard chat panel talks to Hermes over /v1/chat/completions.
+    # Env-gated via API_SERVER_ENABLED in the town's compose.
+    enabled: true
   browser:
     enabled: false
   vision:
     enabled: false
   delegation:
     enabled: false
+
+# LLM provider — mirrors the working ~/.hermes/profiles/{recruiter,motivator}
+# setup: openai-codex talking to ChatGPT-backed Codex backend, using the
+# credentials stored in the mounted /home/agent/.hermes/auth.json.
+# `hermes auth` (run once on the host, writing ~/.hermes/auth.json) refreshes
+# these credentials for every town that mounts that file.
+# See ~/.claude/projects/-home-aaron-workspace-hermes/memory/
+# project_townloops_agent_architecture.md for the "TownLoops = Hermes UI"
+# architecture context.
+model:
+  provider: openai-codex
+  base_url: https://chatgpt.com/backend-api/codex
+  default: gpt-5.4
+providers: {}
 
 skills:
   # Bind-mounted from repo ./skills → /home/agent/.hermes/skills; auto-discovered.

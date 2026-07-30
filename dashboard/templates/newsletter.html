@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block main %}
+<h1>Newsletter — {{ week }}</h1>
+
+<form method="get" action="/newsletter" class="filters">
+  <label>ISO week
+    <input type="text" name="week" value="{{ week }}" pattern="\d{4}-W\d{2}">
+  </label>
+  <button>Load</button>
+</form>
+
+{% if exists %}
+  <details class="draft-source" open>
+    <summary>Preview (raw HTML from state/newsletters/{{ week }}.html)</summary>
+    <iframe srcdoc="{{ body|e }}" sandbox="" title="Newsletter draft"></iframe>
+  </details>
+
+  <section class="danger-zone">
+    <h2>Push to Listmonk (LIVE — sends to real subscribers)</h2>
+    <p class="muted">
+      To confirm, type <code>yes-push-live</code> into the field below.
+      Nothing else will fire the campaign. Listmonk must be reachable and
+      <code>LISTMONK_USER</code>/<code>LISTMONK_TOKEN</code>/<code>LISTMONK_LIST_ID</code>
+      must be set in <code>.env</code>.
+    </p>
+    <form method="post" action="/newsletter/push">
+      <input type="hidden" name="week" value="{{ week }}">
+      <label>Confirm
+        <input type="text" name="confirm" placeholder="yes-push-live" required>
+      </label>
+      <button class="danger">Push {{ week }}</button>
+    </form>
+  </section>
+{% else %}
+  <p class="muted">No draft for {{ week }} yet. The <code>newsletter-compose</code> cron fires Sundays at 08:00 UTC.</p>
+{% endif %}
+{% endblock %}

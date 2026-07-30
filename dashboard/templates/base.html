@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  {# Auto-refresh for the Activity page only. Overview uses htmx polling
+     widgets for finer-grained updates. Activity page is passive (no
+     polling widgets), so keeps the meta-refresh fallback while a tick
+     is running. #}
+  {% if running and request.url.path == '/activity' %}
+    <meta http-equiv="refresh" content="10">
+  {% endif %}
+  <title>{{ town }} — townloops-agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="/static/htmx.min.js" defer></script>
+  <script>
+    // Rewrite every <time datetime="ISO"> to the viewer's locale. Runs on
+    // initial load and after every htmx swap (so re-rendered rows update
+    // their timestamps too).
+    (function () {
+      function localize(root) {
+        (root || document).querySelectorAll('time[datetime]').forEach(function (el) {
+          var iso = el.getAttribute('datetime');
+          if (!iso || el.dataset.localized === '1') return;
+          var d = new Date(iso);
+          if (isNaN(d)) return;
+          el.textContent = d.toLocaleString(undefined, {
+            year: 'numeric', month: 'short', day: 'numeric',
+            hour: '2-digit', minute: '2-digit'
+          });
+          el.title = iso;                       // hover to see the raw ISO
+          el.dataset.localized = '1';
+        });
+      }
+      document.addEventListener('DOMContentLoaded', function () { localize(document); });
+      document.addEventListener('htmx:afterSwap', function (evt) { localize(evt.target); });
+    })();
+  </script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/">{{ town }}</a>
+    <nav>
+      <a href="/">Dashboard</a>
+      <a href="/sources">Sources</a>
+      <a href="/entities/venue">Venues</a>
+      <a href="/entities/community">Communities</a>
+      <a href="/activity">Activity</a>
+      <a href="/newsletter">Newsletter</a>
+      <a href="/reports">Reports</a>
+    </nav>
+    <a class="logout" href="/logout">Sign out</a>
+  </header>
+
+  {% if flashes.ok %}
+    <div class="flash flash-ok">
+      <span>{{ flashes.ok }}</span>
+      <button class="flash-close" type="button"
+              onclick="this.parentElement.remove()" aria-label="Dismiss">×</button>
+    </div>
+  {% endif %}
+  {% if flashes.error %}
+    <div class="flash flash-error">
+      <span>{{ flashes.error }}</span>
+      <button class="flash-close" type="button"
+              onclick="this.parentElement.remove()" aria-label="Dismiss">×</button>
+    </div>
+  {% endif %}
+
+  <main>
+    {% block main %}{% endblock %}
+  </main>
+</body>
+</html>

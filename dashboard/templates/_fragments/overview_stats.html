@@ -1,0 +1,95 @@
+<section id="frag-overview-stats" class="grid live-widget"
+         hx-get="/fragments/overview-stats"
+         hx-trigger="every 8s"
+         hx-swap="outerHTML">
+  <div class="card">
+    <h2>Phase</h2>
+    <p class="big">{{ state.phase or "?" }}</p>
+    <p class="muted">tick #{{ state.tick_count or 0 }} · phase_ticks {{ state.phase_ticks or 0 }} · quiet {{ state.quiet_ticks or 0 }}</p>
+    <p class="muted">last tick: {{ state.last_tick_at|local_time }}</p>
+    <form method="post" action="/actions/tick" class="inline">
+      <button>Force tick</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>LLM (Codex)</h2>
+    {% if llm_health.status %}
+      <p class="big status-{{ llm_health.status }}">{{ llm_health.status }}</p>
+      {% if llm_health.last_ok_at %}<p class="muted">last ok: {{ llm_health.last_ok_at|local_time }}</p>{% endif %}
+      {% if llm_health.last_error %}<p class="muted err">{{ llm_health.last_error[:200] }}</p>{% endif %}
+    {% else %}
+      <p class="big status-idle">idle</p>
+      <p class="muted">Classifier hasn't been called yet — only fires when
+        <code>entity-research</code> hits a promoted entity that the
+        keyword-map couldn't categorize. Will show <code>healthy</code>
+        or <code>throttled</code> after the first real call.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Actions</h2>
+    <form method="post" action="/actions/sweep" class="inline">
+      <input type="hidden" name="kind" value="business">
+      <button>Sweep businesses</button>
+    </form>
+    <form method="post" action="/actions/sweep" class="inline">
+      <input type="hidden" name="kind" value="community">
+      <button>Sweep communities</button>
+    </form>
+    <form method="post" action="/actions/harvest-events" class="inline">
+      <button>Harvest events</button>
+    </form>
+    <form method="post" action="/actions/summary" class="inline">
+      <button>Generate nightly digest</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Events</h2>
+    <p class="big">{{ events.total }}</p>
+    <p class="muted">{{ events.upcoming }} upcoming · {{ events.shipped }} shipped to TownLoops</p>
+  </div>
+
+  <div class="card">
+    <h2>Event sources</h2>
+    <p class="big">{{ sources.approved }}</p>
+    <p class="muted">
+      {{ sources.needs_review }} pending review ·
+      {{ sources.proposed }} proposed ·
+      {{ sources.rejected }} rejected
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>Candidates</h2>
+    <table class="mini">
+      <tbody>
+        {% for row in candidates %}
+          <tr>
+            <td>{{ row.kind }}</td>
+            <td><span class="pill pill-{{ row.status }}">{{ row.status }}</span></td>
+            <td class="num">{{ row.n }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="3" class="muted">None yet.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Entities</h2>
+    <table class="mini">
+      <tbody>
+        {% for row in entities %}
+          <tr>
+            <td><a href="/entities/{{ row.kind }}">{{ row.kind }}</a></td>
+            <td class="num">{{ row.total }}</td>
+            <td class="num muted">{{ row.shipped }} shipped</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</section>

@@ -1,0 +1,22 @@
+<div id="frag-next-fires" class="live-widget"
+     hx-get="/fragments/next-fires"
+     hx-trigger="every 30s"
+     hx-swap="outerHTML">
+  <h2>Cron schedule (next fires)</h2>
+  <table>
+    <thead><tr><th>Job</th><th>Next</th><th>Last status</th></tr></thead>
+    <tbody>
+      {% for f in next_fires %}
+        <tr>
+          <td><code>{{ f.id }}</code></td>
+          <td>{{ f.next_run_at|local_time }}</td>
+          <td class="{% if f.last_status == 'error' %}err{% endif %}">
+            {{ f.last_status or '—' }}
+          </td>
+        </tr>
+      {% else %}
+        <tr><td colspan="3" class="muted">No cron schedule loaded.</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>

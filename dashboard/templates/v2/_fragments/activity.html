@@ -1,0 +1,42 @@
+{% if current_task %}
+  <div class="v2-current">
+    <span class="v2-dot v2-dot-live"></span>
+    <div>
+      <div class="v2-current-line">
+        <b>{{ current_task.worker }}</b> · {{ current_task.action }}
+        {% if current_task.target %} · <span class="muted">{{ current_task.target[:80] }}</span>{% endif %}
+      </div>
+      {% if current_task.detail %}
+        <div class="muted small">{{ current_task.detail[:200] }}</div>
+      {% endif %}
+    </div>
+  </div>
+{% else %}
+  <div class="v2-current v2-current-idle">
+    <span class="v2-dot v2-dot-idle"></span>
+    <div class="muted">Agent idle.</div>
+  </div>
+{% endif %}
+
+{% if activity %}
+  <ul class="v2-ticker">
+    {% for a in activity %}
+      {# skill-invoke rows are the "this skill finished with result X" summary
+         lines — call them out visually so operators can spot outcomes at
+         a glance. Error rows also get their own accent. #}
+      <li class="v2-ticker-row{% if a.error or not a.ok %} v2-ticker-err{% elif a.action == 'skill-invoke' %} v2-ticker-summary{% endif %}">
+        <time datetime="{{ a.ts }}" class="v2-ticker-ts">{{ a.ts[11:19] }}</time>
+        <span class="v2-ticker-worker">{{ a.worker }}</span>
+        <span class="v2-ticker-action">
+          {% if a.action == 'skill-invoke' %}✓ done{% else %}{{ a.action }}{% endif %}
+        </span>
+        {% if a.target %}<span class="v2-ticker-target muted">{{ a.target[:60] }}</span>{% endif %}
+        {% if a.detail %}<span class="v2-ticker-detail muted">{{ a.detail[:120] }}</span>{% endif %}
+        {% if a.duration_ms is not none %}<span class="v2-ticker-dur num">{{ a.duration_ms }}ms</span>{% endif %}
+        {% if a.error %}<span class="v2-ticker-error">{{ a.error[:120] }}</span>{% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="v2-empty muted">No activity recorded yet.</div>
+{% endif %}

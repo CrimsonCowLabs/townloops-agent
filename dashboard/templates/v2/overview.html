@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block main %}
+<div class="v2-header">
+  <div>
+    <h1 class="v2-h1">Events for {{ town }}</h1>
+    <div class="muted">Event-first pipeline · <a href="/">↩ classic view</a></div>
+  </div>
+  <div class="v2-chips">
+    <span class="v2-chip"><span class="v2-chip-n">{{ chips.pending }}</span> pending</span>
+    <span class="v2-chip"><span class="v2-chip-n">{{ chips.in_flight }}</span> in-flight</span>
+    <span class="v2-chip v2-chip-ok"><span class="v2-chip-n">{{ chips.shipped }}</span> shipped</span>
+    <span class="v2-chip"><span class="v2-chip-n">{{ chips.seeds_approved }}</span> seeds</span>
+    {% if chips.workqueue_stuck %}
+      <span class="v2-chip v2-chip-err"><span class="v2-chip-n">{{ chips.workqueue_stuck }}</span> stuck</span>
+    {% endif %}
+  </div>
+</div>
+
+{# Band 1 — inspection window (compact, top). Two columns: workqueue depth + live activity. #}
+<section class="v2-band" id="band-inspection">
+  {% include "v2/_bands/1_inspection.html" %}
+</section>
+
+{# Band 2 — approval queue (the hero). #}
+<section class="v2-band v2-band-hero" id="band-approval">
+  {% include "v2/_bands/2_approval.html" %}
+</section>
+
+{# Band 3 — in-flight + recently shipped + stuck. Collapsible. #}
+<details class="v2-band" id="band-pipeline" {% if chips.in_flight or chips.shipped or chips.workqueue_stuck %}open{% endif %}>
+  <summary class="v2-band-summary"><h2 class="v2-h2">Pipeline · {{ chips.in_flight }} in-flight · {{ chips.shipped }} shipped{% if chips.workqueue_stuck %} · {{ chips.workqueue_stuck }} stuck{% endif %}</h2></summary>
+  {% include "v2/_bands/3_pipeline.html" %}
+</details>
+
+{# Band 4 — seeds & sources. Default-open; user can collapse. Keeping
+   this always-visible lets the operator kick a fresh discover-seeds run
+   without hunting for the button. #}
+<details class="v2-band" id="seeds" open>
+  <summary class="v2-band-summary"><h2 class="v2-h2">Seeds &amp; sources · {{ seed_totals.approved }} approved · {{ seed_totals.proposed }} proposed</h2></summary>
+  {% include "v2/_bands/4_seeds.html" %}
+</details>
+
+{# Operator ↔ Hermes chat panel. Floating button bottom-right, slide-in
+   panel. Rendered on every /v2 page paint. #}
+{% include "v2/_chat.html" %}
+
+{% endblock %}

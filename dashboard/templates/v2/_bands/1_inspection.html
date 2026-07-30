@@ -1,0 +1,26 @@
+<div class="v2-inspection">
+  {# Event pipeline queue — only for approved events flowing through the
+     per-event state machine (extract-venue → ship). Cron-fired skills like
+     seed-discovery and event-find run as detached subprocesses and appear
+     in Live Activity, not here. #}
+  <div class="v2-panel">
+    <div class="v2-panel-hd">
+      <h3 class="v2-h3">Event pipeline</h3>
+      <span class="v2-poll-note">per-event queue · 5s</span>
+    </div>
+    <div hx-get="/v2/fragments/workqueue" hx-trigger="load, every 5s" hx-swap="innerHTML">
+      {% include "v2/_fragments/workqueue.html" %}
+    </div>
+  </div>
+
+  {# Live activity ticker — what agent is doing right now #}
+  <div class="v2-panel v2-panel-wide">
+    <div class="v2-panel-hd">
+      <h3 class="v2-h3">Live activity</h3>
+      <span class="v2-poll-note">polls every 3s</span>
+    </div>
+    <div hx-get="/v2/fragments/activity" hx-trigger="load, every 3s" hx-swap="innerHTML">
+      {% include "v2/_fragments/activity.html" %}
+    </div>
+  </div>
+</div>
