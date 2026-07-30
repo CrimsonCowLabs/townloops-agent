@@ -118,9 +118,22 @@ services:
       - /home/aaron/.codex:/home/agent/.codex:rw
       # Hermes' OWN auth store (separate from Codex CLI's ~/.codex/auth.json)
       # — required when model.provider=openai-codex in config.yaml so the
-      # api_server chat platform can invoke ChatGPT-backed Codex. Refresh
-      # via `hermes auth` on the host; all towns share the same file.
-      - /home/aaron/.hermes/auth.json:/home/agent/.hermes/auth.json:ro
+      # api_server chat platform can invoke ChatGPT-backed Codex.
+      # Mounted RW because Hermes tries to atomically rewrite this file
+      # when the ChatGPT access token refreshes (weekly cadence).
+      #
+      # KNOWN LIMITATION: single-file bind mounts do not support the
+      # rename(tmp, target) that Hermes uses to swap in a fresh token
+      # — Linux returns EBUSY regardless of RW permissions. Result: the
+      # container's copy drifts stale over ~7 days and chat starts
+      # returning "Codex auth is missing access_token".
+      # Refresh procedure (until we move to a directory-mount+symlink
+      # setup): on the host, run
+      #     ~/workspace/hermes/.venv/bin/hermes auth add openai-codex \
+      #       --type oauth --no-browser
+      # to complete the OAuth device flow and rewrite ~/.hermes/auth.json,
+      # then `docker compose restart agent` here to reload the file.
+      - /home/aaron/.hermes/auth.json:/home/agent/.hermes/auth.json:rw
 
     command: python -m hermes_cli.main gateway run --replace
 
