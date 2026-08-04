@@ -1,32 +1,30 @@
 ---
 name: onboarding-orchestrator
-description: Per-town autonomous loop driver. `tick` runs one bounded phase step and emits a one-line JSON status; the cron entry `onboarding-tick` calls it hourly with `no_agent: true` so there's no LLM turn per tick. Phase state persists in state/townloops.db.agent_state and is a hard singleton.
+description: Workqueue drainer for the event-first pipeline. `tick` drains the event workqueue (claims pending per-event actions and invokes the matching skill) and emits a one-line JSON status. The old phase machine is retired; the legacy command names are kept for compatibility.
 ---
 
 # onboarding-orchestrator
 
-Drives the phase machine documented in `docs/STATUS.md` and
-`plans/rosy-munching-milner.md`:
-
-```
-bootstrapping → discovering → verifying → researching
-             → enriching → shipping → steady_state
-```
+The historical phase machine (`bootstrapping → … → steady_state`) is gone. In the
+event-first pipeline a "tick" means **drain the event workqueue**: for each
+`next_action` (`extract-venue`, `extract-hosts`, `extract-people`,
+`enrich-entities`, `ship`) claim a batch, invoke the matching skill with
+`--event-uid`, and advance each event's `state`. See `engine/orchestrator.py`
+(`drain_workqueue`) and `engine/event_state.py`.
 
 Each tick:
 
-1. Acquires `engine.lock.acquire("orchestrator")` — a second concurrent tick
-   errors out rather than double-transitioning.
-2. Loads (or initializes) `agent_state`.
-3. Runs the current phase's handler — which shells out to the appropriate
-   skill CLIs (business-discovery, community-discovery, entity-research,
-   {venue,business,community,performer,creator}-enrichment, event-ingest).
-4. Updates tick counters. Advances phase when either the phase's hard
-   predicate is satisfied OR the quiet-tick counter reaches 3 (for phases
-   that advance on "nothing new" rather than "nothing left").
-5. Force-advances after 168 consecutive ticks in the same phase (~7 days
-   hourly), with a Telegram warning.
-6. Emits a one-line JSON status.
+1. Acquires `engine.lock.acquire("workqueue-drain")` — overlapping ticks skip
+   rather than double-processing.
+2. Reaps stale claims (rows a dead worker left claimed) so they can't stall.
+3. Drains each action's queue (batch size 5), honoring per-action hourly rate
+   limits from `town-profile.yaml`.
+4. On skill success advances the event's state and enqueues the next action; on
+   failure increments attempts and, at `MAX_ATTEMPTS`, marks the event `stuck-`.
+5. Emits a one-line JSON status.
+
+The real cron driver is `scripts/workqueue_heartbeat.py` (every 10 min); this
+skill's `tick` is an equivalent entry point.
 
 ## Commands
 
@@ -36,12 +34,10 @@ python skills/business/onboarding-orchestrator/orchestrate.py status
 python skills/business/onboarding-orchestrator/orchestrate.py finalize
 ```
 
-- `tick` — the cron entry point. Does one bounded step. Exit 0 on success,
-  1 on lock contention.
-- `status` — read-only dump of `agent_state`.
-- `finalize` — force `phase='steady_state'`. Useful for testing failover
-  or skipping onboarding on a town that's already been populated by
-  another means.
+- `tick` — drains the workqueue once. Exit 0 on success, 1 on lock contention.
+- `status` — read-only snapshot (`agent_state` + workqueue counts).
+- `finalize` — legacy no-op that returns the current status (kept for
+  compatibility with old callers).
 
 ## Env
 

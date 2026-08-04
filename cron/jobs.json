@@ -8,7 +8,7 @@
       "skills": ["event-derive-venue", "event-derive-hosts", "event-derive-people", "event-enrich-entities", "event-ship"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /app/scripts/workqueue_heartbeat.py"
+      "prompt": "python /home/agent/.hermes/scripts/workqueue_heartbeat.py"
     },
     {
       "id": "event-find-am",
@@ -53,7 +53,7 @@
       "skills": ["onboarding-orchestrator"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /app/scripts/onboarding_summary.py"
+      "prompt": "python /home/agent/.hermes/scripts/onboarding_summary.py"
     },
     {
       "id": "newsletter-compose",

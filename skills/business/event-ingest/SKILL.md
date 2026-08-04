@@ -11,7 +11,7 @@ Fork of the SLT events aggregator, town-agnostic. Reads a per-town `sources.yaml
 
 - **Cron fires event-collect-am (06:00) or event-collect-pm (18:00)** — runs `collect` + `ship` end-to-end.
 - User says "collect", "ingest", "gather events", "run the pipeline", "ship deltas".
-- After `event-source-discovery compile` adds new sources to `sources.yaml` — an ad-hoc collect proves them.
+- After new sources are added to `sources.yaml` — an ad-hoc collect proves them.
 - After enrichment marks entities ready — an ad-hoc ship pushes the PATCH round.
 
 ## Environment (required)

@@ -84,7 +84,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 ## Commands
 
 ```bash
-# Tests — run from repo root. ~180 tests, in-process, no network, ~3s.
+# Tests — run from repo root. ~250 tests, in-process, no network, ~3s.
 pytest                              # full suite
 pytest tests/test_orchestrator.py   # single file
 pytest -k "migration and rollback"  # by keyword

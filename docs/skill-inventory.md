@@ -48,7 +48,7 @@ step is not built yet — the orchestrator skips its `extract-metadata` action).
 
 | Skill | CLI | When |
 |---|---|---|
-| `event-ingest` | `ingest.py ingest / ship [--dry-run] [--only-kind …] / resync / kinds / list / list-sources / add-manual / fetch` | Ad hoc + `event-collect-{am,pm}`. Fork of SLT's aggregator (`docs/fork-extraction.md`). |
+| `event-ingest` | `ingest.py ingest / ship [--dry-run] [--only-kind …] / resync / kinds / list / list-sources / add-manual / fetch` | Ad hoc only (no cron). Fork of SLT's aggregator (`docs/fork-extraction.md`). |
 
 ### Operator (dashboard chat + Telegram)
 
@@ -110,8 +110,8 @@ them when `SPONSORS_ENABLED=true`.
 | `sponsor-audit` | `0 10 * * 1` | LLM job (Telegram): placement/expiry audit. |
 
 The engine-level jobs (`workqueue-heartbeat`, `nightly-digest`) run the cron
-wrappers under `scripts/`, which `docker-compose.yml` mounts at `/app/scripts`
-alongside `engine/` (`PYTHONPATH=/app`, so their `from engine import ...`
+wrappers under `scripts/`, mounted at `/home/agent/.hermes/scripts` in both the
+root and per-town composes (`PYTHONPATH=/app`, so their `from engine import ...`
 resolves). Those same wrappers (`workqueue_heartbeat.py`, `onboarding_summary.py`,
 `event_find.py`, `event_seed_discovery.py`, `event_collect.sh`) are the
 entrypoints for non-cron / bare-systemd use. `event-ingest` (legacy

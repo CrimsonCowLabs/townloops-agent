@@ -13,7 +13,6 @@ each event one at a time in the UI.
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -103,25 +102,29 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
     enqueued = 0
     skipped: list[str] = []
     with db_v2.connect() as c:
-        for uid in uids:
-            cur = c.execute(
-                "UPDATE events SET approval_status='approved', "
-                "  approval_note=?, approval_at=?, "
-                "  state='approved', state_updated_at=? "
-                "WHERE event_uid=? AND approval_status='pending'",
-                (note, now, now, uid),
-            )
-            if cur.rowcount:
-                approved += 1
-                try:
+        # connect() is autocommit; wrap the batch in one explicit transaction so
+        # each approval and its extract-venue enqueue commit together (or the
+        # whole batch rolls back) — no event left approved with no queue row.
+        c.execute("BEGIN")
+        try:
+            for uid in uids:
+                cur = c.execute(
+                    "UPDATE events SET approval_status='approved', "
+                    "  approval_note=?, approval_at=?, "
+                    "  state='approved', state_updated_at=? "
+                    "WHERE event_uid=? AND approval_status='pending'",
+                    (note, now, now, uid),
+                )
+                if cur.rowcount:
+                    approved += 1
                     _wq.enqueue(c, uid, "extract-venue")
                     enqueued += 1
-                except sqlite3.Error:
-                    # Enqueue failure is non-fatal — heartbeat backfill
-                    # will catch it on the next tick.
-                    pass
-            else:
-                skipped.append(uid)
+                else:
+                    skipped.append(uid)
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
     return {
         "kind": "approve_events",
         "approved": approved,

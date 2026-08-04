@@ -50,8 +50,7 @@ RUN uv pip install --system --no-cache --break-system-packages \
     python-multipart \
     itsdangerous \
     bcrypt \
-    markdown \
-    firecrawl-py
+    markdown
 
 # python-telegram-bot must be visible to the Hermes gateway, which runs
 # in the /opt/hermes/.venv/ virtualenv (not system Python). Install it

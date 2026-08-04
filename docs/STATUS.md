@@ -1,3 +1,8 @@
+> **Superseded (2026-08).** This is a dated cold-start hand-off from before the
+> event-first rewrite. For current architecture, skills, and pipeline see
+> `CLAUDE.md`, `README.md`, and `docs/skill-inventory.md`. The skill names and
+> phase-machine model below are historical.
+
 # Status — 2026-07-10
 
 ## Second-instance deploy (macneo, in progress)

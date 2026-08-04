@@ -28,9 +28,10 @@ services:
       dockerfile: Dockerfile
     image: townloops-agent:local
     container_name: townloops-agent
-    # Per-host identity — `_worker_tag()` in engine/enrichment.py reads this
-    # via socket.gethostname() and stamps it into enrichment_queue.claimed_by
-    # and log lines. On thinkpad, override with `hostname: townloops-agent-thinkpad`
+    # Per-host identity — `_worker_id()` in engine/workqueue.py reads this via
+    # socket.gethostname() (or $TOWNLOOPS_AGENT_HOSTNAME) and stamps it into
+    # event_workqueue.claimed_by and log lines. On thinkpad, override with
+    # `hostname: townloops-agent-thinkpad`
     # via a docker-compose.override.yml; on macneo it's `townloops-agent-macneo`.
     # Do NOT hardcode a specific host name here — this line documents the
     # extension point; the actual value comes from the override.
@@ -42,6 +43,11 @@ services:
     environment:
       HERMES_HOME: /home/agent/.hermes
       PYTHONPATH: /app
+      # orchestrator._invoke_skill spawns skill subprocesses via $PYTHON. The
+      # gateway runs under /opt/hermes/.venv, whose python lacks the skills'
+      # pip deps (feedparser/bs4/icalendar/...). Force the system python that
+      # the Dockerfile installed those deps into.
+      PYTHON: /usr/bin/python3
       # Default points at the bundled Firecrawl on the shared network. Override
       # in .env if you want to use cloud Firecrawl instead.
       FIRECRAWL_API_URL: ${FIRECRAWL_API_URL:-http://firecrawl-api:3002}
@@ -63,9 +69,9 @@ services:
       - ./cron:/home/agent/.hermes/cron:ro
       - ./engine:/app/engine:ro
       # Cron wrappers referenced by cron/jobs.json (workqueue-heartbeat,
-      # nightly-digest). Mounted alongside engine on PYTHONPATH=/app so their
-      # `from engine import ...` resolves.
-      - ./scripts:/app/scripts:ro
+      # nightly-digest). Mounted at $HERMES_HOME/scripts to match the per-town
+      # template; PYTHONPATH=/app still resolves their `from engine import ...`.
+      - ./scripts:/home/agent/.hermes/scripts:ro
       - ./state:/home/agent/.hermes/state
     command: python -m hermes_cli.main gateway run --replace
 

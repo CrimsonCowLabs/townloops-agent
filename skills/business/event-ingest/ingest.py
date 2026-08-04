@@ -1352,7 +1352,10 @@ def _cmd_ship(args) -> int:
     if not api_key and not args.dry_run:
         print("[error] TOWNLOOPS_API_KEY not set in env", file=sys.stderr)
         return 2
-    base = (os.getenv("TOWNLOOPS_API_URL") or TOWNLOOPS_DEFAULT_BASE).rstrip("/")
+    # TOWNLOOPS_DEFAULT_BASE already carries the /api/v1 segment; using the raw
+    # env var here would drop it (the env var is always set, so the old `or`
+    # short-circuit never reached the suffixed default). Matches townloops_api._url().
+    base = TOWNLOOPS_DEFAULT_BASE.rstrip("/")
     town_slug = args.town or TOWNLOOPS_TOWN_SLUG
     bulk_endpoint = f"{base}/towns/{town_slug}/entries/bulk"
     batch_size = max(1, min(TOWNLOOPS_BULK_LIMIT, args.batch_size))
@@ -1611,7 +1614,10 @@ def _cmd_resync(args) -> int:
     if not api_key:
         print("[error] TOWNLOOPS_API_KEY not set in env", file=sys.stderr)
         return 2
-    base = (os.getenv("TOWNLOOPS_API_URL") or TOWNLOOPS_DEFAULT_BASE).rstrip("/")
+    # TOWNLOOPS_DEFAULT_BASE already carries the /api/v1 segment; using the raw
+    # env var here would drop it (the env var is always set, so the old `or`
+    # short-circuit never reached the suffixed default). Matches townloops_api._url().
+    base = TOWNLOOPS_DEFAULT_BASE.rstrip("/")
     town_slug = args.town or TOWNLOOPS_TOWN_SLUG
     only_kinds = None
     if args.only_kind:

@@ -22,7 +22,8 @@ cd ~/townloops-agent-<town>
 
 cp .env.example .env
 # Fill in: TOWNLOOPS_API_KEY, TOWNLOOPS_TOWN_SLUG, LISTMONK_*, FIRECRAWL_API_KEY,
-# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, OPENAI_MODEL
+# TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, DASHBOARD_PASSWORD
+# (The LLM is ChatGPT via `codex login` on the host — no key in .env.)
 
 docker-compose up -d
 docker-compose logs -f agent
@@ -132,7 +133,7 @@ for the full catalog + CLI invocations.
 | `newsletter-weekly` | Compose weekly HTML campaign, push to Listmonk (operator-gated). |
 | `sponsor-management` | CRUD sponsors + ad_spots. Live against TownLoops endpoints; gated by `SPONSORS_ENABLED`. |
 
-**Scheduled runs** (`cron/jobs.json`, all `no_agent` unless noted): `workqueue-heartbeat` drains the per-event derive/enrich/ship queue every 10 min; `event-find-am/pm` scrape approved seeds at 06:00/18:00; `event-seed-discovery-weekly` (Sun 04:00) proposes new seeds; `api-check` (04:15) snapshots the OpenAPI contract; `nightly-digest` (21:00) reports event/workqueue state; and the LLM-backed `newsletter-compose` (Sun 08:00), `newsletter-push-reminder` (Sun 20:00), and `sponsor-audit` (Mon 10:00) deliver over Telegram. The engine-level jobs run the cron wrappers under `scripts/` (mounted at `/app/scripts` in `docker-compose.yml`); those same wrappers (`workqueue_heartbeat.py`, `onboarding_summary.py`, `event_find.py`, `event_seed_discovery.py`) are also the standalone entrypoints for non-cron / bare-systemd use.
+**Scheduled runs** (`cron/jobs.json`, all `no_agent` unless noted): `workqueue-heartbeat` drains the per-event derive/enrich/ship queue every 10 min; `event-find-am/pm` scrape approved seeds at 06:00/18:00; `event-seed-discovery-weekly` (Sun 04:00) proposes new seeds; `api-check` (04:15) snapshots the OpenAPI contract; `nightly-digest` (21:00) reports event/workqueue state; and the LLM-backed `newsletter-compose` (Sun 08:00), `newsletter-push-reminder` (Sun 20:00), and `sponsor-audit` (Mon 10:00) deliver over Telegram. The engine-level jobs run the cron wrappers under `scripts/` (mounted at `/home/agent/.hermes/scripts`); those same wrappers (`workqueue_heartbeat.py`, `onboarding_summary.py`, `event_find.py`, `event_seed_discovery.py`) are also the standalone entrypoints for non-cron / bare-systemd use.
 
 ## Tests
 
@@ -200,7 +201,7 @@ The hostname surfaces in `enrichment_queue.claimed_by` and every stderr line via
 
 The `docker-compose.yml` in this repo includes the full Firecrawl stack (api, playwright, redis, rabbitmq, nuq-postgres) using pullable images. `docker compose up -d` brings the whole thing up in one step. The agent reaches Firecrawl via internal Docker DNS at `http://firecrawl-api:3002` (the default set in the compose file — leave `FIRECRAWL_API_URL` unset in your `.env` to use it).
 
-Tuning knobs (`FIRECRAWL_NUM_WORKERS_PER_QUEUE`, `FIRECRAWL_MAX_CONCURRENT_JOBS`, etc.) are optional and read from the same `.env` — see `.env.macneo-template` for the full list. The API is also published to `127.0.0.1:8302` for debugging with tools like curl from the host.
+Tuning knobs (`FIRECRAWL_NUM_WORKERS_PER_QUEUE`, `FIRECRAWL_MAX_CONCURRENT_JOBS`, etc.) are optional overrides read from `.env`; their defaults live inline on the `firecrawl-api` service in `docker-compose.yml` (`${FIRECRAWL_…:-default}`). The API is also published to `127.0.0.1:8302` for debugging with tools like curl from the host.
 
 **Not using the bundled Firecrawl?** Set `FIRECRAWL_API_URL` in `.env` to your target (cloud: `https://api.firecrawl.dev` + `FIRECRAWL_API_KEY=fc-...`; or an external self-host: `http://host.docker.internal:8302` if you have a separate Firecrawl already running natively on the host).
 

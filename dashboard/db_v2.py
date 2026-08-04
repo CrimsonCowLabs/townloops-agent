@@ -6,9 +6,9 @@ event_seeds, agent_activity). Kept separate so the entity-first dashboard
 can keep working during the /v2 rollout window.
 
 All writes on the operator's behalf go through `set_*` helpers here rather
-than skill CLIs — approving/declining is a pure state flip on the events
-table, and the workqueue heartbeat picks it up on the next tick (or immediately
-via `enqueue_after_approval`).
+than skill CLIs — approving flips state→approved AND enqueues the first
+workqueue action (`extract-venue`) in the SAME transaction, so the state and
+the queue row commit or roll back together (no stranded events).
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ import json
 from typing import Any, Optional
 
 from dashboard.db import connect, _iso_utc_now
+from engine import workqueue as _workqueue
 
 
 # --------------------------------------------------------------------------
@@ -119,11 +120,15 @@ def events_by_approval(status: str, limit: int = 200) -> list[dict]:
     different route (recently_shipped)."""
     if status not in ("pending", "approved", "declined"):
         raise ValueError(f"unknown approval status: {status}")
+    # "pending" means awaiting operator review — always state=metadata-extracted.
+    # Gating on it keeps this list identical to the state-machine / digest count
+    # and excludes legacy event-ingest rows (which default to state='found').
+    state_clause = " AND state = 'metadata-extracted'" if status == "pending" else ""
     with connect() as c:
         rows = c.execute(
             f"SELECT {_EVENT_CARD_COLS} "
             "FROM events "
-            "WHERE approval_status = ? "
+            f"WHERE approval_status = ?{state_clause} "
             "ORDER BY COALESCE(date_utc, date, first_seen_at) ASC "
             "LIMIT ?",
             (status, limit),
@@ -141,22 +146,35 @@ def event_by_uid_v2(uid: str) -> Optional[dict]:
 
 
 def set_event_approval(uid: str, status: str, note: Optional[str] = None) -> int:
-    """Flip an event's approval_status AND advance state so the pipeline
-    view is coherent. Uses optimistic locking on approval_status so two
-    concurrent approvals don't double-enqueue downstream work."""
+    """Flip an event's approval_status AND advance state so the pipeline view is
+    coherent. On approval, enqueue the first workqueue action (`extract-venue`)
+    in the SAME transaction, so an event can never end up `approved` with no
+    queue row (there is no state-driven backfill to rescue it). Uses optimistic
+    locking on approval_status so two concurrent approvals don't double-enqueue."""
     if status not in ("approved", "declined"):
         raise ValueError(f"invalid target status: {status}")
     now = _iso_utc_now()
     # `approved` state feeds extract-venue; `declined` is terminal.
     new_state = "approved" if status == "approved" else "declined"
     with connect() as c:
-        cur = c.execute(
-            "UPDATE events "
-            "SET approval_status = ?, approval_note = ?, approval_at = ?, "
-            "    state = ?, state_updated_at = ? "
-            "WHERE event_uid = ? AND approval_status = 'pending'",
-            (status, note, now, new_state, now, uid),
-        )
+        # connect() is autocommit (isolation_level=None), so wrap the flip + the
+        # enqueue in an explicit transaction — otherwise a failed enqueue would
+        # leave the event approved with no queue row.
+        c.execute("BEGIN")
+        try:
+            cur = c.execute(
+                "UPDATE events "
+                "SET approval_status = ?, approval_note = ?, approval_at = ?, "
+                "    state = ?, state_updated_at = ? "
+                "WHERE event_uid = ? AND approval_status = 'pending'",
+                (status, note, now, new_state, now, uid),
+            )
+            if cur.rowcount and status == "approved":
+                _workqueue.enqueue(c, uid, "extract-venue")
+            c.execute("COMMIT")
+        except Exception:
+            c.execute("ROLLBACK")
+            raise
         return cur.rowcount
 
 
@@ -344,8 +362,11 @@ def headline_chips() -> dict:
         seeds = c.execute(
             "SELECT COUNT(*) FROM event_seeds WHERE status = 'approved'"
         ).fetchone()[0]
+        # Awaiting operator review: pending AND still at metadata-extracted.
+        # Matches events_by_approval('pending') and the state-machine/digest count.
         pending = c.execute(
-            "SELECT COUNT(*) FROM events WHERE approval_status = 'pending'"
+            "SELECT COUNT(*) FROM events "
+            "WHERE approval_status = 'pending' AND state = 'metadata-extracted'"
         ).fetchone()[0]
         in_flight = c.execute(
             "SELECT COUNT(*) FROM events WHERE state IN "

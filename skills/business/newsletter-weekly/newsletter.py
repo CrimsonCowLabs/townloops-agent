@@ -45,6 +45,12 @@ def _iso_week_dates(iso_week: str) -> tuple[date, date]:
     return monday, monday + timedelta(days=6)
 
 
+def _current_iso_week() -> str:
+    """Today's ISO week as '2026-W28'."""
+    y, w, _ = date.today().isocalendar()
+    return f"{y}-W{w:02d}"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -188,8 +194,9 @@ def cmd_push(args) -> int:
 
 
 def cmd_show(args) -> int:
+    week = args.week or _current_iso_week()
     conn = db.connect()
-    row = conn.execute("SELECT * FROM newsletters WHERE iso_week = ?", (args.week,)).fetchone()
+    row = conn.execute("SELECT * FROM newsletters WHERE iso_week = ?", (week,)).fetchone()
     print(json.dumps(dict(row) if row else None, default=str, indent=2))
     return 0
 
@@ -211,7 +218,8 @@ def main() -> int:
     ph.set_defaults(func=cmd_push)
 
     sh = sub.add_parser("show")
-    sh.add_argument("--week", required=True)
+    sh.add_argument("--week", default=None,
+                    help='ISO week like "2026-W28"; defaults to the current week')
     sh.set_defaults(func=cmd_show)
 
     args = p.parse_args()

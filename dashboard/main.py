@@ -28,7 +28,6 @@ from fastapi.templating import Jinja2Templates
 from dashboard import auth, chat, chat_db, db, db_v2, intent_handlers, skills
 
 from engine import db as _engine_db
-from engine import workqueue as _workqueue
 
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes"))
@@ -1089,18 +1088,9 @@ def v2_frag_seeds_proposed(request: Request):
           dependencies=[Depends(auth.require_session)])
 def v2_event_approve(event_uid: str, request: Request,
                      note: Optional[str] = Form(None)):
-    n = db_v2.set_event_approval(event_uid, "approved", note)
-    if n:
-        # Kick-on-approve (plan adversarial pass #9): immediately enqueue
-        # the next-action worker rather than waiting up to 10min for the
-        # heartbeat cron.
-        try:
-            with db_v2.connect() as conn:
-                _workqueue.enqueue(conn, event_uid, "extract-venue")
-        except Exception:
-            # Enqueue failure is non-fatal here — the heartbeat's
-            # state-driven backfill will catch it on the next tick.
-            pass
+    # set_event_approval flips state→approved AND enqueues extract-venue
+    # atomically (kick-on-approve, no 10-min heartbeat wait).
+    db_v2.set_event_approval(event_uid, "approved", note)
     row = db_v2.event_by_uid_v2(event_uid)
     if not row:
         raise HTTPException(status_code=404, detail="event not found")

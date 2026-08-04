@@ -31,7 +31,6 @@ MAX_ATTEMPTS = 3
 # Default per-action-per-hour limits. Overridden by town-profile.yaml
 # workqueue_rate_limits.<action>.
 _DEFAULT_RATE_LIMITS = {
-    "extract-metadata":   100,
     "extract-venue":       50,
     "extract-hosts":       50,
     "extract-people":      50,
@@ -45,7 +44,8 @@ def _iso_utc_now() -> str:
 
 
 def _worker_id() -> str:
-    return f"{socket.gethostname()}:{os.getpid()}"
+    host = os.environ.get("TOWNLOOPS_AGENT_HOSTNAME") or socket.gethostname()
+    return f"{host}:{os.getpid()}"
 
 
 def _load_rate_limits() -> dict[str, int]:
@@ -200,6 +200,33 @@ def fail(conn: sqlite3.Connection, queue_id: int, error: str) -> None:
             (now, queue_id),
         )
     conn.commit()
+
+
+def reap_stale_claims(conn: sqlite3.Connection,
+                      older_than_minutes: int = 15) -> int:
+    """Reclaim rows whose worker claimed them but never resolved them.
+
+    `claim()` commits `claimed_at` (attempts=0) before the orchestrator runs the
+    skill. If the drainer dies in between (deploy SIGTERM, OOM, host restart), the
+    row is orphaned: it can't be re-claimed (the claim filter needs
+    `claimed_at IS NULL OR attempts > 0`) and never surfaces to the operator (the
+    dashboard only shows attempts >= MAX_ATTEMPTS). Route each stale claim through
+    `fail()` so it either re-enters the queue or, after MAX_ATTEMPTS reaps, gets
+    marked `stuck-` and becomes visible. Returns the number of rows reaped.
+    """
+    stale = conn.execute(
+        """
+        SELECT queue_id FROM event_workqueue
+        WHERE resolved_at IS NULL
+          AND claimed_at IS NOT NULL
+          AND claimed_at < datetime('now', ?)
+        """,
+        (f"-{int(older_than_minutes)} minutes",),
+    ).fetchall()
+    for r in stale:
+        fail(conn, r[0], f"reclaimed: stale claim (worker died?) after "
+                         f"{older_than_minutes}m")
+    return len(stale)
 
 
 def counts_by_action(conn: sqlite3.Connection) -> dict[str, dict]:

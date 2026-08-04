@@ -7,7 +7,7 @@ skips silently. This is the whole concurrency-safety story.
 
 Legal states + next-actions:
 
-    found                       → extract-metadata
+    found                       → (legacy event-ingest default; not serviced here)
     metadata-extracted          → (operator decides)
     approved                    → extract-venue
     declined                    → (terminal)
@@ -30,8 +30,11 @@ from typing import Iterable
 
 
 # Machine-readable transition table. Key: current state. Value: (next_action, next_state_on_success)
+#
+# There is no `found → …` transition: event-find inserts events directly at
+# state=metadata-extracted. `found` remains only as the schema default for legacy
+# event-ingest rows (which ship via their own path, outside this workqueue).
 _TRANSITIONS: dict[str, tuple[str, str]] = {
-    "found":              ("extract-metadata", "metadata-extracted"),
     "approved":           ("extract-venue",    "venue-derived"),
     "venue-derived":      ("extract-hosts",    "hosts-derived"),
     "hosts-derived":      ("extract-people",   "people-derived"),

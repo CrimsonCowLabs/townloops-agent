@@ -37,9 +37,10 @@ SKILLS_ROOT = _HERMES_SKILLS if _HERMES_SKILLS.is_dir() else REPO_ROOT / "skills
 
 _PYTHON = os.environ.get("PYTHON", sys.executable)
 
-# Map workqueue next_action → skill dir + entry file
+# Map workqueue next_action → skill dir + entry file.
+# Note: there is no `extract-metadata` action — event-find lands events directly
+# at state=metadata-extracted, so the `found → extract-metadata` step is skipped.
 _ACTION_SKILLS: dict[str, tuple[str, str]] = {
-    "extract-metadata":  ("event-extract-metadata", "extract.py"),
     "extract-venue":     ("event-derive-venue",     "derive.py"),
     "extract-hosts":     ("event-derive-hosts",     "derive.py"),
     "extract-people":    ("event-derive-people",    "derive.py"),
@@ -107,6 +108,9 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
 
     try:
         with _lock.acquire("workqueue-drain"):
+            # Reclaim any rows orphaned by a drainer that died mid-run before
+            # servicing the action loop, so they can't stall invisibly.
+            reaped = workqueue.reap_stale_claims(conn)
             per_action: dict[str, dict] = {}
             for action, (skill, entry) in _ACTION_SKILLS.items():
                 claims = workqueue.claim(conn, action, limit=_BATCH_SIZE)
@@ -123,11 +127,12 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
                     )
                     rc, out, err = _invoke_skill(skill, entry, uid)
                     if rc == 127:
-                        # Skill not implemented yet — resolve the row and
-                        # leave the event in its current state; heartbeat
-                        # will retry later once the skill ships.
+                        # Skill entry missing (should not happen for the mapped
+                        # actions). Treated as a failed attempt: fail() increments
+                        # attempts and, at MAX_ATTEMPTS, marks the event stuck-
+                        # so it surfaces to the operator rather than looping.
                         workqueue.fail(conn, c["queue_id"],
-                                       f"skill not yet implemented: {skill}")
+                                       f"skill entry missing: {skill}")
                         skipped += 1
                         continue
                     if rc == 0:
@@ -162,8 +167,9 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
             status = {
                 "town": town,
                 "ts": _iso_utc_now(),
+                "reaped_stale_claims": reaped,
                 "per_action": per_action,
-                "any_work": bool(per_action),
+                "any_work": bool(per_action) or bool(reaped),
             }
             print(json.dumps(status, ensure_ascii=False))
             return status
