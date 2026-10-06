@@ -171,6 +171,7 @@ class TestFirecrawlErrorSurfacing:
         from engine import research
         monkeypatch.delenv("FIRECRAWL_API_KEY", raising=False)
         monkeypatch.delenv("FIRECRAWL_API_URL", raising=False)
+        monkeypatch.delenv("TOWNLOOPS_FIRECRAWL_URL", raising=False)
         html, url = research.firecrawl_fetch("https://example.com")
         assert html is None and url is None
 

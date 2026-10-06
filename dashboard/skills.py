@@ -19,7 +19,11 @@ from typing import Iterable
 
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes"))
-_SKILLS_ROOT = _HERMES_HOME / "skills" / "business"
+_REPO_ROOT = Path(__file__).resolve().parent.parent
+# Same fallback as engine/orchestrator.SKILLS_ROOT: docker mounts skills under
+# $HERMES_HOME; a native Hermes profile loads them from the repo (external_dirs).
+_HERMES_SKILLS = _HERMES_HOME / "skills" / "business"
+_SKILLS_ROOT = _HERMES_SKILLS if _HERMES_SKILLS.is_dir() else _REPO_ROOT / "skills" / "business"
 _SPAWN_LOG_DIR = _HERMES_HOME / "state" / "spawn-logs"
 
 _PYTHON = os.environ.get("PYTHON", "python3")

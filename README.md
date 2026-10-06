@@ -205,6 +205,8 @@ Tuning knobs (`FIRECRAWL_NUM_WORKERS_PER_QUEUE`, `FIRECRAWL_MAX_CONCURRENT_JOBS`
 
 **Not using the bundled Firecrawl?** Set `FIRECRAWL_API_URL` in `.env` to your target (cloud: `https://api.firecrawl.dev` + `FIRECRAWL_API_KEY=fc-...`; or an external self-host: `http://host.docker.internal:8302` if you have a separate Firecrawl already running natively on the host).
 
+**Running as a native Hermes profile (no Docker)?** Hermes scrubs every `FIRECRAWL_*` variable from commands the agent runs, so set `TOWNLOOPS_FIRECRAWL_URL` instead (it takes precedence over `FIRECRAWL_API_URL`; see `engine/firecrawl_env.py`). Without it, agent-invoked skills fall back to cloud Firecrawl.
+
 ### rsync from leader → follower
 
 ```

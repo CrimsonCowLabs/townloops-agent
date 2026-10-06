@@ -28,6 +28,7 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
+from engine.firecrawl_env import self_hosted_url
 from engine.log import get_logger
 
 log = get_logger("research")
@@ -53,7 +54,7 @@ def firecrawl_stats() -> dict:
 def _firecrawl_base() -> str:
     """Base URL. Honors $FIRECRAWL_API_URL for self-hosted; strips a trailing /v1
     since we always append /v1/... ourselves."""
-    raw = (os.environ.get("FIRECRAWL_API_URL") or FIRECRAWL_DEFAULT_BASE).rstrip("/")
+    raw = (self_hosted_url() or FIRECRAWL_DEFAULT_BASE).rstrip("/")
     if raw.endswith("/v1"):
         raw = raw[:-3]
     return raw
@@ -98,7 +99,7 @@ def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
     # send a placeholder bearer that satisfies Firecrawl's schema. Only both-
     # missing is a real "not configured" state.
     key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
-    self_hosted = bool((os.environ.get("FIRECRAWL_API_URL") or "").strip())
+    self_hosted = bool(self_hosted_url())
     if not key and not self_hosted:
         _STATS["http_error"] += 1
         _STATS["last_error"] = "FIRECRAWL_API_KEY not set and no FIRECRAWL_API_URL"

@@ -34,6 +34,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 from engine.ingest_core import DEFAULT_TZ
+from engine.firecrawl_env import self_hosted_url
 from engine.policy import firecrawl_bucket
 
 
@@ -162,7 +163,7 @@ def directory_link_block_reason(seed_host: str, link: str) -> Optional[str]:
 # --------------------------------------------------------------------------
 
 def _firecrawl_base() -> str:
-    raw = (os.getenv("FIRECRAWL_API_URL") or FIRECRAWL_DEFAULT_BASE).rstrip("/")
+    raw = (self_hosted_url() or FIRECRAWL_DEFAULT_BASE).rstrip("/")
     if raw.endswith("/v1"):
         raw = raw[:-3]
     return raw
@@ -170,7 +171,7 @@ def _firecrawl_base() -> str:
 
 def _firecrawl_headers() -> dict:
     key = os.getenv("FIRECRAWL_API_KEY", "").strip()
-    self_hosted = bool(os.getenv("FIRECRAWL_API_URL", "").strip())
+    self_hosted = bool(self_hosted_url())
     if not key and not self_hosted:
         raise RuntimeError(
             "Firecrawl misconfigured: neither FIRECRAWL_API_KEY nor "

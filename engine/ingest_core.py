@@ -48,6 +48,8 @@ from dateutil import parser as dateparser
 from dateutil import tz
 from icalendar import Calendar
 
+from engine.firecrawl_env import self_hosted_url
+
 
 # =====================================================================
 # Timezone
@@ -487,8 +489,8 @@ def _http_get(url: str, timeout: int = 20) -> requests.Response:
 
 
 def _firecrawl_endpoint() -> str:
-    """Honor FIRECRAWL_API_URL (self-hosted) if set, else fall back to the cloud."""
-    base = (os.getenv("FIRECRAWL_API_URL") or FIRECRAWL_CLOUD_BASE).rstrip("/")
+    """Honor the self-hosted URL (engine.firecrawl_env) if set, else fall back to the cloud."""
+    base = (self_hosted_url() or FIRECRAWL_CLOUD_BASE).rstrip("/")
     return f"{base}/v1/scrape"
 
 
@@ -500,7 +502,7 @@ def _firecrawl_scrape(url: str, timeout: int = 60) -> str:
     Firecrawl API still requires one to be present.
     """
     endpoint = _firecrawl_endpoint()
-    is_self_hosted = bool(os.getenv("FIRECRAWL_API_URL"))
+    is_self_hosted = bool(self_hosted_url())
     key = os.getenv("FIRECRAWL_API_KEY", "").strip()
     if not key and not is_self_hosted:
         raise RuntimeError(
