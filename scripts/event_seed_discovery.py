@@ -3,7 +3,7 @@
 Delegates to skills/business/event-seed-discovery/discover.py."""
 from __future__ import annotations
 
-import runpy
+import os
 import sys
 from pathlib import Path
 
@@ -14,9 +14,11 @@ def main() -> int:
     if not SKILL.exists():
         print(f"skill missing: {SKILL}", file=sys.stderr)
         return 1
-    sys.argv = [str(SKILL), "discover", "--limit", "15"]
-    runpy.run_path(str(SKILL), run_name="__main__")
-    return 0
+    # exec under $PYTHON, not in-process: Hermes runs cron scripts with the
+    # gateway venv's interpreter, which lacks the skill deps (feedparser etc.)
+    # in the docker image. Same convention as engine.orchestrator._PYTHON.
+    python = os.environ.get("PYTHON", sys.executable)
+    os.execv(python, [python, str(SKILL), "discover", "--limit", "15"])
 
 
 if __name__ == "__main__":

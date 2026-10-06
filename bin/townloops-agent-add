@@ -61,6 +61,9 @@ if [[ -e "$TARGET" ]]; then
 fi
 
 mkdir -p "$TARGET/state" "$TARGET/cron"
+# Writable $HERMES_HOME bind mount (own ChatGPT login lives here). Pre-create
+# it so docker doesn't create it root-owned.
+mkdir -m 700 -p "$TARGET/hermes-home"
 
 TEMPLATES="$REPO/templates"
 
@@ -209,10 +212,14 @@ Next:
   1. Fill $TARGET/.env with real credentials (Anthropic key, TownLoops bearer, Telegram, Listmonk).
   2. Edit $TARGET/town-profile.yaml — the town's name, region, allowed_hosts,
      and per-kind query seeds. Match categories to the town's live snapshot.
-  3. Bring up:
+  3. Give the town its own ChatGPT login for Hermes (device flow; never copy
+     ~/.hermes/auth.json — shared refresh tokens invalidate each other):
+       HERMES_HOME=$TARGET/hermes-home ~/workspace/hermes/.venv/bin/hermes \\
+         auth add openai-codex --type oauth --no-browser
+  4. Bring up:
        cd $TARGET
        docker compose up -d
-  4. Watch the loop:
+  5. Watch the loop:
        docker compose logs -f agent
      (First tick will run town-init setup; hourly ticks drive discovery → verify
       → research → enrich → ship → steady_state.)
