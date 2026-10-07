@@ -45,6 +45,13 @@ When the town is finally registered on TownLoops, an operator-triggered
 - An event whose `extra_json.reconcile.kind == "changed"` (staged by
   `event-reconcile`) is a source-side change to an existing live event: ship
   **PATCHes** `events/<live_slug>` with the changed `start_at`/`end_at` and/or
-  `venue_name` + `venue_id`, instead of POSTing a new event.
+  `venue_name` + `venue_id` (live mirror) or `venue_slug` (venue shipped in
+  step 1), instead of POSTing a new event. On a date change with no usable
+  source end time, the live end is shifted by the same amount as the start;
+  an end before the start is never sent (rows staged without the live times
+  read them with a GET first). A venue change whose new venue has no live id
+  or slug yet fails with rc 1 for a workqueue retry rather than PATCHing only
+  the name. Once a date-change PATCH lands, the older local row for the old
+  date is marked `status='superseded'` and loses its `townloops_slug`.
 - Linked entities with `source_kind='live'` are local mirrors of TownLoops rows;
   ship returns their `townloops_slug` without POSTing.

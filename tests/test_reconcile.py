@@ -23,9 +23,9 @@ VENUES = [
 ]
 
 
-def live_event(slug, title, start, venue_slug=None, url=None):
+def live_event(slug, title, start, venue_slug=None, url=None, end=None):
     return {"id": hash(slug) % 10000, "slug": slug, "title": title, "start_at": start,
-            "venue_slug": venue_slug, "source_url": url}
+            "end_at": end, "venue_slug": venue_slug, "source_url": url}
 
 
 def index(*events):
@@ -107,6 +107,39 @@ class TestClassify:
         )
         out = classify([{"title": "Trivia Night", "date": "2026-10-14T19:00:00"}], idx)
         assert out[0].kind == "unchanged" and out[0].live["slug"] == "trivia-2"
+
+    def test_past_series_occurrence_not_moved_onto_new_date(self):
+        # Weekly series: yesterday's occurrence is still in the live window but
+        # never on the source page, so it is the only unclaimed candidate.
+        idx = index(
+            live_event("music-0", "Live Music", "2026-10-05T02:00:00Z"),
+            live_event("music-1", "Live Music", "2026-10-12T02:00:00Z"),
+            live_event("music-2", "Live Music", "2026-10-19T02:00:00Z"),
+        )
+        out = classify([
+            {"title": "Live Music", "date": "2026-10-11T19:00:00"},
+            {"title": "Live Music", "date": "2026-10-18T19:00:00"},
+            {"title": "Live Music", "date": "2026-10-25T19:00:00"},
+        ], idx)
+        assert [c.kind for c in out] == ["unchanged", "unchanged", "new"]
+
+    def test_series_dropped_occurrence_not_moved(self):
+        # Source drops Oct 18 and lists Oct 25: that is a new occurrence, not
+        # the Oct 18 live row rescheduled.
+        idx = index(
+            live_event("music-1", "Live Music", "2026-10-12T02:00:00Z"),
+            live_event("music-2", "Live Music", "2026-10-19T02:00:00Z"),
+        )
+        out = classify([
+            {"title": "Live Music", "date": "2026-10-11T19:00:00"},
+            {"title": "Live Music", "date": "2026-10-25T19:00:00"},
+        ], idx)
+        assert [c.kind for c in out] == ["unchanged", "new"]
+
+    def test_past_single_occurrence_not_rescheduled(self):
+        idx = index(live_event("fest", "Fall Harvest Festival", "2026-10-05T17:00:00Z"))
+        [c] = classify([{"title": "Fall Harvest Festival", "date": "2026-10-24T10:00:00"}], idx)
+        assert c.kind == "new"
 
     def test_seed_listing_url_is_not_a_key(self):
         idx = index(live_event("a", "Something Else", "2026-10-10T03:00:00Z", url=SEED))
@@ -222,7 +255,8 @@ class TestStageAndEnrich:
         uid, _ = mod._stage(conn, "Seed", c, "run-1")
         mod.enrich(conn, live, {}, [uid], max_lookups=5)
         row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
-        assert row["townloops_slug"] == "jazz"
+        assert row["townloops_slug"] is None  # set by event-ship after the PATCH
+        assert json.loads(row["extra_json"])["reconcile"]["live_slug"] == "jazz"
         assert "changed" in row["approval_note"]
         v = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (row["derived_venue_uid"],)).fetchone()
         assert v["source_kind"] == "live" and v["townloops_slug"] == "tipsy-putt"
@@ -257,6 +291,101 @@ class TestStageAndEnrich:
         note = conn.execute("SELECT approval_note FROM events").fetchone()[0]
         assert "already live as jazz" in note
 
+    def test_restaged_as_new_clears_stale_reconcile_slug(self, skill):
+        mod, conn = skill
+        ev = {"title": "Jazz Night", "date": "2026-10-16T20:00:00", "venue": "Tipsy Putt"}
+        live = FakeLive(events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z")], venues=VENUES)
+        [c] = _classified(live, [ev])
+        uid, _ = mod._stage(conn, "Seed", c, "run-1")
+        # A row staged by an older reconcile that wrote the live slug locally.
+        conn.execute("UPDATE events SET townloops_slug = 'jazz' WHERE event_uid = ?", (uid,))
+        [c2] = _classified(FakeLive(venues=VENUES), [ev])  # live event gone
+        assert c2.kind == "new"
+        mod._stage(conn, "Seed", c2, "run-2")
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        assert row["townloops_slug"] is None
+
+    def test_change_to_shipped_row_goes_back_to_review(self, skill):
+        mod, conn = skill
+        from engine.derive_helpers import link_event_to_entity
+        from engine.event_extract import upsert_event
+        upsert_event(conn, "Seed", {"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                     "venue": "Gunbarrel Tavern"})
+        uid = conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        conn.execute("UPDATE events SET state = 'shipped', approval_status = 'approved', "
+                     "derived_venue_uid = 'old-venue', townloops_slug = 'jazz', pushed_at = 'x' "
+                     "WHERE event_uid = ?", (uid,))
+        link_event_to_entity(conn, uid, "venue", "old-venue", role="primary")
+        live = FakeLive(events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern")],
+                        venues=VENUES)
+        [c] = _classified(live, [{"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                  "venue": "Tipsy Putt"}])
+        assert c.kind == "changed"
+        assert mod._stage(conn, "Seed", c, "run-1")[0] == uid
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        assert row["state"] == "metadata-extracted" and row["approval_status"] == "pending"
+        assert row["derived_venue_uid"] is None
+        assert "changed" in row["approval_note"]
+        assert conn.execute("SELECT COUNT(*) FROM linked_events WHERE event_uid = ? "
+                            "AND entity_kind = 'venue'", (uid,)).fetchone()[0] == 0
+
+    def test_live_only_difference_does_not_reopen_shipped_row(self, skill):
+        # Source unchanged since we shipped; the live row was edited on
+        # TownLoops. Reopening would PATCH the human edit away.
+        mod, conn = skill
+        from engine.event_extract import upsert_event
+        ev = {"title": "Jazz Night", "date": "2026-10-09T20:00:00", "venue": "Tipsy Putt"}
+        upsert_event(conn, "Seed", ev)
+        conn.execute("UPDATE events SET state = 'shipped', approval_status = 'approved'")
+        live = FakeLive(events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern")],
+                        venues=VENUES)
+        [c] = _classified(live, [ev])
+        assert c.kind == "changed"
+        mod._stage(conn, "Seed", c, "run-1")
+        assert conn.execute("SELECT state FROM events").fetchone()[0] == "shipped"
+
+    def test_reopened_stuck_row_gets_fresh_workqueue(self, skill):
+        mod, conn = skill
+        from engine.event_extract import upsert_event
+        from engine import workqueue
+        upsert_event(conn, "Seed", {"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                     "venue": "Gunbarrel Tavern"})
+        uid = conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        conn.execute("UPDATE events SET state = 'stuck-entities-enriched', approval_status = 'approved'")
+        workqueue.enqueue(conn, uid, "ship")
+        conn.execute("UPDATE event_workqueue SET attempts = 3, resolved_at = 'x'")
+        live = FakeLive(events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern")],
+                        venues=VENUES)
+        [c] = _classified(live, [{"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                  "venue": "Tipsy Putt"}])
+        mod._stage(conn, "Seed", c, "run-1")
+        assert conn.execute("SELECT state FROM events").fetchone()[0] == "metadata-extracted"
+        assert conn.execute("SELECT COUNT(*) FROM event_workqueue WHERE event_uid = ? AND attempts > 0",
+                            (uid,)).fetchone()[0] == 0
+
+    def test_restage_drops_end_the_source_no_longer_gives(self, skill):
+        mod, conn = skill
+        live = FakeLive(events=[live_event("fest", "Fall Fest", "2026-10-10T03:00:00Z")])
+        [c] = _classified(live, [{"title": "Fall Fest", "date": "2026-10-16T19:00:00",
+                                  "end_at": "2026-10-17T02:00:00"}])
+        uid, _ = mod._stage(conn, "Seed", c, "run-1")
+        [c2] = _classified(live, [{"title": "Fall Fest", "date": "2026-10-16T19:00:00"}])
+        mod._stage(conn, "Seed", c2, "run-2")
+        assert conn.execute("SELECT end_at_utc FROM events WHERE event_uid = ?", (uid,)).fetchone()[0] is None
+
+    def test_change_to_declined_row_left_alone(self, skill):
+        mod, conn = skill
+        from engine.event_extract import upsert_event
+        upsert_event(conn, "Seed", {"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                     "venue": "Gunbarrel Tavern"})
+        conn.execute("UPDATE events SET state = 'declined', approval_status = 'declined'")
+        live = FakeLive(events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern")],
+                        venues=VENUES)
+        [c] = _classified(live, [{"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                  "venue": "Tipsy Putt"}])
+        mod._stage(conn, "Seed", c, "run-1")
+        assert conn.execute("SELECT state FROM events").fetchone()[0] == "declined"
+
     def test_budget_caps_lookups(self, skill):
         mod, conn = skill
         live = FakeLive()
@@ -282,8 +411,13 @@ def _load(rel, name):
 
 
 class FakeClient:
-    def __init__(self):
+    def __init__(self, live=None):
         self.calls = []
+        self.live = live or {}
+
+    def get(self, resource, slug):
+        self.calls.append(("GET", resource, slug, None))
+        return self.live[slug]
 
     def update(self, resource, slug, payload):
         self.calls.append(("PATCH", resource, slug, payload))
@@ -295,14 +429,16 @@ class FakeClient:
 
 
 class TestDownstream:
-    def _staged_change(self, skill):
+    def _staged_change(self, skill, venue="Tipsy Putt", end=None, src_end=None):
         mod, conn = skill
         live = FakeLive(
-            events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern")],
+            events=[live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern", end=end)],
             venues=[{**VENUES[1], "image_path": "/x.png"}, VENUES[0]],
         )
-        [c] = _classified(live, [{"title": "Jazz Night", "date": "2026-10-16T20:00:00",
-                                  "venue": "Tipsy Putt"}])
+        ev = {"title": "Jazz Night", "date": "2026-10-16T20:00:00", "venue": venue}
+        if src_end:
+            ev["end_at"] = src_end
+        [c] = _classified(live, [ev])
         uid, _ = mod._stage(conn, "Seed", c, "run-1")
         mod.enrich(conn, live, {}, [uid], max_lookups=0)
         return conn, uid
@@ -318,6 +454,70 @@ class TestDownstream:
         assert (verb, res, s) == ("PATCH", "events", "jazz")
         assert payload["start_at"] == "2026-10-17T03:00:00+00:00"
         assert payload["venue_name"] == "Tipsy Putt" and payload["venue_id"] == 99
+
+    def _patch(self, conn, uid, venue_slug=None, client=None, meta_edit=None):
+        ship = _load("skills/business/event-ship/ship.py", "event_ship")
+        event = dict(conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone())
+        client = client or FakeClient()
+        meta = ship._reconcile_change(event)
+        if meta_edit:
+            meta_edit(meta)
+        slug = ship._patch_live_event(client, conn, event, meta, venue_slug=venue_slug)
+        patches = [c[3] for c in client.calls if c[0] == "PATCH"]
+        return (patches[0] if patches else None) if slug else None
+
+    def test_legacy_meta_without_live_end_reads_live_row(self, skill):
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
+        client = FakeClient(live={"jazz": {"slug": "jazz", "start_at": "2026-10-10T03:00:00Z",
+                                           "end_at": "2026-10-10T05:00:00Z"}})
+        def legacy(meta):
+            meta.pop("live_start_at", None)
+            meta.pop("live_end_at", None)
+        payload = self._patch(conn, uid, client=client, meta_edit=legacy)
+        assert payload["end_at"] == "2026-10-17T05:00:00+00:00"
+
+    def test_venue_change_unresolved_fails_for_retry(self, skill):
+        conn, uid = self._staged_change(skill, venue="Brand New Hall")
+        client = FakeClient()
+        assert self._patch(conn, uid, venue_slug=None, client=client) is None
+        assert not [c for c in client.calls if c[0] == "PATCH"]
+
+    def test_venue_slug_comes_from_derived_venue(self, skill):
+        conn, uid = self._staged_change(skill, venue="Brand New Hall")
+        vuid = conn.execute("SELECT derived_venue_uid FROM events WHERE event_uid = ?", (uid,)).fetchone()[0]
+        conn.execute("UPDATE venues SET townloops_slug = 'brand-new-hall' WHERE entity_uid = ?", (vuid,))
+        payload = self._patch(conn, uid, venue_slug="some-other-linked-venue")
+        assert payload["venue_slug"] == "brand-new-hall"
+
+    def test_patch_supersedes_older_local_copy(self, skill):
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
+        from engine.event_extract import upsert_event
+        upsert_event(conn, "Seed", {"title": "Jazz Night", "date": "2026-10-09T20:00:00"})
+        conn.execute("UPDATE events SET state = 'shipped', townloops_slug = 'jazz' WHERE event_uid != ?", (uid,))
+        ship = _load("skills/business/event-ship/ship.py", "event_ship")
+        ship._supersede_older_copies(conn, uid, "jazz")
+        old = conn.execute("SELECT * FROM events WHERE event_uid != ?", (uid,)).fetchone()
+        assert old["townloops_slug"] is None and old["status"] == "superseded"
+        assert json.loads(old["extra_json"])["superseded_by"] == uid
+
+    def test_date_change_without_source_end_shifts_live_end(self, skill):
+        # Live 20:00–22:00 PT on Oct 9; source moves it to Oct 16 20:00, no end.
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern", end="2026-10-10T05:00:00Z")
+        payload = self._patch(conn, uid)
+        assert payload["start_at"] == "2026-10-17T03:00:00+00:00"
+        assert payload["end_at"] == "2026-10-17T05:00:00+00:00"
+
+    def test_date_change_never_sends_end_before_start(self, skill):
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern", src_end="2026-10-09T22:00:00")
+        payload = self._patch(conn, uid)
+        assert "end_at" not in payload or payload["end_at"] > payload["start_at"]
+
+    def test_venue_change_attaches_shipped_venue(self, skill):
+        conn, uid = self._staged_change(skill, venue="Brand New Hall")
+        vuid = conn.execute("SELECT derived_venue_uid FROM events WHERE event_uid = ?", (uid,)).fetchone()[0]
+        conn.execute("UPDATE venues SET townloops_slug = 'hermes-slt-abc' WHERE entity_uid = ?", (vuid,))
+        payload = self._patch(conn, uid)
+        assert payload["venue_slug"] == "hermes-slt-abc"
 
     def test_ship_skips_post_for_live_mirror(self, skill):
         conn, uid = self._staged_change(skill)

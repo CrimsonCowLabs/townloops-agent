@@ -190,36 +190,105 @@ def _reconcile_change(event: dict) -> Optional[dict]:
     return None
 
 
-def _patch_live_event(client, conn, event: dict, meta: dict) -> Optional[str]:
-    """Apply a source-side date/venue change to the existing live event."""
+def _to_dt(value: Optional[str]):
+    from dateutil import tz as _tz
+    from engine.reconcile import parse_start
+    dt, _ = parse_start(value, _tz.gettz(os.environ.get("AGENT_TZ", "America/Los_Angeles")))
+    return dt
+
+
+def _patched_end(source_end: Optional[str], live_start: Optional[str],
+                 live_end: Optional[str], new_start: str) -> Optional[str]:
+    """End time to send with a date change: the source's own end if it is
+    after the new start, else the live end shifted by the same amount as the
+    start (keeps the duration). None when neither is usable — never an end
+    that falls before the start."""
+    start = _to_dt(new_start)
+    if start is None:
+        return None
+    end = _to_dt(source_end)
+    if end and end > start:
+        return end.isoformat(timespec="seconds")
+    ls, le = _to_dt(live_start), _to_dt(live_end)
+    if ls and le and le > ls:
+        return (start + (le - ls)).isoformat(timespec="seconds")
+    return None
+
+
+def _venue_ref(conn, event: dict, venue_slug: Optional[str]) -> dict:
+    """How to point the live event at its new venue: the live id of a live
+    mirror, else the slug of the derived venue (shipped in step 1 of main()),
+    else the step-1 slug when nothing was derived. {} when unresolved."""
     import json
+    vuid = event.get("derived_venue_uid")
+    if not vuid:
+        return {"venue_slug": venue_slug} if venue_slug else {}
+    v = conn.execute(
+        "SELECT extra_json, townloops_slug FROM venues WHERE entity_uid = ?", (vuid,),
+    ).fetchone()
+    if not v:
+        return {}
+    try:
+        live_id = json.loads(v["extra_json"] or "{}").get("live_id")
+    except (json.JSONDecodeError, AttributeError):
+        live_id = None
+    if live_id:
+        return {"venue_id": live_id}
+    return {"venue_slug": v["townloops_slug"]} if v["townloops_slug"] else {}
+
+
+def _patch_live_event(client, conn, event: dict, meta: dict,
+                      venue_slug: Optional[str] = None) -> Optional[str]:
+    """Apply a source-side date/venue change to the existing live event.
+    Returns the live slug, or None (→ rc 1, workqueue retry) when the change
+    can't be applied correctly."""
     changes = meta.get("changes") or {}
+    live_slug = meta["live_slug"]
     patch: dict[str, Any] = {}
     if "start_at" in changes:
         patch["start_at"] = event["date_utc"] or changes["start_at"]["source"]
-        if event["end_at_utc"] or event["end_at"]:
-            patch["end_at"] = event["end_at_utc"] or event["end_at"]
-    if "venue" in changes:
-        patch["venue_name"] = event["venue_name"] or event["venue_raw"]
-        if event.get("derived_venue_uid"):
-            v = conn.execute(
-                "SELECT extra_json FROM venues WHERE entity_uid = ?",
-                (event["derived_venue_uid"],),
-            ).fetchone()
+        if "live_end_at" in meta:
+            live_start = meta.get("live_start_at") or changes["start_at"].get("live")
+            live_end = meta["live_end_at"]
+        else:
+            # Staged before live times were recorded — read the live row.
             try:
-                live_id = (json.loads(v["extra_json"] or "{}") if v else {}).get("live_id")
-            except json.JSONDecodeError:
-                live_id = None
-            if live_id:
-                patch["venue_id"] = live_id
+                cur = client.get("events", live_slug) or {}
+            except Exception as e:  # noqa: BLE001
+                print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+                return None
+            live_start, live_end = cur.get("start_at"), cur.get("end_at")
+        end = _patched_end(event.get("end_at_utc"), live_start, live_end, patch["start_at"])
+        if end:
+            patch["end_at"] = end
+    if "venue" in changes:
+        ref = _venue_ref(conn, event, venue_slug)
+        if not ref:
+            print(f"patch event {live_slug}: new venue not resolved/shipped yet", file=sys.stderr)
+            return None
+        patch["venue_name"] = event["venue_name"] or event["venue_raw"]
+        patch.update(ref)
     if not patch:
-        return meta["live_slug"]
+        return live_slug
     try:
-        client.update("events", meta["live_slug"], patch)
+        client.update("events", live_slug, patch)
     except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
-        print(f"patch event {meta['live_slug']} failed: {str(e)[:200]}", file=sys.stderr)
+        print(f"patch event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
         return None
-    return meta["live_slug"]
+    return live_slug
+
+
+def _supersede_older_copies(conn, event_uid: str, live_slug: str) -> None:
+    """After a date change lands, the local row for the old date (a different
+    uid) still maps to the same live event. Retire it so nothing reads a
+    phantom occurrence or ships it back over the change."""
+    conn.execute(
+        "UPDATE events SET status = 'superseded', townloops_slug = NULL, "
+        "  extra_json = CASE WHEN json_valid(COALESCE(extra_json, '{}')) "
+        "    THEN json_set(COALESCE(extra_json, '{}'), '$.superseded_by', ?) ELSE extra_json END "
+        "WHERE townloops_slug = ? AND event_uid != ?",
+        (event_uid, live_slug, event_uid),
+    )
 
 
 def _mark_shipped(conn, event_uid: str, slug: str, disabled: bool = False) -> None:
@@ -289,7 +358,9 @@ def main() -> int:
     #    this as a change to an existing TownLoops event, else create.
     change = _reconcile_change(event)
     if change:
-        event_slug = _patch_live_event(client, conn, event, change)
+        event_slug = _patch_live_event(client, conn, event, change, venue_slug=venue_slug)
+        if event_slug:
+            _supersede_older_copies(conn, event_uid, event_slug)
     else:
         event_slug = _ship_event(client, conn, event, venue_slug)
     if not event_slug:

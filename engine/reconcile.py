@@ -15,9 +15,11 @@ Recurring series ("Daily Live Music", weekly league nights) share a title and
 often a source_url across occurrences, so a key match on a *different* day is
 not automatically a date change. `classify_all` runs two passes: first every
 extraction that lands on a live occurrence the same local day claims it; then
-a leftover extraction is a date change only if exactly one unclaimed live
-occurrence of that key remains inside DATE_CHANGE_WINDOW. Anything else is a
-new occurrence.
+a leftover extraction is a date change only if its key matches exactly one live
+occurrence in total (a one-off, not a series), that occurrence is unclaimed,
+not already in the past, and inside DATE_CHANGE_WINDOW. Anything else is a new
+occurrence — the live window reaches back a couple of days, so past series
+occurrences are always unclaimed and must never be "rescheduled" forward.
 """
 
 from __future__ import annotations
@@ -255,20 +257,22 @@ def classify_all(extracted: list[dict], index: LiveIndex,
         else:
             pending.append((i, start, has_time, cands, how or ""))
 
-    # Pass 2 — a lone unclaimed nearby occurrence = rescheduled event.
+    # Pass 2 — a one-off live event, unclaimed and upcoming = rescheduled.
+    today = now.astimezone(tz).date()
     for i, start, has_time, cands, how in pending:
         ev = extracted[i]
-        near = [c for c in cands
-                if id(c) not in claimed and abs(c["_start"] - start) <= DATE_CHANGE_WINDOW]
-        if len(near) == 1:
-            live = near[0]
+        live = cands[0] if len(cands) == 1 else None
+        if (live is not None and id(live) not in claimed
+                and live["_start"].astimezone(tz).date() >= today
+                and abs(live["_start"] - start) <= DATE_CHANGE_WINDOW):
             claimed.add(id(live))
             changes = _diff(ev, start, has_time, live, index)
             out[i] = Classification("changed", ev, live=live, changes=changes,
                                     matched_by=how,
-                                    reason="single unclaimed live occurrence nearby")
+                                    reason="single upcoming live occurrence nearby")
         else:
             reason = ("no live match" if not cands else
-                      f"{len(near)} unclaimed live occurrences nearby — treated as a new occurrence")
+                      f"{len(cands)} live occurrence(s) of this key, none reschedulable — "
+                      "treated as a new occurrence")
             out[i] = Classification("new", ev, reason=reason)
     return [c for c in out if c is not None]

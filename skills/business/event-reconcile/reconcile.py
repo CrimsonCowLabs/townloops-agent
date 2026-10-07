@@ -141,13 +141,41 @@ def _to_utc(value: Optional[str]) -> Optional[str]:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds") if dt else None
 
 
+def _reopen_for_review(conn, uid: str, venue_changed: bool) -> bool:
+    """A source change to an event this agent already shipped (or gave up on)
+    goes back to the operator queue; on approval it re-runs the pipeline and
+    event-ship PATCHes the live row. A venue change drops the old venue so it
+    is derived afresh. Declined rows stay declined. Returns True if reopened."""
+    cur = conn.execute(
+        "UPDATE events SET state = 'metadata-extracted', approval_status = 'pending', "
+        "  state_updated_at = ?, "
+        "  derived_venue_uid = CASE WHEN ? THEN NULL ELSE derived_venue_uid END "
+        "WHERE event_uid = ? AND (state = 'shipped' OR state LIKE 'stuck-%')",
+        (iso_utc_now(), 1 if venue_changed else 0, uid),
+    )
+    if not cur.rowcount:
+        return False
+    # Old queue rows keep their attempt counts (a stuck row is at the max),
+    # which would stop re-enqueued actions from ever being claimed.
+    conn.execute("DELETE FROM event_workqueue WHERE event_uid = ?", (uid,))
+    if venue_changed:
+        conn.execute("DELETE FROM linked_events WHERE event_uid = ? AND entity_kind = 'venue'", (uid,))
+    return True
+
+
 def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str, str]:
-    """Upsert one new/changed extraction locally. Returns (event_uid, upsert action)."""
+    """Upsert one new/changed extraction locally. Returns (event_uid, upsert action).
+
+    `end_at_utc` always mirrors the current extraction (no stale end survives
+    the source dropping it). The live slug of a changed event lives only in
+    the reconcile metadata —
+    `townloops_slug` is set by event-ship once the PATCH lands, so a row later
+    re-staged as `new` can't inherit a slug that makes its create 409."""
     ev = c.extracted
     action = upsert_event(conn, seed_name, ev)
     uid = event_uid(seed_name, ev.get("title") or "", ev.get("date") or "")
     row = conn.execute(
-        "SELECT approval_status, extra_json FROM events WHERE event_uid = ?", (uid,),
+        "SELECT extra_json FROM events WHERE event_uid = ?", (uid,),
     ).fetchone()
     live = c.live or {}
     meta = {
@@ -159,23 +187,28 @@ def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str
         "live_slug": live.get("slug"),
         "live_id": live.get("id"),
         "live_venue_slug": live.get("venue_slug"),
+        "live_start_at": live.get("start_at"),
+        "live_end_at": live.get("end_at"),
         "organizer": (ev.get("organizer") or "").strip() or None,
         "organizer_kind": ev.get("organizer_kind") if ev.get("organizer_kind") in ("business", "community") else None,
     }
+    # Reopen only when the source itself changed since we last saw it; if only
+    # the live row differs (edited on TownLoops), leave the human edit alone.
+    if c.kind == "changed" and action != "unchanged":
+        _reopen_for_review(conn, uid, venue_changed="venue" in c.changes)
     note = ("[reconcile] new — not on TownLoops" if c.kind == "new"
             else f"[reconcile] live event {live.get('slug')} changed: {c.summary()}")
     conn.execute(
         "UPDATE events SET extra_json = ?, "
-        "  date_utc = COALESCE(?, date_utc), end_at_utc = COALESCE(?, end_at_utc), "
+        "  date_utc = COALESCE(?, date_utc), end_at_utc = ?, "
         "  image_url = COALESCE(image_url, ?), "
-        "  townloops_slug = CASE WHEN ? IS NOT NULL THEN COALESCE(townloops_slug, ?) ELSE townloops_slug END, "
+        "  townloops_slug = CASE WHEN ? AND pushed_at IS NULL THEN NULL ELSE townloops_slug END, "
         "  approval_note = CASE WHEN approval_status = 'pending' THEN ? ELSE approval_note END "
         "WHERE event_uid = ?",
         (_merge_extra(row["extra_json"], "reconcile", meta),
          _to_utc(ev.get("date")), _to_utc(ev.get("end_at")),
          ev.get("image_url") if isinstance(ev.get("image_url"), str) and ev["image_url"].startswith("http") else None,
-         live.get("slug") if c.kind == "changed" else None,
-         live.get("slug") if c.kind == "changed" else None,
+         1 if c.kind == "new" else 0,
          note, uid),
     )
     return uid, action

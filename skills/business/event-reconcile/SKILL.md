@@ -20,14 +20,24 @@ everything lands in the local DB for the operator.
      by title similarity ≥ 0.88;
    - same local day → `unchanged`, or `changed` if the start moved > 30 min
      or the venue name differs from the live venue;
-   - different day → `changed` (rescheduled) only if exactly one unclaimed live
-     occurrence is within 60 days; recurring series otherwise count as `new`;
+   - different day → `changed` (rescheduled) only for a one-off: the key matches
+     exactly one live occurrence, it is unclaimed, not already past, and within
+     60 days. Recurring series (several live occurrences) always count as `new`
+     — a past occurrence is never moved onto a future date;
    - no match → `new`.
 4. **Stage locally** — `new` and `changed` are upserted with the same `event_uid`
    as event-find (`seed + title + start`), at `state=metadata-extracted`,
    `approval_status=pending`, with `extra_json.reconcile` = `{kind, changes,
    live_slug, live_id, organizer, …}` and an `approval_note` the operator sees.
-   `changed` rows also get `townloops_slug = <live slug>`. `unchanged` events
+   The live slug stays in `extra_json.reconcile.live_slug`; `townloops_slug` is
+   only set by event-ship once the PATCH lands (a row re-staged as `new` has a
+   stale, never-shipped reconcile slug cleared). A `changed` extraction whose
+   source content changed since last seen and that hits an already `shipped`
+   (or `stuck-`) local row reopens it (fresh workqueue rows) to
+   `metadata-extracted`/`pending` — dropping the old venue link on a venue change
+   — so approval re-runs the pipeline and ship PATCHes live. `declined` rows are
+   left alone, and so is a shipped row when only the live side differs (an edit
+   made on TownLoops is never PATCHed back). `unchanged` events
    insert nothing; a pending event-find copy of one is flagged
    "already live … likely duplicate".
 5. **Enrich** every row staged this run (max `--max-lookups` Firecrawl calls):
