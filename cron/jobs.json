@@ -56,6 +56,15 @@
       "prompt": "python /home/agent/.hermes/scripts/performer_research.py --limit 3"
     },
     {
+      "id": "business-promote",
+      "name": "Promote operator-approved business candidates (live check → enrich → ship; ≤3 per run; nothing ships without operator approval)",
+      "schedule": "*/15 * * * *",
+      "skills": ["business-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/scripts/business_promote.py --limit 3"
+    },
+    {
       "id": "entity-live-sync",
       "name": "Daily entity live sync (resync shipped venues/hosts/people from TownLoops, PATCH enrichment into live blanks, GET-verify)",
       "schedule": "30 3 * * *",

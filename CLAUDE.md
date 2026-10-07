@@ -41,7 +41,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 019).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 020).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -75,6 +75,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     driven by the `performer-research` skill, ≤3 per 20-min cron run),
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
     `entity-live-sync`), `live_patch.py` (full-body PATCH + GET verify for events and entities),
+    `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote),
     `live_lookup.py` (find a live record before creating one).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
@@ -157,8 +158,12 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   calls no-op and retry on the next tick — don't treat a single throttle as a bug.
 - **Business discovery is in-repo** (`skills/business/business-discovery/`, ported from the CMO's
   archived `townloops-business-discovery`). It only proposes: candidates land in `discovery_candidates`
-  (`new` → `verified`/`rejected`, or `already-live` with `live_slug`) and it never writes to TownLoops.
-  Not on cron — sweeps spend Firecrawl budget. See `docs/business-discovery-handoff.md`.
+  (`new` → `verified`/`rejected`, or `already-live` with `live_slug`); sweep/verify never write to TownLoops
+  and aren't on cron (Firecrawl budget). Shipping is **operator-gated** (`engine/business_promote.py`): the
+  operator's Promote button or a confirmed `promote_businesses` chat widget flips `verified` → `approved`
+  (no CLI flag can), and the `business-promote` cron ships only `approved` rows — live re-check, local
+  business, enrich, then `engine/entity_ship.ship_entity` (event-ship's entity path) → `promoted`. Operator
+  declines are remembered by name. See `docs/business-discovery-handoff.md`.
 
 ## Deployment / routing (VPS)
 

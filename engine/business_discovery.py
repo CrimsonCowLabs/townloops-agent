@@ -14,10 +14,15 @@ Candidate statuses:
   verified      page checks out — proposed to the operator
   rejected      the verifier (or the operator) said no; never re-proposed
   already-live  matches a live business; never re-proposed
+  approved      the operator said ship it — waiting for the promote run
+  promoted      shipped as a business (`research_entity_uid`, `live_slug`)
 
 A re-sweep only touches `new`/`verified` rows (they can still turn out to be
-live); whatever else is decided stays decided. Never writes to TownLoops —
-promoting a candidate is a separate, operator-approved step.
+live); whatever else is decided stays decided. An operator decline
+(`reject_reason` 'operator…') is remembered by name too: a later candidate
+under another URL whose name matches it lands as `rejected`. Never writes to
+TownLoops — promoting a candidate is engine/business_promote.py, after the
+operator approves.
 """
 
 from __future__ import annotations
@@ -37,6 +42,7 @@ from engine.derive_helpers import entity_richness, iso_utc_now, normalize_name
 
 KIND = "business"
 FUZZY_NAME_RATIO = 0.85
+OPERATOR_REASON = "operator"
 PROPOSED = ("new", "verified")
 _PROPOSED_SQL = "(" + ", ".join(f"'{s}'" for s in PROPOSED) + ")"
 
@@ -155,6 +161,29 @@ def name_from_title(title: Optional[str]) -> Optional[str]:
 # Candidate store
 # --------------------------------------------------------------------------
 
+def declined_match(conn: sqlite3.Connection, town_slug: str,
+                   name: Optional[str]) -> Optional[dict]:
+    """The candidate the operator declined whose name this one matches
+    (normalized, ≥0.85) — a verifier rejection doesn't count."""
+    target = normalize_name(name or "")
+    if not target:
+        return None
+    for row in conn.execute(
+        "SELECT candidate_uid, display_name FROM discovery_candidates "
+        "WHERE town_slug = ? AND kind = ? AND status = 'rejected' "
+        "AND (reject_reason = ? OR reject_reason LIKE ?)",
+        (town_slug, KIND, OPERATOR_REASON, OPERATOR_REASON + ":%"),
+    ).fetchall():
+        other = normalize_name(row[1] or "")
+        if other and SequenceMatcher(None, target, other).ratio() >= FUZZY_NAME_RATIO:
+            return {"candidate_uid": row[0], "display_name": row[1]}
+    return None
+
+
+def _declined_reason(d: dict) -> str:
+    return f"operator declined {d['display_name']!r} earlier ({d['candidate_uid'][:12]})"
+
+
 def candidate_uid(town_slug: str, canonical_url: str) -> str:
     return hashlib.sha1(f"{town_slug}|{canonical_url}|{KIND}".encode("utf-8")).hexdigest()
 
@@ -171,8 +200,9 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
                  candidates: Iterable[discovery.Candidate], index: LiveIndex) -> dict:
     """Store swept candidates. New URLs are inserted (`new`, or
     `already-live` when they match a live business); URLs seen before only
-    refresh `last_seen_at`, except a still-proposed one that is now live."""
-    counts = {"seen": 0, "inserted": 0, "already_live": 0, "updated": 0}
+    refresh `last_seen_at`, except a still-proposed one that is now live.
+    A new URL whose name matches an operator decline is stored `rejected`."""
+    counts = {"seen": 0, "inserted": 0, "already_live": 0, "declined": 0, "updated": 0}
     for c in candidates:
         counts["seen"] += 1
         now = iso_utc_now()
@@ -183,6 +213,9 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
             (uid,),
         ).fetchone()
         if existing is None:
+            declined = None if live else declined_match(conn, town_slug, c.display_name)
+            status = "already-live" if live else "rejected" if declined else "new"
+            reason = live.reason if live else _declined_reason(declined) if declined else None
             conn.execute(
                 """INSERT INTO discovery_candidates
                      (candidate_uid, town_slug, kind, target_category_slug, canonical_url,
@@ -190,11 +223,10 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
                       first_seen_at, last_seen_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                 (uid, town_slug, KIND, c.target_category_slug, c.canonical_url,
-                 c.display_name, c.source_signal,
-                 "already-live" if live else "new",
-                 live.slug if live else None, live.reason if live else None, now, now),
+                 c.display_name, c.source_signal, status,
+                 live.slug if live else None, reason, now, now),
             )
-            counts["already_live" if live else "inserted"] += 1
+            counts["already_live" if live else "declined" if declined else "inserted"] += 1
             continue
         if existing[0] in PROPOSED:
             live = live or index.match(c.canonical_url, existing[1])
@@ -218,17 +250,28 @@ def pending_verify(conn: sqlite3.Connection, town_slug: str, limit: int) -> list
            ORDER BY first_seen_at, rowid LIMIT ?""", (town_slug, KIND, limit))
 
 
+def approved_queue(conn: sqlite3.Connection, town_slug: str, limit: int) -> list[dict]:
+    """Operator-approved candidates for the promote run: fewest promote
+    attempts first, so ones that keep failing don't block the rest."""
+    return _candidates(conn, """SELECT * FROM discovery_candidates
+           WHERE town_slug = ? AND kind = ? AND status = 'approved'
+           ORDER BY promote_attempts, last_seen_at, rowid LIMIT ?""", (town_slug, KIND, limit))
+
+
 def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
                    index: LiveIndex) -> Optional[str]:
     """Store the verifier's verdict on one `new` candidate and return its new
     status — or None when it is no longer `new` (the operator decided while
     the verify ran; their call stands). A nameless (directory) candidate
-    takes its name from the page title, and the live check runs again with
-    it, since live may have grown since the sweep."""
+    takes its name from the page title, and the live and operator-decline
+    checks run again with it, since live may have grown since the sweep."""
     name = candidate.get("display_name") or name_from_title(verdict.get("title"))
     live = index.match(candidate["canonical_url"], name)
+    declined = None if live else declined_match(conn, candidate["town_slug"], name)
     if live:
         status, live_slug, reason = "already-live", live.slug, live.reason
+    elif declined:
+        status, live_slug, reason = "rejected", None, _declined_reason(declined)
     elif verdict.get("verified"):
         status, live_slug, reason = "verified", None, None
     else:

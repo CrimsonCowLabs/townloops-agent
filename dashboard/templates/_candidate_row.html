@@ -12,7 +12,14 @@
         hx-target="#cand-{{ row.candidate_uid }}"
         hx-swap="outerHTML">Approve</button>
     {% endif %}
-    {% if row.status not in ('rejected', 'already-live') %}
+    {% if row.kind == 'business' and row.status == 'verified' %}
+      <button
+        hx-post="/candidates/{{ row.candidate_uid }}/promote"
+        hx-target="#cand-{{ row.candidate_uid }}"
+        hx-swap="outerHTML"
+        hx-confirm="Promote this business? It ships to TownLoops on the next promote run.">Promote</button>
+    {% endif %}
+    {% if row.status not in ('rejected', 'already-live', 'promoted') %}
       <button class="danger"
         hx-post="/candidates/{{ row.candidate_uid }}/reject"
         hx-target="#cand-{{ row.candidate_uid }}"

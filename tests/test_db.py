@@ -99,7 +99,7 @@ class TestRunMigrations:
         assert len(applied) >= 7
         # First and last known migrations by prefix.
         assert applied[0].startswith("001_")
-        assert applied[-1].startswith(("00", "01"))  # future-proof
+        assert applied[-1][:3].isdigit() and applied[-1][3] == "_"
 
     def test_idempotent_rerun(self, tmp_path):
         from engine import db as db_mod

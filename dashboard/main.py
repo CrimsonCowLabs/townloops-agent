@@ -344,6 +344,19 @@ def candidate_approve(uid: str, request: Request):
     return HTMLResponse(html)
 
 
+@app.post("/candidates/{uid}/promote",
+          dependencies=[Depends(auth.require_session)])
+def candidate_promote(uid: str, request: Request):
+    db.promote_candidate(uid)
+    row = db.get_candidate(uid)
+    if not row:
+        raise HTTPException(status_code=404, detail="candidate not found")
+    html = _TEMPLATES.get_template("_candidate_row.html").render(
+        request=request, row=row,
+    )
+    return HTMLResponse(html)
+
+
 @app.post("/candidates/{uid}/reject",
           dependencies=[Depends(auth.require_session)])
 def candidate_reject(uid: str, request: Request):
@@ -1390,6 +1403,15 @@ def v2_chat_confirm(request: Request,
                 f"enqueued {result['enqueued_extract_venue']} for venue extraction.")
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (already in a terminal state)."
+    elif kind == "promote_businesses":
+        body = (f"Approved {result['approved']} business candidates — the next "
+                "business-discovery promote run checks live, enriches and ships them.")
+        if result.get("skipped"):
+            body += f" Skipped {result['skipped']} (no longer verified)."
+    elif kind == "decline_businesses":
+        body = f"Declined {result['declined']} business candidates; they won't be proposed again."
+        if result.get("skipped"):
+            body += f" Skipped {result['skipped']} (already decided)."
     else:
         body = f"Executed intent {kind}: {result}"
     chat_db.insert_message("agent", body, thread_id=thread_id)
@@ -1415,9 +1437,11 @@ def v2_chat_cancel(request: Request,
     if not updated:
         raise HTTPException(status_code=409, detail="cancel race")
 
+    proposal = payload.get("proposal") or {}
+    noun = "business candidates" if str(proposal.get("kind", "")).endswith("_businesses") else "events"
     chat_db.insert_message(
         "system",
-        f"Cancelled — nothing changed. ({(payload.get('proposal') or {}).get('count', 0)} events would have been affected.)",
+        f"Cancelled — nothing changed. ({proposal.get('count', 0)} {noun} would have been affected.)",
         thread_id=thread_id,
     )
     return JSONResponse({"ok": True},

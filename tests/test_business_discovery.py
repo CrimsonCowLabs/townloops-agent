@@ -80,7 +80,7 @@ def test_record_sweep_inserts_new_and_marks_already_live(fresh_db):
         _cand("https://brand-new.example/", "Brand New Bakery"),
         _cand("https://cuppatahoe.com/about", "Cuppa"),
     ], _index())
-    assert counts == {"seen": 2, "inserted": 1, "already_live": 1, "updated": 0}
+    assert counts == {"seen": 2, "inserted": 1, "already_live": 1, "declined": 0, "updated": 0}
     rows = _rows(fresh_db)
     assert rows["https://brand-new.example/"]["status"] == "new"
     live = rows["https://cuppatahoe.com/about"]

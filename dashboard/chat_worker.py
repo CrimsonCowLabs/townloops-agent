@@ -30,7 +30,8 @@ from dashboard import chat_db
 # doesn't appear, and the reply text still renders. Kept in sync with
 # `dashboard.intent_handlers.ALLOWED_KINDS`; duplicated here so the worker
 # doesn't need the intent_handlers import.
-_ALLOWED_PROPOSAL_KINDS = frozenset({"decline_events", "approve_events"})
+_ALLOWED_PROPOSAL_KINDS = frozenset({"decline_events", "approve_events",
+                                    "promote_businesses", "decline_businesses"})
 
 # `.*?` non-greedy so we can find the LAST fenced json block if Hermes emits
 # more than one (unlikely but not forbidden). re.DOTALL to span newlines.

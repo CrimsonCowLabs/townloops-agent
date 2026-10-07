@@ -17,12 +17,14 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 from dashboard import db_v2
+from engine import business_promote
 from engine import workqueue as _wq
 
 
 # Whitelist of intent kinds. Anything Hermes proposes that isn't in this
 # set is refused by /v2/chat/confirm.
-ALLOWED_KINDS = frozenset({"decline_events", "approve_events"})
+ALLOWED_KINDS = frozenset({"decline_events", "approve_events",
+                           "promote_businesses", "decline_businesses"})
 
 
 def _iso_utc_now() -> str:
@@ -58,6 +60,10 @@ def execute(proposal: dict, *, note: Optional[str] = None) -> dict:
         return _decline_events(uids, note=note)
     if kind == "approve_events":
         return _approve_events(uids, note=note)
+    if kind == "promote_businesses":
+        return _promote_businesses(uids)
+    if kind == "decline_businesses":
+        return _decline_businesses(uids, note=note)
     # Unreachable if validate_proposal was called first.
     return {"error": f"no handler for kind: {kind}"}
 
@@ -132,3 +138,17 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
         "skipped": len(skipped),
         "skipped_uids": skipped,
     }
+
+
+def _promote_businesses(uids: list[str]) -> dict:
+    """Approve verified business candidates for promotion — the next
+    `business-discovery promote` run creates, enriches and ships them. Same
+    effect as the /candidates Promote button."""
+    with db_v2.connect() as c:
+        return {"kind": "promote_businesses", **business_promote.approve(c, uids)}
+
+
+def _decline_businesses(uids: list[str], *, note: Optional[str] = None) -> dict:
+    """Decline business candidates for good (and their same-name twins)."""
+    with db_v2.connect() as c:
+        return {"kind": "decline_businesses", **business_promote.decline(c, uids, note=note)}

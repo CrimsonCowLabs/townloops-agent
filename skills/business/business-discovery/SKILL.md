@@ -46,10 +46,14 @@ is for the ones that never host a listed event.
 | `verified` | page checks out — proposed to the operator |
 | `rejected` | verifier (or operator) said no; the reason is in `reject_reason` |
 | `already-live` | matches a live business (`live_slug`) |
+| `approved` | the operator approved it — the next `promote` run ships it |
+| `promoted` | shipped as a business (`research_entity_uid`, `live_slug`) |
 
 Re-sweeps only revisit `new`/`verified` rows (they may have gone live since);
 `rejected` and `already-live` stay decided. A verifier crash (Firecrawl down)
-leaves the candidate `new` for the next run.
+leaves the candidate `new` for the next run. A candidate the **operator**
+declined is also remembered by name: a new URL whose name is ≥0.85 similar
+lands as `rejected`.
 
 Candidates are rows in `discovery_candidates` (kind `business`) in
 `state/townloops.db`.
@@ -63,18 +67,47 @@ python discover.py list                       # proposed: verified first, then n
 python discover.py list --status already-live # what dedup caught, with live_slug
 python discover.py list --status all
 python discover.py stats
+python discover.py propose-promote [--uid U ...]  # read-only proposal (all verified by default)
+python discover.py propose-decline [--uid U ...]  # read-only proposal
+python discover.py promote [--limit 3]            # ships ONLY operator-approved candidates
 ```
 
 The operator can also browse them on the dashboard's `/candidates` page or
 ask in dashboard chat ("which businesses did discovery find?") — answer with
 `list`.
 
+## Promoting (operator-gated)
+
+The operator approves a verified candidate with the **Promote** button on
+`/candidates`, or by confirming a chat proposal. When they ask in chat to add
+/ promote / ship discovered businesses:
+
+1. Run `propose-promote` (with `--uid` for the ones they named; a uid prefix
+   works). It changes nothing.
+2. Summarize ("3 verified businesses: Brand New Bakery, …. Click Confirm to
+   approve them for shipping.") and end the reply with the fenced JSON block
+   holding the returned `proposal` and `preview` — the dashboard renders it as
+   a Confirm widget (kind `promote_businesses`). Same for declining:
+   `propose-decline` → `decline_businesses`.
+3. Zero matches → say so and emit no block.
+
+Confirming only marks them `approved`. The `promote` run (cron every 15 min)
+then, per candidate: checks live again (→ `already-live`), makes or reuses the
+local business, enriches it, and ships it through the standard entity ship
+path (live lookup first) → `promoted`. A failed ship or unreadable site stays
+`approved` and is retried, behind candidates with fewer attempts
+(`promote_attempts`, last failure in `promote_error`). A candidate the
+operator declines mid-run is not shipped. Declining one candidate also
+declines open candidates of the same business under other URLs. `promote` never touches a candidate the operator hasn't approved, so
+running it is always safe — but never claim you approved or shipped anything.
+
 ## Boundaries
 
-- **Never writes to TownLoops.** Reads the live business list only (after
-  `verify_town()`). Turning a verified candidate into a live business is a
-  separate, operator-approved promote step — don't POST a candidate yourself.
-- Not scheduled: sweeps spend Firecrawl budget, so they run when the operator
-  asks (CLI, chat, or the dashboard's sweep action). Both subcommands hold
-  the `business-discovery` flock.
+- **sweep / verify / list / propose-* never write to TownLoops.** Reads the
+  live business list only (after `verify_town()`). Only `promote` writes, and
+  only operator-approved candidates — don't POST a candidate yourself.
+- Sweeps are not scheduled: they spend Firecrawl budget, so they run when the
+  operator asks (CLI, chat, or the dashboard's sweep action). `promote` is on
+  cron (`business-promote`) but spends nothing unless something is approved.
+  sweep, verify and promote hold the `business-discovery` flock.
 - Firecrawl calls share `engine.policy.firecrawl_bucket`.

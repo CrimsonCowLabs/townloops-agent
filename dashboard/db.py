@@ -721,12 +721,21 @@ def approve_candidate(uid: str) -> int:
     return cur.rowcount
 
 
+def promote_candidate(uid: str) -> int:
+    """Approve a verified business candidate for promotion: the next
+    `business-discovery promote` run checks live, enriches and ships it.
+    Returns rows affected."""
+    from engine import business_promote
+    with connect() as c:
+        return business_promote.approve(c, [uid])["approved"]
+
+
 def reject_candidate(uid: str, reason: str = "operator") -> int:
     with connect() as c:
         cur = c.execute(
             "UPDATE discovery_candidates "
             "SET status = 'rejected', reject_reason = ?, last_seen_at = ? "
-            "WHERE candidate_uid = ?",
+            "WHERE candidate_uid = ? AND status NOT IN ('promoted', 'already-live')",
             (reason, _iso_utc_now(), uid),
         )
     return cur.rowcount

@@ -29,6 +29,10 @@
           Proposed action: <b>decline {{ proposal.count }} events</b>
         {% elif proposal.kind == 'approve_events' %}
           Proposed action: <b>approve {{ proposal.count }} events</b>
+        {% elif proposal.kind == 'promote_businesses' %}
+          Proposed action: <b>promote and ship {{ proposal.count }} businesses</b>
+        {% elif proposal.kind == 'decline_businesses' %}
+          Proposed action: <b>decline {{ proposal.count }} business candidates</b>
         {% else %}
           Proposed action: <b>{{ proposal.kind }}</b>
         {% endif %}
@@ -39,12 +43,18 @@
         {% endif %}
       </div>
 
+      {% set is_business = proposal.kind in ('promote_businesses', 'decline_businesses') %}
+      {% set noun = 'business' if is_business else 'event' %}
       {% if envelope.preview %}
         <details class="chat-toolcall-preview">
-          <summary>{{ envelope.preview|length }} event{{ '' if envelope.preview|length == 1 else 's' }} — show list</summary>
+          <summary>{{ envelope.preview|length }} {{ noun }}{{ '' if envelope.preview|length == 1 else ('es' if is_business else 's') }} — show list</summary>
           <ul>
             {% for p in envelope.preview[:10] %}
-              <li><span class="muted">{{ p.date[:16] }}</span> · {{ p.title }}{% if p.source %} <span class="muted">({{ p.source }})</span>{% endif %}</li>
+              {% if is_business %}
+              <li>{{ p.name or '—' }} <span class="muted">{{ p.url }}{% if p.address %} · {{ p.address }}{% endif %}</span></li>
+              {% else %}
+              <li><span class="muted">{{ (p.date or '')[:16] }}</span> · {{ p.title }}{% if p.source %} <span class="muted">({{ p.source }})</span>{% endif %}</li>
+              {% endif %}
             {% endfor %}
             {% if envelope.preview|length > 10 %}
               <li class="muted">… and {{ envelope.preview|length - 10 }} more</li>
@@ -56,7 +66,7 @@
       {% if widget_state == 'proposed' %}
         <div class="chat-toolcall-actions">
           <form hx-post="/v2/chat/confirm" hx-swap="none"
-                onsubmit="return confirm('Really run this action on {{ proposal.count }} events?')">
+                onsubmit="return confirm('Really run this action on {{ proposal.count }} {{ 'businesses' if is_business else 'events' }}?')">
             <input type="hidden" name="message_id" value="{{ m.message_id }}">
             <input type="hidden" name="thread_id" value="default">
             <button type="submit" class="chat-toolcall-btn chat-toolcall-confirm">✓ Confirm</button>
