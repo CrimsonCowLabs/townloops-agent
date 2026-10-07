@@ -18,18 +18,15 @@ import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 import yaml
 from dateutil import tz as _tz
 
-from engine import inspection
+from engine import entity_enrich, inspection
 from engine import lock as _lock
 from engine import reconcile as rc
-from engine.derive_helpers import (
-    best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity, names_match,
-    normalize_name, open_db, record_activity,
-)
+from engine.derive_helpers import iso_utc_now, open_db, record_activity
+from engine.entity_enrich import Budget
 from engine.event_extract import (
     build_extraction_prompt, codex_exec, event_uid, firecrawl_markdown,
     parse_json_array, town_tz_name, upsert_event,
@@ -52,12 +49,7 @@ EXTRA_FIELDS = (
     '  "image_url":   absolute URL of an image for this specific event, if the page shows one, else null\n'
 )
 
-_TABLES = {"venue": "venues", "business": "businesses", "community": "communities"}
 _LIVE_RESOURCES = {"venue": "venues", "business": "businesses", "community": "communities"}
-# Fields research_url() can fill on a local row (fill-blanks only).
-_ENRICH_FIELDS = ("description", "address", "website", "phone", "image_path",
-                  "image_alt", "instagram", "facebook", "tiktok", "twitter",
-                  "youtube", "linkedin")
 
 
 def _load_profile() -> dict:
@@ -69,10 +61,6 @@ def _load_profile() -> dict:
 
 def _town_tz():
     return _tz.gettz(town_tz_name())
-
-
-def _columns(conn, table: str) -> set[str]:
-    return {r["name"] for r in conn.execute(f"PRAGMA table_info('{table}')")}
 
 
 def _merge_extra(raw: Optional[str], key: str, value: dict) -> str:
@@ -279,119 +267,17 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
 # Phase 2 — enrichment (event image, venue, host + images)
 # --------------------------------------------------------------------------
 
-class Budget:
-    def __init__(self, n: int):
-        self.left = n
-
-    def take(self) -> bool:
-        if self.left <= 0:
-            return False
-        self.left -= 1
-        return True
-
-
-def _pick_site(name: str, results: list[dict]) -> Optional[str]:
-    """First search hit that is plausibly the entity's own site."""
-    from engine.discovery import host_blocked
-    compact = normalize_name(name).replace(" ", "")
-    for r in results:
-        url = r.get("url") or ""
-        if not url or host_blocked(url, allow_gov=True):
-            continue
-        host = (urlparse(url).hostname or "").replace("-", "").replace(".", "")
-        title = (r.get("title") or "").split("|")[0].split(" - ")[0]
-        if names_match(name, title) or (len(compact) >= 5 and compact[:12] in host):
-            return url
-    return None
-
-
-def _research(name: str, website: Optional[str], town: str, budget: Budget) -> dict:
-    """Find and scrape the entity's site. Returns a payload of fillable fields."""
-    from engine.discovery import firecrawl_search
-    from engine.research import research_url
-    url = website
-    if not url:
-        if not budget.take():
-            return {}
-        url = _pick_site(name, firecrawl_search(f'"{name}" {town}', limit=5))
-        if not url:
-            return {}
-    if not budget.take():
-        return {}
-    res = research_url(url, use_firecrawl=True)
-    payload = {k: v for k, v in res.payload.items() if k in _ENRICH_FIELDS and v}
-    if res.fetched_from:
-        payload.setdefault("website", website or res.fetched_from[0])
-    payload.pop("name", None)
-    return payload
-
-
-def _fill_blanks(conn, table: str, entity_uid: str, payload: dict, status: str) -> list[str]:
-    cols = _columns(conn, table)
-    row = dict(conn.execute(f"SELECT * FROM {table} WHERE entity_uid = ?", (entity_uid,)).fetchone())
-    filled = [k for k, v in payload.items() if k in cols and v and not row.get(k)]
-    sets = [f"{k} = ?" for k in filled]
-    vals = [payload[k] for k in filled]
-    if "enrichment_status" in cols:
-        sets.append("enrichment_status = ?")
-        vals.append(status)
-    if "enriched_at" in cols:
-        sets.append("enriched_at = ?")
-        vals.append(iso_utc_now())
-    if filled:
-        sets.append("last_modified_at = ?")
-        vals.append(iso_utc_now())
-    if sets:
-        conn.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE entity_uid = ?",
-                     (*vals, entity_uid))
-    return filled
-
-
-def resolve_entity(conn, kind: str, name: str, event: dict, live: Live,
-                   town: str, budget: Budget, report: dict) -> Optional[str]:
-    """Local match → live mirror → new shell; enrich as needed. Returns entity_uid."""
-    table = _TABLES[kind]
-    local_rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
-    hit = best_name_match(name, local_rows)
-    if hit:
-        if not hit.get("image_path") and hit.get("enrichment_status") not in ("enriched", "not-found", "image-proposed"):
-            payload = _research(hit["name"], hit.get("website"), town, budget)
-            if payload:
-                status = "image-proposed" if hit.get("source_kind") == "live" else "enriched"
-                _fill_blanks(conn, table, hit["entity_uid"], payload, status)
-        return hit["entity_uid"]
-
-    live_hit = best_name_match(name, live.entities[kind])
-    if live_hit:
-        entity_uid = mirror_live_entity(conn, kind, live_hit)
-        if not live_hit.get("image_path"):
-            # Live row has no image: stage one locally for the operator.
-            payload = _research(live_hit["name"], live_hit.get("website"), town, budget)
-            if payload.get("image_path"):
-                _fill_blanks(conn, table, entity_uid,
-                             {k: payload[k] for k in ("image_path", "image_alt") if payload.get(k)},
-                             "image-proposed")
-                report["live_image_proposals"].append({"kind": kind, "slug": live_hit["slug"],
-                                                       "image_path": payload["image_path"]})
+def _resolve_and_tally(conn, kind: str, name: str, event: dict, live: Live,
+                   town: str, budget: Budget, report: dict) -> str:
+    """Resolve via engine.entity_enrich and tally the outcome into `report`."""
+    r = entity_enrich.resolve_entity(conn, kind, name, event, live.entities[kind], town, budget)
+    if r.outcome == "live":
         report["live_matched"][kind] += 1
-        return entity_uid
-
-    entity_uid = mint_entity_uid(kind, name, event["event_uid"])
-    fields = {
-        "name": name.strip(), "source": f"derived:event:{event['event_uid'][:12]}",
-        "source_kind": "derived", "derived_from_event_uid": event["event_uid"],
-        "derivation_confidence": 70, "enrichment_status": "pending",
-        "category_slug": event.get("category_slug"),
-    }
-    if kind == "venue":
-        fields["address"] = event.get("location") or event.get("location_raw")
-    if kind == "community":
-        fields["kind"] = "group"
-    insert_entity(conn, table, entity_uid, fields)
-    payload = _research(name, None, town, budget)
-    filled = _fill_blanks(conn, table, entity_uid, payload, "enriched" if payload else "not-found")
-    report["created"][kind].append({"name": name, "filled": filled})
-    return entity_uid
+        if r.image_proposal:
+            report["live_image_proposals"].append(r.image_proposal)
+    elif r.outcome == "created":
+        report["created"][kind].append({"name": name, "filled": r.filled})
+    return r.entity_uid
 
 
 def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, report: dict) -> None:
@@ -421,14 +307,14 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
     # Venue.
     venue = (event.get("venue_raw") or event.get("venue_name") or "").strip()
     if venue and not event.get("derived_venue_uid"):
-        vuid = resolve_entity(conn, "venue", venue, event, live, town, budget, report)
+        vuid = _resolve_and_tally(conn, "venue", venue, event, live, town, budget, report)
         conn.execute("UPDATE events SET derived_venue_uid = ? WHERE event_uid = ? AND derived_venue_uid IS NULL",
                      (vuid, uid))
 
     # Host business / community.
     org, org_kind = meta.get("organizer"), meta.get("organizer_kind")
     if org and org_kind in ("business", "community") and not event.get("derived_host_uid"):
-        huid = resolve_entity(conn, org_kind, org, event, live, town, budget, report)
+        huid = _resolve_and_tally(conn, org_kind, org, event, live, town, budget, report)
         conn.execute(
             "UPDATE events SET derived_host_uid = ?, derived_host_kind = ? "
             "WHERE event_uid = ? AND derived_host_uid IS NULL",
@@ -439,8 +325,8 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
 
 def enrich(conn, live: Live, profile: dict, uids: Optional[list[str]], max_lookups: int) -> dict:
     town = profile.get("name") or os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
-    report = {"events": 0, "event_images": 0, "live_matched": {k: 0 for k in _TABLES},
-              "created": {k: [] for k in _TABLES}, "live_image_proposals": []}
+    report = {"events": 0, "event_images": 0, "live_matched": {k: 0 for k in entity_enrich.TABLES},
+              "created": {k: [] for k in entity_enrich.TABLES}, "live_image_proposals": []}
     if uids is None:
         rows = conn.execute(
             "SELECT * FROM events WHERE approval_status = 'pending' "

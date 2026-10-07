@@ -61,7 +61,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     town-scoped `Idempotency-Key`, and `verify_town()` (fail-closed cross-town guard).
   - `discovery.py`, `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
     `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
-    `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py`.
+    `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py`,
+    `entity_enrich.py` (budgeted local → live → new entity resolution + fill-blanks enrichment;
+    event-reconcile uses it — new enrichment work builds on it, not on reconcile's skill script).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -120,7 +122,7 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **`verify_town()` is a hard cross-town guard.** Never write to a town other than `$TOWNLOOPS_TOWN_SLUG`.
   It fails closed if the bearer's scope or the `categories.json` snapshot drifts. Called at the top of
   ingest and enrichment sweeps.
-- **Enrichment is "fill blanks only"** (`engine/enrichment.apply` writes only NULL-locally fields, to
+- **Enrichment is "fill blanks only"** (`engine/entity_enrich.fill_blanks` writes only NULL-locally fields, to
   protect operator edits). Failure mode: an operator edit made *on TownLoops* isn't seen locally, so a
   sweep may refill with worse data. Use `enrich.py resync` (remote→local) before sweeping if this is a risk.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
