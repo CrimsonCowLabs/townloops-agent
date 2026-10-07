@@ -129,6 +129,13 @@ class TestVerifyCandidate:
         assert v["phone"] and "555" in v["phone"]
         assert v["hours"]
 
+    def test_verdict_carries_the_page_title(self, monkeypatch):
+        from engine import discovery
+        self._mock_scrape(monkeypatch, "Bakery in Town. Menu.", title="Home | Town Bakery")
+        assert discovery.verify_candidate("https://x.co", town_name="Town")["title"] == "Home | Town Bakery"
+        self._mock_scrape(monkeypatch, "Bakery in Elsewhere.", title="Elsewhere Bakery")
+        assert discovery.verify_candidate("https://x.co", town_name="Town")["title"] == "Elsewhere Bakery"
+
 
 class TestSweepFunctions:
     def test_sweep_web_search_dedupes(self, monkeypatch):

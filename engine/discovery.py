@@ -6,8 +6,7 @@ generalized: the kernel does not touch SQLite or town-profile config; skills
 own that. The kernel returns plain dataclasses / dicts.
 
 Callers:
-  - skills/business/business-discovery/discover.py
-  - skills/business/community-discovery/discover.py
+  - engine/business_discovery.py (the business-discovery skill)
 
 Firecrawl access rules (matches CMO version):
   - $FIRECRAWL_API_KEY set → use it (cloud or self-hosted-with-keys).
@@ -457,6 +456,7 @@ def verify_candidate(
         reasons: [str, ...],
         evidence: str,           # concat of head + address/phone/hours matches
         markdown_head: str,      # first ~500 chars for downstream inspection
+        title: str,              # the page <title>; names a nameless candidate
         address: str | None,
         phone: str | None,
         hours: str | None,
@@ -544,6 +544,7 @@ def verify_candidate(
             "reasons": reasons_reject,
             "evidence": evidence,
             "markdown_head": md[:500],
+            "title": scraped.get("title") or "",
             "address": address,
             "phone": phone,
             "hours": hours,
@@ -554,6 +555,7 @@ def verify_candidate(
         "reasons": ["in-town, no closure marker, customer-facing"],
         "evidence": evidence,
         "markdown_head": md[:500],
+        "title": scraped.get("title") or "",
         "address": address,
         "phone": phone,
         "hours": hours,

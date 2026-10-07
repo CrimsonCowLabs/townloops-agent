@@ -25,7 +25,8 @@ The repo was rewritten from an **entity-first phase machine** (bootstrapping →
   (`dashboard/db_v2.py`, `dashboard/templates/v2/`).
 - **Stale / partially superseded docs**: `README.md`, `SOUL.md` §Mission/Rhythm/Toolset, and
   `docs/skill-inventory.md` still describe the old entity-first skill names (`event-source-discovery`,
-  `venue-enrichment`, `business-discovery`, `onboarding-orchestrator` phase machine). `docs/STATUS.md`
+  `venue-enrichment`, `onboarding-orchestrator` phase machine). (`business-discovery` exists again, rebuilt
+  on the current engine — see Gotchas.) `docs/STATUS.md`
   is a cold-start hand-off dated 2026-07-10 and predates the rewrite. **Verify against the actual
   `skills/business/` tree and `engine/` before trusting any skill name in those docs.**
 
@@ -40,7 +41,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 018).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 019).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -59,7 +60,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `south-lake-tahoe-events/events.py`** that imports from this core — see Gotchas.
   - `townloops_api.py` — TownLoops client: envelope unwrap, retry on 429/503/network, deterministic
     town-scoped `Idempotency-Key`, and `verify_town()` (fail-closed cross-town guard).
-  - `discovery.py`, `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
+  - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
+    `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
+    same website/under its path, or name ≥0.85 → `already-live`), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
     `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py`,
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5
@@ -149,9 +152,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   Idempotency-Key dedup makes duplicate POSTs safe. See README §"Second instance / failover".
 - **Codex CLI is best-effort.** If the CLI is missing/throttled, LLM (classifier, event-find extraction)
   calls no-op and retry on the next tick — don't treat a single throttle as a bug.
-- **Business discovery for *new* businesses lives on the CMO Hermes**, not here
-  (`~/.hermes/skills/business/townloops-business-discovery/`). This repo's enrichment only fills details
-  on existing rows.
+- **Business discovery is in-repo** (`skills/business/business-discovery/`, ported from the CMO's
+  archived `townloops-business-discovery`). It only proposes: candidates land in `discovery_candidates`
+  (`new` → `verified`/`rejected`, or `already-live` with `live_slug`) and it never writes to TownLoops.
+  Not on cron — sweeps spend Firecrawl budget. See `docs/business-discovery-handoff.md`.
 
 ## Deployment / routing (VPS)
 

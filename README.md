@@ -145,7 +145,7 @@ pytest
 
 ~250 tests covering `engine/` — db migrations, event state machine, workqueue claim/rate-limiting, ingest_core parsers, townloops_api client, enrichment, research heuristics, lock contention. All in-process, no network, ~3s wall-clock.
 
-**Note**: proactive web sweeps for new businesses in a town live on the CMO Hermes at `~/.hermes/skills/business/townloops-business-discovery/`, not in this repo. This repo only mines/derives entities as an event side-effect (`event-ingest`, `event-derive-*`) and fills their details (`event-enrich-entities`); it does not scan the web for new discoverable businesses. See `docs/STATUS.md` § "Business discovery" for the split.
+**Note**: proactive web sweeps for new businesses run in this repo as the `business-discovery` skill (Firecrawl sweeps + page verify, deduped against live TownLoops businesses). It only proposes candidates for the operator — it never writes to TownLoops. See `docs/business-discovery-handoff.md`.
 
 ## Sponsors
 

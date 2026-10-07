@@ -1,75 +1,80 @@
-# Business discovery — handoff to per-town operator
+# Business discovery — per-town operator notes
 
-Web-wide discovery of candidate businesses (find URLs that *should* be TownLoops businesses but aren't yet) is a **CMO-level operator function**, not a per-town operational loop. This doc explains how the two sides connect from the perspective of the per-town operator running this repo.
-
-For the reasoning behind the split, see `docs/STATUS.md` § "Business discovery" and the P2 review dated 2026-07-08.
+Web-wide discovery of businesses that *should* be on TownLoops but aren't yet
+now runs **in this repo**, as the `business-discovery` skill. It used to be a
+CMO-level function (`~/.hermes/skills/business/townloops-business-discovery/`);
+that skill was archived and its scripts deleted, so the town agent owns it.
 
 ## Big picture
 
 ```
-┌──────────────────────────────┐          ┌──────────────────────────────┐
-│  CMO Hermes (~/.hermes/)     │          │  Per-town agent (this repo)  │
-│                              │          │                              │
-│  townloops-business-         │          │  event-ingest                │
-│    discovery                 │          │    → mines businesses as     │
-│    → sweeps web              │          │      event side-effect       │
-│    → verifies                │          │  business-enrichment         │
-│    → promotes to draft       │          │    → fills details on rows   │
-│                              │          │      already in the local DB │
-│  townloops-research          │          │                              │
-│    → URL → payload           │          │                              │
-│    → ships via API           │          │                              │
-└──────────────────────────────┘          └──────────────────────────────┘
-                │                                       │
-                └───────────► TownLoops API ◄───────────┘
-                        POST /towns/<slug>/businesses
+town-profile.yaml → discovery.business
+        │
+        ▼
+business-discovery sweep ──► discovery_candidates (state/townloops.db)
+   (Firecrawl search,             status: new
+    seed directories,                 │
+    optional Facebook)                ▼
+        │                  business-discovery verify
+        │                    (scrape page: in town? open? customer-facing?)
+        │                         │
+        ▼                         ▼
+  GET live businesses ──► dedup ──► verified │ rejected │ already-live
+  (TownLoops, read-only)
 ```
 
-Both sides POST to the SAME API endpoint. The dedup is enforced server-side (slug collision → `409 slug_taken` → idempotent) and client-side (CMO's discovery fetches the existing businesses list before adding candidates).
+- Code: `skills/business/business-discovery/discover.py` (CLI) →
+  `engine/business_discovery.py` (store + live dedup) → `engine/discovery.py`
+  (Firecrawl kernel, no LLM).
+- Event mining still creates businesses as a side effect of events. Discovery
+  covers the ones that never host a listed event.
 
-**Ownership boundary**: the CMO decides which businesses exist. This per-town agent enriches whatever's in its local DB. It does not scan the web.
+## Dedup against live
 
-## What the per-town operator needs to know
+Each run fetches the town's live businesses and marks a candidate
+`already-live` (with `live_slug` and the reason) when:
 
-1. **New businesses may appear in TownLoops without going through this repo.** If you see a business row you don't recognize, check `townloops-research/data/drafts.db` on the CMO side — it may have been shipped from there.
-2. **You cannot "add a new business" from here.** `event-ingest add-manual` inserts *events* + mined organizer side-effects; it's not a business creation flow. If a client asks "please add Alibi Ale Works as a sponsor-eligible business," that's a CMO ticket.
-3. **Enrichment IS your job.** Once a business row lands in this town's `businesses` table (whether from event mining or from a CMO ship), `business-enrichment sweep` fills its address, phone, website, image, and socials.
+- its URL is a live business's `website`, or a page under it on the same host
+  (a chain's per-location website like `laketahoealeworx.com/stateline` only
+  covers that location's pages; Facebook/Instagram/Google Sites and other
+  shared platforms only match on the exact page), or
+- its name is ≥0.85 similar to a live business's name (normalized, as in the
+  CMO's `already_in_townloops`).
 
-## The `cross-check` subcommand
+The check runs at sweep and again at verify (live may have grown, and a
+directory candidate only gets a name from its page title at verify).
+`already-live` and `rejected` candidates are never proposed again.
 
-To see what the CMO has drafted-but-not-shipped for potential handoff:
+## Operating it
 
 ```bash
-export TOWNLOOPS_RESEARCH_DRAFTS_DB=/path/to/cmo/townloops-research/data/drafts.db
-python skills/business/business-enrichment/enrich.py cross-check
-python skills/business/business-enrichment/enrich.py cross-check --town-hint "South Lake Tahoe"
+python skills/business/business-discovery/discover.py sweep --per-source 25
+python skills/business/business-discovery/discover.py verify --limit 20
+python skills/business/business-discovery/discover.py list            # verified + new
+python skills/business/business-discovery/discover.py list --status already-live
+python skills/business/business-discovery/discover.py stats
 ```
 
-Output: JSON with the unshipped business draft names, URLs, addresses, and saved-at timestamps. Read-only — this does not touch the CMO's DB.
+Or the dashboard: `/candidates` lists them (filter by status), and the
+operator chat can run `list`. Tune what gets swept in `town-profile.yaml` →
+`discovery.business` (`category_query_terms`, `seed_directories`,
+`facebook_terms`) and `name_aliases` (extra in-town names the verifier
+accepts).
 
-`--town-hint <substring>` filters the address column (drafts.db has no `town_slug` column; heuristic filter by address text).
+Not scheduled: sweeps spend Firecrawl budget, so run them when you want new
+candidates.
 
-**This subcommand does NOT ship anything.** Shipping from a draft happens on the CMO side via `research.py ship`. If you see a draft here that belongs to your town, message the operator to ship it — do not attempt to POST it from this repo.
+## What it does not do
 
-### How the CMO's `TOWNLOOPS_RESEARCH_DRAFTS_DB` gets mounted
+- **It never writes to TownLoops.** A verified candidate is a proposal. Turning
+  it into a live business is a separate operator-approved promote step (the
+  standard ship path, with a live lookup before any POST) — don't POST a
+  candidate by hand.
+- It does not research a candidate's details (description, image, socials);
+  enrichment does that once a candidate becomes a local business row.
 
-- **Local dev / same workstation as CMO**: point directly at `~/.hermes/skills/business/townloops-research/data/drafts.db`.
-- **Docker deploy**: bind-mount the drafts.db path into the container and set the env var. Example additions to `docker-compose.yml`:
-  ```yaml
-  services:
-    agent:
-      volumes:
-        - /path/on/host/to/townloops-research/data:/opt/townloops-research-drafts:ro
-      environment:
-        TOWNLOOPS_RESEARCH_DRAFTS_DB: /opt/townloops-research-drafts/drafts.db
-  ```
-- **Remote CMO (different host)**: not supported by `cross-check` today. Operator would need to `scp` or `rsync` the drafts.db over. Alternatively — flag this as a future feature: expose `/drafts` on the CMO's Hermes gateway.
+## Leftover CMO work
 
-## Escalation triggers — when to open a CMO ticket
-
-- A client asks to add a business you can't source from event ingest.
-- `cross-check` shows unshipped drafts for your town that have been sitting >7 days.
-- `business-enrichment sweep` keeps producing the same low-quality "unknown" rows and you suspect discovery's verifier is being too permissive.
-- You want the CMO to sweep a new category (e.g. "outdoor recreation") that isn't in the town's category list yet.
-
-For all of the above, edit the CMO skills at `~/.hermes/skills/business/townloops-{business-discovery,research}/` — do not add discovery logic to this repo.
+The CMO's `candidates.db` (17 verified, unpromoted) and `drafts.db` (unshipped
+research drafts) exist only in restic snapshot `71b37ab2`; importing them into
+this store is a separate one-off job.

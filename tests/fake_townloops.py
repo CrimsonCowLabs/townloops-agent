@@ -69,6 +69,15 @@ class FakeAPI:
                     and (not hi or _instant(r["start_at"]) <= hi)]
         return copy.deepcopy(rows[params.get("offset", 0):][:params.get("limit", 50)])
 
+    def paginate(self, resource, page_size=200, **params):
+        offset = 0
+        while True:
+            page = self.list(resource, limit=page_size, offset=offset, **params)
+            yield from page
+            if len(page) < page_size:
+                return
+            offset += page_size
+
     def create(self, resource, payload, idempotency_key=None):
         self.calls.append(("POST", resource, copy.deepcopy(payload)))
         table = self.tables.setdefault(resource, {})
