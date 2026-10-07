@@ -12,6 +12,7 @@ import os
 import sys
 from typing import Any, Optional
 
+from engine import categories as cats
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, record_activity,
 )
@@ -100,8 +101,21 @@ _PAYLOAD_BUILDERS = {
 }
 
 
+def _event_classification(row) -> tuple[list[str], list[str]]:
+    """(category_slugs, tags) to send: the row's categories mapped onto the
+    town's live slugs (rows from before migration 017 or the old extraction
+    vocabulary still carry e.g. `music`), and its tags as slugs."""
+    stored = row.get("category_slugs") or row.get("category_slug")
+    if stored and not cats.town_category_slugs():
+        print(f"event {row['event_uid'][:12]}: no town categories snapshot "
+              f"({cats.categories_snapshot_path()}) — shipping without categories; "
+              "run `town-init setup`", file=sys.stderr)
+    return cats.classify(stored, row.get("tags"))
+
+
 def _event_payload(row) -> dict:
-    """Times go out as UTC only — a naive local `date`/`end_at` is never sent."""
+    """Times go out as UTC only — a naive local `date`/`end_at` is never sent.
+    Categories go as `category_slugs` — create has no singular field."""
     payload = {
         "title": row["title"] or row["name"],
         "start_at": row["date_utc"],
@@ -112,8 +126,11 @@ def _event_payload(row) -> dict:
         payload["end_at"] = row["end_at_utc"]
     if row["venue_name"] or row["venue_raw"]:
         payload["venue_name"] = row["venue_name"] or row["venue_raw"]
-    if row["category_slug"]:
-        payload["category_slug"] = row["category_slug"]
+    category_slugs, tags = _event_classification(row)
+    if category_slugs:
+        payload["category_slugs"] = category_slugs
+    if tags:
+        payload["tags"] = tags
     if row["source_url"]:
         payload["source_url"] = row["source_url"]
     return payload
@@ -170,14 +187,46 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         result = client.create("events", payload, idempotency_key=idem)
     except Exception as e:
         msg = str(e)
-        if "409" in msg or "slug_taken" in msg:
-            slug = proposed_slug
-        else:
+        if not ("409" in msg or "slug_taken" in msg):
             print(f"ship event {event_uid[:12]} failed: {msg[:200]}", file=sys.stderr)
             return None
+        # Already created (a retry, or an operator requeue after a failed
+        # repair): check the live row's sets all the same.
+        slug = proposed_slug
+        try:
+            result = client.get("events", slug)
+        except Exception as e:  # noqa: BLE001 — sets go unchecked; the event did ship
+            print(f"read live event {slug} failed: {str(e)[:200]}", file=sys.stderr)
+            result = None
     else:
         slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
+    if isinstance(result, dict) and not _repair_dropped_sets(client, conn, event, slug, payload, result):
+        return None
     return slug
+
+
+def _repair_dropped_sets(client, conn, event: dict, slug: str, payload: dict,
+                         created: dict) -> bool:
+    """A create path has been seen to drop `tags` (CMO, bulk create). When the
+    created row lacks a category/tag set that was sent, PATCH it in as a full
+    body and GET-verify. False when it still doesn't stick — the event is then
+    flagged for the operator, its live slug kept so nothing re-creates it."""
+    from engine.live_patch import apply_event_patch
+    dropped = {k: payload[k] for k in ("category_slugs", "tags")
+               if payload.get(k) and sorted(payload[k]) != sorted(created.get(k) or [])}
+    if not dropped:
+        return True
+    try:
+        result = apply_event_patch(client, slug, dropped)
+        mismatches = result.mismatches
+    except Exception as e:  # noqa: BLE001 — flagged like a mismatch; a retry would only 409
+        mismatches = [f"PATCH of {sorted(dropped)} failed: {str(e)[:200]}"]
+    if not mismatches:
+        return True
+    conn.execute("UPDATE events SET townloops_slug = ? WHERE event_uid = ?",
+                 (slug, event["event_uid"]))
+    _flag_for_review(conn, event["event_uid"], slug, mismatches)
+    return False
 
 
 def _ensure_utc_times(conn, event: dict) -> bool:

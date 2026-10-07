@@ -22,6 +22,7 @@ import requests
 from dateutil import tz as _tz
 from dateutil.parser import isoparse as _isoparse
 
+from engine import categories as _cats
 from engine.discovery import (
     FIRECRAWL_TIMEOUT_S,
     _firecrawl_base,
@@ -98,8 +99,10 @@ def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[
 def build_extraction_prompt(profile: dict, seed_name: str, seed_url: str,
                              markdown: str, extra_fields: str = "") -> str:
     """`extra_fields` is appended verbatim to the key list — one
-    `  "key": description` line per field, same format as the base keys."""
+    `  "key": description` line per field, same format as the base keys.
+    Categories are offered from the town's live categories snapshot."""
     town = profile.get("name") or profile.get("slug") or "unknown"
+    categories = _cats.town_categories()
     aliases = ", ".join(profile.get("name_aliases") or [])
     return f"""You are extracting upcoming events for the town of "{town}".
 Known area aliases (things a page might say when referring to this town or nearby areas): {aliases or '(none)'}
@@ -113,7 +116,9 @@ Return ONLY a JSON array — no prose, no markdown, no code fence. Each object m
   "venue":       venue name if stated (e.g. "Kings Beach Community Center"), else null
   "location":    street address / city if stated, else null
   "description": short description (first 400 chars max)
-  "category":    one of: music, arts, community, food, outdoors, education, sports, family, government, other
+  "categories":  JSON array of every category that fits, most fitting first, using only these slugs (or [] if none fit):
+{_cats.prompt_vocabulary(categories) or "      (no categories configured — use [])"}
+  "tags":        JSON array of up to 5 short lowercase descriptive tags (e.g. "free", "all-ages", "dog-friendly", "21+"), or []
   "source_url":  the URL on this page that links to the event's own detail page, or null if not present
 {extra_fields}
 Only extract events with a specific date. Skip generic listings like "meets every Tuesday" unless you can compute a concrete next date. Skip past events (before today).
@@ -188,26 +193,50 @@ def event_uid(seed_name: str, title: str, date_iso: str) -> str:
     return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
 
-def content_hash(evt: dict) -> str:
-    key = json.dumps({
+def _hash(fields: dict) -> str:
+    return hashlib.sha1(json.dumps(fields, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def _source_fields(evt: dict) -> dict:
+    return {
         "title": evt.get("title") or "",
         "date": evt.get("date") or "",
         "end_at": evt.get("end_at") or "",
         "venue": evt.get("venue") or "",
         "location": evt.get("location") or "",
         "description": (evt.get("description") or "")[:1000],
-        "category": evt.get("category") or "",
-    }, sort_keys=True)
-    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+    }
+
+
+def content_hash(evt: dict) -> str:
+    """Hash of what the source says. Categories/tags are left out — they are
+    the extractor's classification and vary run to run."""
+    return _hash(_source_fields(evt))
+
+
+def _legacy_content_hash(evt: dict, category: str | None) -> str:
+    """The hash before categories left it: the same fields plus the single
+    extracted `category`, which the row stored as `category_slug`. A row
+    whose `category_slug` was edited since won't match and reads as updated."""
+    return _hash({**_source_fields(evt), "category": category or ""})
 
 
 def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
-    """Insert or update an event. Returns 'inserted' | 'updated' | 'unchanged'."""
+    """Insert or update an event. Returns 'inserted' | 'updated' | 'unchanged'.
+
+    Categories and tags are the extractor's classification, not source
+    content: they don't count as a change, and an existing row only gains
+    them where it has none (an operator's or a previous pass's choice stays)."""
     now = _iso_utc_now()
     uid = event_uid(seed_name, evt.get("title") or "", evt.get("date") or "")
     chash = content_hash(evt)
+    # A legacy single `category` is read when `categories` is absent.
+    raw_cats = evt["categories"] if evt.get("categories") is not None else evt.get("category")
+    cat_slugs, tags = _cats.classify(raw_cats, evt.get("tags"))
+    cats_json, tags_json = _cats.to_json(cat_slugs), _cats.to_json(tags)
+    primary = cat_slugs[0] if cat_slugs else None
     row = conn.execute(
-        "SELECT content_hash FROM events WHERE event_uid = ?", (uid,),
+        "SELECT content_hash, category_slug FROM events WHERE event_uid = ?", (uid,),
     ).fetchone()
     date_iso = evt.get("date") or ""
     date_day = date_iso[:10] if date_iso else ""
@@ -219,11 +248,11 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
               event_uid, source, source_kind, name, title, date, date_day,
               date_local, date_utc, end_at, end_at_local, end_at_utc,
               venue_name, venue_raw,
-              location, location_raw, description, category_slug,
+              location, location_raw, description, category_slug, category_slugs, tags,
               hosting_group, source_url,
               first_seen_at, last_seen_at, content_hash, last_modified_at,
               status, approval_status, state, state_updated_at, discovered_via
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'pending', 'metadata-extracted', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'pending', 'metadata-extracted', ?, ?)
             """,
             (
                 uid, f"seed:{seed_name}", "scraped",
@@ -232,7 +261,7 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
                 evt.get("end_at") or None, evt.get("end_at") or None, end_at_utc,
                 evt.get("venue") or None, evt.get("venue") or None,
                 evt.get("location") or None, evt.get("location") or None,
-                (evt.get("description") or "")[:2000], evt.get("category") or None,
+                (evt.get("description") or "")[:2000], primary, cats_json, tags_json,
                 evt.get("venue") or None,  # hosting_group placeholder
                 evt.get("source_url") or None,
                 now, now, chash, now,
@@ -240,22 +269,31 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
             ),
         )
         return "inserted"
-    if row[0] == chash:
-        # Rows written before the UTC columns were set get them on next sight.
+    fill_classification = (
+        "category_slug = CASE WHEN category_slugs IS NULL AND ? IS NOT NULL THEN ? "
+        "  ELSE category_slug END, "
+        "category_slugs = COALESCE(category_slugs, ?), tags = COALESCE(tags, ?)"
+    )
+    fill_args = (cats_json, primary, cats_json, tags_json)
+    if row[0] in (chash, _legacy_content_hash(evt, row[1])):
+        # Rows written before the UTC columns were set get them on next sight;
+        # rows hashed by the old formula move to the new one.
         conn.execute(
             "UPDATE events SET last_seen_at = ?, date_utc = COALESCE(date_utc, ?), "
-            "  end_at_utc = COALESCE(end_at_utc, ?) WHERE event_uid = ?",
-            (now, date_utc, end_at_utc, uid),
+            "  end_at_utc = COALESCE(end_at_utc, ?), content_hash = ?, "
+            f"  {fill_classification} WHERE event_uid = ?",
+            (now, date_utc, end_at_utc, chash, *fill_args, uid),
         )
         return "unchanged"
     conn.execute(
-        """
+        f"""
         UPDATE events SET
           name = ?, title = ?, date = ?, date_day = ?, date_local = ?, date_utc = ?,
           end_at = ?, end_at_local = ?, end_at_utc = ?,
           venue_name = ?, venue_raw = ?, location = ?, location_raw = ?,
-          description = ?, category_slug = ?, source_url = ?,
-          last_seen_at = ?, content_hash = ?, last_modified_at = ?
+          description = ?, source_url = ?,
+          last_seen_at = ?, content_hash = ?, last_modified_at = ?,
+          {fill_classification}
         WHERE event_uid = ?
         """,
         (
@@ -264,9 +302,9 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
             evt.get("end_at") or None, evt.get("end_at") or None, end_at_utc,
             evt.get("venue") or None, evt.get("venue") or None,
             evt.get("location") or None, evt.get("location") or None,
-            (evt.get("description") or "")[:2000], evt.get("category") or None,
+            (evt.get("description") or "")[:2000],
             evt.get("source_url") or None,
-            now, chash, now, uid,
+            now, chash, now, *fill_args, uid,
         ),
     )
     return "updated"

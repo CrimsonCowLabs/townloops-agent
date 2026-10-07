@@ -40,7 +40,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 015).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 017).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;

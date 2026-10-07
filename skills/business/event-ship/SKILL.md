@@ -39,6 +39,26 @@ shipped**: ship records a failed `ship-event` activity and exits 1, so the
 workqueue retries and then marks it `stuck-` for the operator. A naive local
 date is never sent; an end time with no UTC form is left off.
 
+## Categories and tags
+
+The event goes out with `category_slugs` (all of its categories) and `tags`;
+TownLoops' create schema has no singular `category_slug`. Categories are the
+row's `category_slugs` (or legacy `category_slug`) mapped onto the town's live
+slugs in `state/categories.json` (`engine/categories.py`) — old extraction
+vocabulary like `music`/`food` becomes `live-music`/`food-drink`, and anything
+that maps to no live slug is dropped. Tags are sent as slugs, which is what the
+API stores and returns.
+
+A create path has been seen to drop `tags` (CMO, bulk create). So when the
+created row lacks a category or tag set that was sent, ship follows with a
+full-body PATCH (`engine.live_patch.apply_event_patch`) and GET-verifies it.
+If the sets still don't stick, the event's live slug is recorded, a failed
+`verify-live-event` activity is logged, the event is parked `stuck-` for the
+operator, and ship exits 1. A `409 slug_taken` create (a retry, or an
+operator requeue after a failed repair) GETs the live row and runs the same
+check. With no `state/categories.json` snapshot, events ship without
+categories and ship warns on stderr — run `town-init setup`.
+
 ## When TownLoops isn't ready yet
 
 If `TOWNLOOPS_API_KEY` env is missing or empty, this skill logs the

@@ -5,11 +5,16 @@
 `venue_name` and resolves in-town only, a `venue_name` resolves in-town then
 globally and clears the venue when unresolved, a title under 3 chars is a
 422, and unknown keys (e.g. `venue_slug`) are silently ignored.
+
+`create` mirrors `EventPayload` + `EventResource`: tags come back as slugs,
+both sets sorted. `create_drops` names fields a create path loses (the CMO
+saw bulk create drop `tags`).
 """
 
 from __future__ import annotations
 
 import copy
+import re
 
 
 EVENT_PATCH_FIELDS = {
@@ -20,16 +25,29 @@ EVENT_PATCH_FIELDS = {
 
 
 class FakeAPI:
-    def __init__(self, events=None, venues=None, ignore=()):
+    def __init__(self, events=None, venues=None, ignore=(), create_drops=()):
         self.events = {e["slug"]: copy.deepcopy(e) for e in (events or [])}
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
         self.ignore = set(ignore)  # fields the "server" drops — forces a verify mismatch
+        self.create_drops = set(create_drops)
         self.calls: list[tuple] = []
 
     def get(self, resource, slug):
         self.calls.append(("GET", resource, slug))
         table = self.events if resource == "events" else self.venues
         return copy.deepcopy(table[slug])
+
+    def create(self, resource, payload, idempotency_key=None):
+        self.calls.append(("POST", resource, copy.deepcopy(payload)))
+        row = {"id": len(self.events) + 1, "slug": payload["slug"], "town_slug": "slt",
+               "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": []}
+        for k in EVENT_PATCH_FIELDS - {"venue_id", "venue_name"}:
+            if k in payload and k not in self.create_drops:
+                row[k] = payload[k]
+        row["category_slugs"] = sorted(row["category_slugs"])
+        row["tags"] = sorted(_slug(t) for t in row["tags"])
+        self.events[row["slug"]] = row
+        return copy.deepcopy(row)
 
     def update(self, resource, slug, payload):
         self.calls.append(("PATCH", resource, slug, copy.deepcopy(payload)))
@@ -50,9 +68,17 @@ class FakeAPI:
             row["venue_slug"] = v["slug"] if v else None
         for k in ("category_slugs", "tags"):
             if k in body:
-                row[k] = sorted(body.pop(k))
+                row[k] = sorted(body.pop(k) if k == "category_slugs"
+                                else (_slug(t) for t in body.pop(k)))
         row.update(body)
         return copy.deepcopy(row)
 
     def patches(self):
         return [c[3] for c in self.calls if c[0] == "PATCH"]
+
+    def creates(self):
+        return [c[2] for c in self.calls if c[0] == "POST"]
+
+
+def _slug(name):
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")

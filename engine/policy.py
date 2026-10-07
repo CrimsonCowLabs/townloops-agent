@@ -203,7 +203,7 @@ def api_healthy(client) -> bool:
 # Category-exists guard
 # --------------------------------------------------------------------------
 
-def _default_snapshot_path() -> Path:
+def categories_snapshot_path() -> Path:
     return Path(
         os.environ.get(
             "TOWNLOOPS_CATEGORIES_SNAPSHOT",
@@ -221,7 +221,7 @@ def load_category_slugs(snapshot_path: Optional[Path] = None) -> set[str]:
 
     Empty set on missing / malformed file (caller decides how to react).
     """
-    path = snapshot_path or _default_snapshot_path()
+    path = snapshot_path or categories_snapshot_path()
     if not path.exists():
         return set()
     try:
