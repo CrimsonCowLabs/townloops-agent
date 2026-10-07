@@ -104,7 +104,7 @@ for the full catalog + CLI invocations.
 | `event-derive-venue` | `extract-venue` | Match or create a shell `venues` row from the event's venue signal. |
 | `event-derive-hosts` | `extract-hosts` | Identify the hosting business/community (NULL is legit). |
 | `event-derive-people` | `extract-people` | Extract performers/creators referenced in the event. |
-| `event-enrich-entities` | `enrich-entities` | Fill NULL entity fields (v1: pass-through marker). |
+| `event-enrich-entities` | `enrich-entities` | Research linked entities from their own sites; fill NULL fields only. |
 | `event-ship` | `ship` | POST derived entities then the event to TownLoops (venue → host → people → event). |
 
 **Legacy structured-source pipeline (LLM-free, `sources.yaml`):**

@@ -1,16 +1,21 @@
 """Entity enrichment — resolve a venue/business/community named on an event to
-a local row (local match → live mirror → new shell) and fill its blank fields
-from the entity's own website, under a lookup budget.
+a local row (local match → live mirror → new shell), and research any of the
+five entity kinds from its own site to fill blank fields, under a lookup
+budget.
 
 Never writes to TownLoops. Live rows are mirrored locally; an image found for
 a live row without one is staged as a proposal (`image-proposed`) for the
-operator, never filled into other fields.
+operator, never filled into other fields. Researched values are verbatim from
+the page (no synthesized copy) and are validated against
+`entity_payload.schema.json` before they touch a row.
 """
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
@@ -20,11 +25,42 @@ from engine.derive_helpers import (
 )
 
 
-TABLES = {"venue": "venues", "business": "businesses", "community": "communities"}
-# Fields research_url() can fill on a local row (fill-blanks only).
+@dataclass(frozen=True)
+class KindSpec:
+    table: str
+    fillable: tuple[str, ...]   # columns enrichment may fill when blank
+
+
+_SOCIALS = ("instagram", "facebook", "tiktok", "twitter", "youtube", "linkedin")
+
+# Restored from the pre-rewrite engine/enrichment.py. Names follow the
+# TownLoops payload contract: creators have `bio` (not description) and
+# `youtube_url` (not youtube).
+SPECS: dict[str, KindSpec] = {
+    "venue": KindSpec("venues",
+                      ("description", "address", "website", "phone", "accessibility_notes",
+                       "image_path", "image_alt")),
+    "business": KindSpec("businesses",
+                         ("description", "address", "website", "phone", "image_path",
+                          "image_alt", *_SOCIALS)),
+    "community": KindSpec("communities",
+                          ("description", "website", "meeting_info", "image_path",
+                           "image_alt", *_SOCIALS)),
+    "performer": KindSpec("performers",
+                          ("description", "website", "spotify_url", "image_path",
+                           "image_alt", *_SOCIALS)),
+    "creator": KindSpec("creators",
+                        ("bio", "website", "youtube_url", "image_path", "image_alt",
+                         "instagram", "facebook", "tiktok", "twitter", "linkedin")),
+}
+
+# Kinds resolve_entity() can resolve by name from an event.
+TABLES = {k: SPECS[k].table for k in ("venue", "business", "community")}
+# Fields research_entity() returns when no kind is given.
 ENRICH_FIELDS = ("description", "address", "website", "phone", "image_path",
-                 "image_alt", "instagram", "facebook", "tiktok", "twitter",
-                 "youtube", "linkedin")
+                 "image_alt", *_SOCIALS)
+# enrichment_status values that mean "already researched — don't repeat".
+DONE_STATUSES = ("enriched", "not-found", "image-proposed", "live")
 
 
 class Budget:
@@ -64,31 +100,149 @@ def _pick_site(name: str, results: list[dict]) -> Optional[str]:
     return None
 
 
-def research_entity(name: str, website: Optional[str], town: str, budget: Budget) -> dict:
-    """Find (search, if no website) and scrape the entity's site. Returns a
-    payload of ENRICH_FIELDS; {} when nothing was found or the budget ran out."""
+def _is_facebook(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    return host == "facebook.com" or host.endswith(".facebook.com")
+
+
+def fetch_plan(url: str) -> list[str]:
+    """Pages to read for an entity whose site is `url`. A Facebook page's
+    contact details and LocalBusiness JSON-LD live on its /about/ tab."""
+    p = urlparse(url)
+    segments = [s for s in p.path.split("/") if s]
+    if (_is_facebook(url) and len(segments) == 1
+            and segments[0] not in ("profile.php", "events", "groups", "about")):
+        return [url, f"{p.scheme}://{p.netloc}/{segments[0]}/about/"]
+    return [url]
+
+
+@dataclass
+class Lookup:
+    payload: dict = field(default_factory=dict)
+    errors: list[str] = field(default_factory=list)
+    # The entity's site wasn't read — budget ran out, search errored or the
+    # page couldn't be fetched — so an empty payload means "not looked at",
+    # not "not found".
+    exhausted: bool = False
+
+
+def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
+            kind: Optional[str]) -> Lookup:
     from engine import discovery, research
-    url = website
     if not url:
         if not budget.take():
-            return {}
-        url = _pick_site(name, discovery.firecrawl_search(f'"{name}" {town}', limit=5))
+            return Lookup(exhausted=True)
+        try:
+            hits = discovery.firecrawl_search(f'"{name}" {town}', limit=5, raise_on_error=True)
+        except (discovery.FirecrawlError, TimeoutError) as e:
+            return Lookup(errors=[f"search failed: {e}"], exhausted=True)
+        url = _pick_site(name, hits)
         if not url:
-            return {}
-    if not budget.take():
-        return {}
-    res = research.research_url(url, use_firecrawl=True)
-    payload = {k: v for k, v in res.payload.items() if k in ENRICH_FIELDS and v}
-    if res.fetched_from:
-        payload.setdefault("website", website or res.fetched_from[0])
-    return payload
+            return Lookup()
+    raw: dict = {}
+    fetched: list[str] = []
+    for page in fetch_plan(url):
+        if not budget.take():
+            if not fetched:
+                return Lookup(exhausted=True)
+            break
+        res = research.research_url(page, use_firecrawl=True)
+        fetched.extend(res.fetched_from)
+        for k, v in res.payload.items():
+            if v:
+                raw.setdefault(k, v)
+    if not fetched:
+        # The site is known but couldn't be read (down, blocked, rate
+        # limited) — that's not "not found"; leave it for a retry.
+        return Lookup(errors=[f"could not read {url}"], exhausted=True)
+    raw.setdefault("website", url)
+    if _is_facebook(raw["website"]):
+        # A Facebook page is the entity's facebook, not its website.
+        raw.setdefault("facebook", url)
+        del raw["website"]
+    payload, errors = validate_payload(kind or "venue", raw)
+    if kind is None:
+        return Lookup({k: v for k, v in payload.items() if k in ENRICH_FIELDS}, errors)
+    if kind == "creator":
+        for src, dst in (("description", "bio"), ("youtube", "youtube_url")):
+            if src in payload:
+                payload.setdefault(dst, payload.pop(src))
+    return Lookup({k: v for k, v in payload.items() if k in SPECS[kind].fillable}, errors)
+
+
+def research_entity(name: str, website: Optional[str], town: str, budget: Budget,
+                    kind: Optional[str] = None) -> dict:
+    """Find (search, if no website) and read the entity's site. Returns a
+    validated payload of `kind`'s fillable fields (ENRICH_FIELDS when no
+    kind is given); {} when nothing was found or the budget ran out."""
+    return _lookup(name, website, town, budget, kind).payload
+
+
+_SCHEMA_PATH = Path(__file__).with_name("entity_payload.schema.json")
+_URL_FIELDS = {"website", "image_path", "spotify_url", "youtube_url"}
+
+
+def validate_payload(kind: str, payload: dict) -> tuple[dict, list[str]]:
+    """Check each value against the entity payload schema: a string (the
+    schema's only field type), and an http(s) URL for link fields
+    (https-only for image_path). Invalid values are dropped — null beats
+    wrong. Returns (clean payload, one error per dropped field)."""
+    props = json.loads(_SCHEMA_PATH.read_text())["properties"]["payload"]["properties"]
+    clean: dict = {}
+    errors: list[str] = []
+    for key, value in payload.items():
+        if not isinstance(value, str):
+            errors.append(f"{kind}.{key}: expected a string, got {type(value).__name__}")
+            continue
+        if key in _URL_FIELDS or props.get(key, {}).get("format") == "uri":
+            p = urlparse(value)
+            schemes = ("https",) if key == "image_path" else ("http", "https")
+            if p.scheme not in schemes or not p.netloc:
+                errors.append(f"{kind}.{key}: not an {'/'.join(schemes)} URL: {value[:80]}")
+                continue
+        clean[key] = value
+    return clean, errors
+
+
+@dataclass
+class EnrichOutcome:
+    status: Literal["enriched", "not-found", "deferred", "skipped"]
+    filled: list[str] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+
+
+def enrich_entity(conn: sqlite3.Connection, kind: str, entity_uid: str, town: str,
+                  budget: Budget) -> EnrichOutcome:
+    """Research one entity of any kind and fill its blank fields.
+
+    - skipped: live mirrors (their values are TownLoops') and rows already
+      researched (DONE_STATUSES);
+    - deferred: the entity's site wasn't read (budget ran out, search
+      errored, page unreadable) — status stays as it was, so a later run
+      can retry;
+    - not-found: no plausible site found — recorded as the row's status;
+    - enriched: the site was read; blank fields filled.
+    """
+    row = conn.execute(f"SELECT * FROM {SPECS[kind].table} WHERE entity_uid = ?",
+                       (entity_uid,)).fetchone()
+    if not row:
+        return EnrichOutcome("skipped")
+    row = dict(row)
+    if row.get("source_kind") == "live" or row.get("enrichment_status") in DONE_STATUSES:
+        return EnrichOutcome("skipped")
+    found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind)
+    if found.exhausted:
+        return EnrichOutcome("deferred", errors=found.errors)
+    status = "enriched" if found.payload else "not-found"
+    filled = fill_blanks(conn, kind, entity_uid, found.payload, status)
+    return EnrichOutcome(status, filled, found.errors)
 
 
 def fill_blanks(conn: sqlite3.Connection, kind: str, entity_uid: str, payload: dict,
                 status: str) -> list[str]:
     """Write payload values into the row's empty columns only, and record
     `status` as its enrichment_status. Returns the columns filled."""
-    table = TABLES[kind]
+    table = SPECS[kind].table
     cols = {r["name"] for r in conn.execute(f"PRAGMA table_info('{table}')")}
     row = dict(conn.execute(f"SELECT * FROM {table} WHERE entity_uid = ?", (entity_uid,)).fetchone())
     filled = [k for k, v in payload.items() if k in cols and v and not row.get(k)]
@@ -109,6 +263,46 @@ def fill_blanks(conn: sqlite3.Connection, kind: str, entity_uid: str, payload: d
     return filled
 
 
+# Hosts many unrelated entities share — the same host there is not the
+# same property.
+_SHARED_HOSTS = ("facebook.com", "instagram.com", "linktr.ee", "sites.google.com",
+                 "eventbrite.com", "wixsite.com", "squarespace.com", "godaddysites.com",
+                 "yelp.com", "tripadvisor.com", "google.com")
+
+
+def _site(url: Optional[str]) -> str:
+    """The property's own host for `url`, or "" for shared platforms."""
+    host = (urlparse(url or "").hostname or "").lower()
+    host = host[4:] if host.startswith("www.") else host
+    if any(host == h or host.endswith("." + h) for h in _SHARED_HOSTS):
+        return ""
+    return host
+
+
+def borrow_property_image(conn: sqlite3.Connection, venue_uid: str,
+                          others: list[tuple[str, str]]) -> Optional[str]:
+    """A venue that is a room/stage inside a property (its website is on the
+    property's site) and has no image of its own takes the property's image
+    from a linked business/community on the same site. Returns the image
+    borrowed, or None. Live mirrors are never touched."""
+    venue = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (venue_uid,)).fetchone()
+    if not venue or venue["image_path"] or venue["source_kind"] == "live" or not _site(venue["website"]):
+        return None
+    for kind, uid in others:
+        if kind == "venue":
+            continue
+        other = conn.execute(f"SELECT name, website, image_path, image_alt FROM {SPECS[kind].table} "
+                             "WHERE entity_uid = ?", (uid,)).fetchone()
+        if other and other["image_path"] and _site(other["website"]) == _site(venue["website"]):
+            conn.execute(
+                "UPDATE venues SET image_path = ?, image_alt = COALESCE(image_alt, ?), "
+                "last_modified_at = ? WHERE entity_uid = ? AND image_path IS NULL",
+                (other["image_path"], other["image_alt"] or other["name"], iso_utc_now(), venue_uid),
+            )
+            return other["image_path"]
+    return None
+
+
 def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
                    live_rows: list[dict], town: str, budget: Budget) -> Resolution:
     """Resolve `name` (a `kind` named on `event`) to a local entity_uid:
@@ -125,7 +319,7 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     if hit:
         filled: list[str] = []
         if not hit.get("image_path") and hit.get("enrichment_status") not in ("enriched", "not-found", "image-proposed"):
-            payload = research_entity(hit["name"], hit.get("website"), town, budget)
+            payload = research_entity(hit["name"], hit.get("website"), town, budget, kind)
             if payload:
                 status = "image-proposed" if hit.get("source_kind") == "live" else "enriched"
                 filled = fill_blanks(conn, kind, hit["entity_uid"], payload, status)
@@ -136,7 +330,7 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
         entity_uid = mirror_live_entity(conn, kind, live_hit)
         if live_hit.get("image_path"):
             return Resolution(entity_uid, "live")
-        payload = research_entity(live_hit["name"], live_hit.get("website"), town, budget)
+        payload = research_entity(live_hit["name"], live_hit.get("website"), town, budget, kind)
         if not payload.get("image_path"):
             return Resolution(entity_uid, "live")
         filled = fill_blanks(conn, kind, entity_uid,
@@ -157,6 +351,6 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     if kind == "community":
         fields["kind"] = "group"
     insert_entity(conn, table, entity_uid, fields)
-    payload = research_entity(name, None, town, budget)
+    payload = research_entity(name, None, town, budget, kind)
     filled = fill_blanks(conn, kind, entity_uid, payload, "enriched" if payload else "not-found")
     return Resolution(entity_uid, "created", filled)

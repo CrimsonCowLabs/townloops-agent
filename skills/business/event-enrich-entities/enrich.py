@@ -1,38 +1,41 @@
 #!/usr/bin/env python3
-"""event-enrich-entities — v1 pass-through. Marks derived entities as
-'attempted' and advances the event state. Real LLM+Firecrawl enrichment
-lives in a follow-up milestone."""
+"""event-enrich-entities — research every entity linked to an event (venue,
+business, community, performer, creator) from its own site and fill its
+blank fields, under a per-event lookup budget (engine.entity_enrich).
+
+Exits 0 whenever the event's entities were dealt with — including "not
+found" and "budget ran out" — so a hard-to-find entity never parks the
+event in stuck-people-derived."""
 
 from __future__ import annotations
 
+import os
 import sys
+from pathlib import Path
 
+import yaml
+
+from engine import entity_enrich
 from engine.derive_helpers import (
     load_event, open_db, parse_event_uid_arg, record_activity,
 )
+from engine.research import FirecrawlAuthError
 
 
 _WORKER = "event-enrich-entities"
-
-_ENTITY_TABLES = {
-    "venue": "venues",
-    "business": "businesses",
-    "community": "communities",
-    "performer": "performers",
-    "creator": "creators",
-}
+# Firecrawl searches + page reads per event; an event has ~1-4 entities and
+# each costs 1-3 lookups.
+_DEFAULT_MAX_LOOKUPS = 8
 
 
-def _mark_attempted(conn, entity_uid: str, table: str) -> None:
-    # Only venues/businesses/performers have enrichment_status columns
-    # (communities/creators don't per current schema). Guard so this skill
-    # works uniformly across the 5 kinds.
-    cols = {r["name"] for r in conn.execute(f"PRAGMA table_info('{table}')")}
-    if "enrichment_status" in cols:
-        conn.execute(
-            f"UPDATE {table} SET enrichment_status = COALESCE(enrichment_status, 'attempted') "
-            f"WHERE entity_uid = ?", (entity_uid,),
-        )
+def _town_name() -> str:
+    path = Path(os.environ.get("TOWN_PROFILE_PATH") or os.path.join(
+        os.environ.get("HERMES_HOME", "/home/agent/.hermes"), "town-profile.yaml"))
+    try:
+        profile = yaml.safe_load(path.read_text()) or {}
+    except (OSError, yaml.YAMLError):
+        profile = {}
+    return profile.get("name") or os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
 
 
 def main() -> int:
@@ -44,22 +47,40 @@ def main() -> int:
         print(f"event not found: {event_uid}", file=sys.stderr)
         return 2
 
-    links = conn.execute(
-        "SELECT entity_kind, entity_uid FROM linked_events WHERE event_uid = ?",
-        (event_uid,),
-    ).fetchall()
+    links = [(r["entity_kind"], r["entity_uid"]) for r in conn.execute(
+        "SELECT DISTINCT entity_kind, entity_uid FROM linked_events WHERE event_uid = ? "
+        "ORDER BY link_id", (event_uid,),
+    ).fetchall() if r["entity_kind"] in entity_enrich.SPECS]
 
-    n_marked = 0
-    for lk in links:
-        table = _ENTITY_TABLES.get(lk["entity_kind"])
-        if not table:
-            continue
-        _mark_attempted(conn, lk["entity_uid"], table)
-        n_marked += 1
+    try:
+        max_lookups = int(os.environ.get("TOWNLOOPS_ENRICH_MAX_LOOKUPS", _DEFAULT_MAX_LOOKUPS))
+    except ValueError:
+        max_lookups = _DEFAULT_MAX_LOOKUPS
+    budget = entity_enrich.Budget(max_lookups)
+    town = _town_name()
+    notes = []
+    try:
+        for kind, uid in links:
+            out = entity_enrich.enrich_entity(conn, kind, uid, town, budget)
+            note = f"{kind} {uid[:12]}: {out.status}"
+            if out.filled:
+                note += f" ({','.join(out.filled)})"
+            notes.append(note)
+            for err in out.errors:
+                print(f"  dropped invalid value — {err}", file=sys.stderr)
+        for kind, uid in links:
+            if kind == "venue" and entity_enrich.borrow_property_image(conn, uid, links):
+                notes.append(f"venue {uid[:12]}: property image")
+    except FirecrawlAuthError as e:
+        # Bad key: retrying every entity won't help — fail so the workqueue
+        # retries and, if it persists, parks the event for the operator.
+        record_activity(conn, _WORKER, "enriched", event_uid, ok=False, error=str(e)[:200])
+        print(str(e), file=sys.stderr)
+        return 1
 
-    record_activity(conn, _WORKER, "pass-through", event_uid,
-                    detail=f"marked {n_marked} linked entities as attempted (v1 no-op)")
-    print(f"pass-through enrichment for event {event_uid[:12]} — {n_marked} entities marked")
+    detail = "; ".join(notes) or "no linked entities"
+    record_activity(conn, _WORKER, "enriched", event_uid, detail=detail)
+    print(f"enriched event {event_uid[:12]} — {detail}")
     return 0
 
 

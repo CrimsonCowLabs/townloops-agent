@@ -210,3 +210,92 @@ class TestFirecrawlErrorSurfacing:
         from engine import research
         monkeypatch.setenv("FIRECRAWL_API_URL", "http://custom.example/v1")
         assert research._firecrawl_base() == "http://custom.example"
+
+
+class TestImageRules:
+    """research_url picks og:image → JSON-LD image → hero <img>, skipping
+    logos/placeholders; no image beats a generic one."""
+
+    def _research(self, monkeypatch, html, broken=()):
+        from engine import research
+        monkeypatch.setattr(research, "fetch_html", lambda url, timeout=20.0: (html, url))
+        monkeypatch.setattr(research, "verify_image", lambda url, timeout=10.0: url not in broken)
+        return research.research_url("https://site.example/")
+
+    def test_og_image_wins(self, monkeypatch):
+        html = ('<meta property="og:image" content="https://site.example/patio.jpg">'
+                '<img src="/hero.jpg">')
+        assert self._research(monkeypatch, html).payload["image_path"] == "https://site.example/patio.jpg"
+
+    def test_logo_og_image_falls_through_to_hero(self, monkeypatch):
+        html = ('<meta property="og:image" content="https://site.example/img/site-logo.png">'
+                '<img src="/img/logo-small.png"><img src="/img/dining-room.jpg">')
+        assert self._research(monkeypatch, html).payload["image_path"] == "https://site.example/img/dining-room.jpg"
+
+    def test_json_ld_logo_is_not_an_image(self, monkeypatch):
+        html = ('<script type="application/ld+json">{"@type": "LocalBusiness", '
+                '"logo": "https://site.example/brand.png"}</script>')
+        assert "image_path" not in self._research(monkeypatch, html).payload
+
+    def test_json_ld_image_used_before_hero(self, monkeypatch):
+        html = ('<script type="application/ld+json">{"@type": "LocalBusiness", '
+                '"logo": "https://site.example/brand.png", '
+                '"image": "https://site.example/storefront.jpg"}</script>'
+                '<img src="/hero.jpg">')
+        assert self._research(monkeypatch, html).payload["image_path"] == "https://site.example/storefront.jpg"
+
+    def test_placeholders_and_icons_rejected(self, monkeypatch):
+        html = ('<meta property="og:image" content="https://site.example/placeholder.jpg">'
+                '<img src="data:image/gif;base64,R0lGOD"><img src="/favicon.ico">'
+                '<img src="/default-image.png"><img src="/assets/icon-cart.svg">'
+                '<img src="/spacer.gif"><img src="/coming-soon.jpg">')
+        assert "image_path" not in self._research(monkeypatch, html).payload
+
+    def test_words_containing_generic_terms_are_fine(self, monkeypatch):
+        html = '<meta property="og:image" content="https://site.example/silicon-valley-pixels.jpg">'
+        assert self._research(monkeypatch, html).payload["image_path"] == "https://site.example/silicon-valley-pixels.jpg"
+
+    def test_logo_directories_and_gravatars_rejected(self, monkeypatch):
+        html = ('<meta property="og:image" content="https://site.example/logos/brand.png">'
+                '<script type="application/ld+json">{"@type": "Person", '
+                '"image": "https://secure.gravatar.com/avatar/abc123?s=96"}</script>')
+        assert "image_path" not in self._research(monkeypatch, html).payload
+
+    def test_lazy_loaded_img_uses_src_not_data_src(self, monkeypatch):
+        html = '<img class="size-default" src="/hero.jpg" data-src="/hero-large.jpg">'
+        assert self._research(monkeypatch, html).payload["image_path"] == "https://site.example/hero.jpg"
+
+    def test_non_https_image_rejected(self, monkeypatch):
+        html = '<meta property="og:image" content="http://site.example/patio.jpg">'
+        assert "image_path" not in self._research(monkeypatch, html).payload
+
+    def test_unverifiable_candidate_skipped_for_next(self, monkeypatch):
+        html = ('<meta property="og:image" content="https://site.example/gone.jpg">'
+                '<img src="/stage.jpg">')
+        res = self._research(monkeypatch, html, broken={"https://site.example/gone.jpg"})
+        assert res.payload["image_path"] == "https://site.example/stage.jpg"
+
+
+class TestFirecrawlRateLimit:
+    def test_scrape_takes_a_token_from_the_shared_bucket(self, monkeypatch):
+        from engine import policy, research
+        monkeypatch.setenv("FIRECRAWL_API_URL", "http://localhost:8302")
+        taken = []
+        monkeypatch.setattr(policy.firecrawl_bucket, "wait", lambda n=1, timeout=30.0: taken.append(n))
+        response = MagicMock(status_code=200)
+        response.json.return_value = {"data": {"html": "<p>hi</p>"}}
+        monkeypatch.setattr(research.requests, "post", MagicMock(return_value=response))
+        assert research.firecrawl_fetch("https://example.com")[0] == "<p>hi</p>"
+        assert taken == [1]
+
+    def test_bucket_timeout_is_a_failed_fetch_not_a_crash(self, monkeypatch):
+        from engine import policy, research
+        monkeypatch.setenv("FIRECRAWL_API_URL", "http://localhost:8302")
+
+        def starved(n=1, timeout=30.0):
+            raise TimeoutError("bucket empty")
+        monkeypatch.setattr(policy.firecrawl_bucket, "wait", starved)
+        post = MagicMock()
+        monkeypatch.setattr(research.requests, "post", post)
+        assert research.firecrawl_fetch("https://example.com") == (None, None)
+        post.assert_not_called()

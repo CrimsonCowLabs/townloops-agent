@@ -40,7 +40,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 017).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 018).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -62,8 +62,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
   - `discovery.py`, `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
     `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py`,
-    `entity_enrich.py` (budgeted local → live → new entity resolution + fill-blanks enrichment;
-    event-reconcile uses it — new enrichment work builds on it, not on reconcile's skill script).
+    `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5
+    entity kinds, `enrich_entity` research + schema validation + fill-blanks; event-reconcile and
+    event-enrich-entities use it — new enrichment work builds on it, not on a skill script).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the

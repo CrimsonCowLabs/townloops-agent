@@ -19,6 +19,7 @@ Env:
 
 from __future__ import annotations
 
+import html as html_lib
 import json
 import os
 import re
@@ -103,6 +104,13 @@ def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
     if not key and not self_hosted:
         _STATS["http_error"] += 1
         _STATS["last_error"] = "FIRECRAWL_API_KEY not set and no FIRECRAWL_API_URL"
+        return None, None
+    # Shared QPS ceiling with engine.discovery's Firecrawl calls.
+    from engine.policy import firecrawl_bucket
+    try:
+        firecrawl_bucket.wait()
+    except TimeoutError as exc:
+        _STATS["last_error"] = f"rate limited: {exc}"
         return None, None
     _STATS["calls"] += 1
     endpoint = f"{_firecrawl_base()}/v1/scrape"
@@ -256,45 +264,71 @@ def detect_kind(html: str, url: str) -> tuple[Optional[str], float, list[str]]:
 
 # -------- image capture --------
 
-def og_image(html: str, base_url: str) -> Optional[str]:
-    """Preferred order: og:image → JSON-LD image → first content <img>."""
-    og = og_tags(html)
-    if og.get("image"):
-        return urljoin(base_url, og["image"])
+# Logos, icons and stand-ins are worse than no image: a null image_path
+# is a gap the operator sees, a generic one looks done.
+# Whole words only ("icon" not "silicon"), except "logo", which turns up
+# glued into names ("sitelogo.png", "/logos/").
+_GENERIC_IMAGE_RE = re.compile(
+    r"logo|placeholder|favicon|spacer|sprite|gravatar|"
+    r"(?<![a-z])(?:icons?|default|blank|pixel|no[-_]?image|coming[-_]?soon|missing|"
+    r"badges?|avatars?)(?![a-z])",
+    re.IGNORECASE,
+)
+_IMG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+_ATTR_RE = re.compile(r'(?<![-\w])(src|alt)=["\']([^"\']*)["\']', re.IGNORECASE)
+
+
+def is_generic_image(url: str, hint: str = "") -> bool:
+    """True for logos, icons, placeholders, avatars, SVG/ICO/GIF files and
+    data URIs — images that don't show the entity itself. `hint` is the
+    <img> alt text."""
+    p = urlparse(url)
+    if url.startswith("data:") or p.path.lower().endswith((".svg", ".ico", ".gif")):
+        return True
+    return bool(_GENERIC_IMAGE_RE.search(f"{p.hostname or ''}{p.path}")
+                or _GENERIC_IMAGE_RE.search(hint))
+
+
+def image_candidates(html: str, base_url: str) -> list[str]:
+    """Usable https image URLs in priority order: og:image → JSON-LD
+    `image` (never `logo`) → content <img> (the hero is usually first).
+    Logos and placeholders are dropped."""
+    found: list[str] = []
+    og = og_tags(html).get("image")
+    if og:
+        found.append(og)
     for block in ld_json_blocks(html):
-        img = _extract_ld_image(block)
-        if img:
-            return urljoin(base_url, img)
-    m = re.search(r'<img[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-    return urljoin(base_url, m.group(1)) if m else None
+        found.extend(_ld_images(block))
+    for tag in _IMG_RE.findall(html):
+        attrs = {k.lower(): v for k, v in _ATTR_RE.findall(tag)}
+        src = attrs.get("src")
+        if src and not is_generic_image(src, attrs.get("alt", "")):
+            found.append(src)
+    out: list[str] = []
+    for raw in found:
+        url = urljoin(base_url, raw)
+        if url.startswith("https://") and not is_generic_image(url) and url not in out:
+            out.append(url)
+    return out
 
 
-def _extract_ld_image(node: Any) -> Optional[str]:
-    if isinstance(node, str) and node.startswith(("http", "/")):
-        return node
-    if isinstance(node, dict):
-        for key in ("image", "logo"):
-            v = node.get(key)
-            if isinstance(v, str):
-                return v
-            if isinstance(v, dict) and "url" in v:
-                return v["url"]
-            if isinstance(v, list) and v:
-                first = v[0]
-                if isinstance(first, str):
-                    return first
-                if isinstance(first, dict) and "url" in first:
-                    return first["url"]
-        for child in node.values():
-            found = _extract_ld_image(child)
-            if found:
-                return found
+def _ld_images(node: Any) -> list[str]:
+    """Every JSON-LD `image` value (string, {url}, or a list of either)."""
+    out: list[str] = []
     if isinstance(node, list):
         for child in node:
-            found = _extract_ld_image(child)
-            if found:
-                return found
-    return None
+            out.extend(_ld_images(child))
+    elif isinstance(node, dict):
+        v = node.get("image")
+        for item in v if isinstance(v, list) else [v]:
+            if isinstance(item, str):
+                out.append(item)
+            elif isinstance(item, dict) and isinstance(item.get("url"), str):
+                out.append(item["url"])
+        for key, child in node.items():
+            if key != "image":
+                out.extend(_ld_images(child))
+    return out
 
 
 def verify_image(url: str, timeout: float = 10.0) -> bool:
@@ -332,14 +366,16 @@ def research_url(url: str, *, use_firecrawl: bool = False) -> ResearchResult:
     result.notes.extend(kind_notes)
 
     payload: dict[str, Any] = {}
-    payload["name"] = og.get("site_name") or og.get("title") or title_text(html)
-    payload["description"] = og.get("description") or meta.get("description")
+    # Verbatim page text, entities decoded — never rewritten.
+    payload["name"] = html_lib.unescape(og.get("site_name") or og.get("title") or title_text(html) or "")
+    payload["description"] = html_lib.unescape(og.get("description") or meta.get("description") or "")
     payload["website"] = og.get("url") or final_url or url
 
-    image = og_image(html, final_url or url)
-    if image and verify_image(image):
-        payload["image_path"] = image
-        payload["image_alt"] = payload.get("name")
+    for image in image_candidates(html, final_url or url):
+        if verify_image(image):
+            payload["image_path"] = image
+            payload["image_alt"] = payload.get("name")
+            break
 
     # LD-JSON fills — address, phone, sameAs socials.
     for block in ld_json_blocks(html):

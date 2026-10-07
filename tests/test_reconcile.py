@@ -209,7 +209,7 @@ def skill(fresh_db, monkeypatch):
     monkeypatch.setattr(research, "research_url", fake_research)
     monkeypatch.setattr(research, "verify_image", lambda u: True)
     monkeypatch.setattr(discovery, "firecrawl_search",
-                        lambda q, limit=5: [{"url": "https://pumpkinpatch.example", "title": "Pumpkin Patch Co"}])
+                        lambda q, limit=5, **kw: [{"url": "https://pumpkinpatch.example", "title": "Pumpkin Patch Co"}])
     mod.research_calls = research_calls
     return mod, fresh_db
 
