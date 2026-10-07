@@ -38,6 +38,7 @@ from engine.derive_helpers import entity_richness, iso_utc_now, normalize_name
 KIND = "business"
 FUZZY_NAME_RATIO = 0.85
 PROPOSED = ("new", "verified")
+_PROPOSED_SQL = "(" + ", ".join(f"'{s}'" for s in PROPOSED) + ")"
 
 # Hosts many businesses share: a website here identifies a business only by
 # its exact page, never by the host.
@@ -154,14 +155,14 @@ def name_from_title(title: Optional[str]) -> Optional[str]:
 # Candidate store
 # --------------------------------------------------------------------------
 
-def candidate_uid(town_slug: str, canonical_url: str, kind: str = KIND) -> str:
-    return hashlib.sha1(f"{town_slug}|{canonical_url}|{kind}".encode("utf-8")).hexdigest()
+def candidate_uid(town_slug: str, canonical_url: str) -> str:
+    return hashlib.sha1(f"{town_slug}|{canonical_url}|{KIND}".encode("utf-8")).hexdigest()
 
 
 def _mark_live(conn: sqlite3.Connection, uid: str, m: LiveMatch, now: str) -> None:
     conn.execute(
         "UPDATE discovery_candidates SET status = 'already-live', live_slug = ?, "
-        "reject_reason = ?, last_seen_at = ? WHERE candidate_uid = ?",
+        f"reject_reason = ?, last_seen_at = ? WHERE candidate_uid = ? AND status IN {_PROPOSED_SQL}",
         (m.slug, m.reason, now, uid),
     )
 
@@ -175,7 +176,7 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
     for c in candidates:
         counts["seen"] += 1
         now = iso_utc_now()
-        uid = candidate_uid(town_slug, c.canonical_url, c.kind)
+        uid = candidate_uid(town_slug, c.canonical_url)
         live = index.match(c.canonical_url, c.display_name)
         existing = conn.execute(
             "SELECT status, display_name FROM discovery_candidates WHERE candidate_uid = ?",
@@ -185,16 +186,15 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
             conn.execute(
                 """INSERT INTO discovery_candidates
                      (candidate_uid, town_slug, kind, target_category_slug, canonical_url,
-                      display_name, source_signal, first_seen_at, last_seen_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (uid, town_slug, c.kind, c.target_category_slug, c.canonical_url,
-                 c.display_name, c.source_signal, now, now),
+                      display_name, source_signal, status, live_slug, reject_reason,
+                      first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (uid, town_slug, KIND, c.target_category_slug, c.canonical_url,
+                 c.display_name, c.source_signal,
+                 "already-live" if live else "new",
+                 live.slug if live else None, live.reason if live else None, now, now),
             )
-            if live:
-                _mark_live(conn, uid, live, now)
-                counts["already_live"] += 1
-            else:
-                counts["inserted"] += 1
+            counts["already_live" if live else "inserted"] += 1
             continue
         if existing[0] in PROPOSED:
             live = live or index.match(c.canonical_url, existing[1])
@@ -219,38 +219,31 @@ def pending_verify(conn: sqlite3.Connection, town_slug: str, limit: int) -> list
 
 
 def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
-                   index: LiveIndex) -> str:
-    """Store the verifier's verdict on one candidate and return its new
-    status. A nameless (directory) candidate takes its name from the page
-    title, and the live check runs again with it — live is checked before
-    the verdict counts, since live may have grown since the sweep."""
-    now = iso_utc_now()
-    uid = candidate["candidate_uid"]
+                   index: LiveIndex) -> Optional[str]:
+    """Store the verifier's verdict on one `new` candidate and return its new
+    status — or None when it is no longer `new` (the operator decided while
+    the verify ran; their call stands). A nameless (directory) candidate
+    takes its name from the page title, and the live check runs again with
+    it, since live may have grown since the sweep."""
     name = candidate.get("display_name") or name_from_title(verdict.get("title"))
-    conn.execute(
-        "UPDATE discovery_candidates SET display_name = ?, verify_json = ?, last_seen_at = ? "
-        "WHERE candidate_uid = ?",
-        (name, json.dumps(verdict, ensure_ascii=False), now, uid),
-    )
     live = index.match(candidate["canonical_url"], name)
     if live:
-        _mark_live(conn, uid, live, now)
-        status = "already-live"
+        status, live_slug, reason = "already-live", live.slug, live.reason
     elif verdict.get("verified"):
-        conn.execute(
-            "UPDATE discovery_candidates SET status = 'verified', reject_reason = NULL "
-            "WHERE candidate_uid = ?", (uid,),
-        )
-        status = "verified"
+        status, live_slug, reason = "verified", None, None
     else:
+        status, live_slug = "rejected", None
         reason = "; ".join(verdict.get("reasons") or []) or "unspecified"
-        conn.execute(
-            "UPDATE discovery_candidates SET status = 'rejected', reject_reason = ? "
-            "WHERE candidate_uid = ?", (reason, uid),
-        )
-        status = "rejected"
+    cur = conn.execute(
+        """UPDATE discovery_candidates
+           SET status = ?, live_slug = ?, reject_reason = ?, display_name = ?,
+               verify_json = ?, last_seen_at = ?
+           WHERE candidate_uid = ? AND status = 'new'""",
+        (status, live_slug, reason, name, json.dumps(verdict, ensure_ascii=False),
+         iso_utc_now(), candidate["candidate_uid"]),
+    )
     conn.commit()
-    return status
+    return status if cur.rowcount else None
 
 
 def list_candidates(conn: sqlite3.Connection, town_slug: str,
@@ -355,5 +348,6 @@ def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
             out["errors"].append(f"{cand['canonical_url']}: {type(e).__name__}: {e}")
             continue
         status = record_verdict(conn, cand, verdict, index)
-        out[status.replace("-", "_")] += 1
+        if status:
+            out[status.replace("-", "_")] += 1
     return out

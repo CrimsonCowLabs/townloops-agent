@@ -641,7 +641,7 @@ def list_candidates(kind: Optional[str], status: Optional[str],
             f"""
             SELECT candidate_uid, kind, status, canonical_url,
                    display_name, source_signal, first_seen_at,
-                   target_category_slug, reject_reason
+                   target_category_slug, reject_reason, live_slug
             FROM discovery_candidates
             {where_sql}
             ORDER BY first_seen_at DESC

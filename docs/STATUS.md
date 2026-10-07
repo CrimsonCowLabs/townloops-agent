@@ -169,13 +169,7 @@ Format: `[status] title — file:line — why`. Status: `[ ] pending`, `[x] done
 
 ## Business discovery
 
-Active web sweeps for candidate businesses (outside the event-ingest mining side-effect) live on the CMO Hermes, not here:
-
-- **Skill**: `~/.hermes/skills/business/townloops-business-discovery/` — sweep → verify → promote. Promotes verified candidates into the sibling `townloops-research` skill, which is what actually POSTs the business record via `/towns/{slug}/businesses`.
-- **Why on CMO, not per-town**: web-wide sweeping is a central operator function, not a per-town operational loop. Every town this repo runs still benefits — the CMO skill takes `--town <slug>` and reads its category list from this repo's live `/categories` endpoint.
-- **This repo's business surface stays the same**: `event-ingest` still mines businesses as an event side-effect, and `business-enrichment` still fills details on existing rows. Neither scans the web for new discoverable businesses.
-
-If discovery breaks or needs improvement, edit the CMO skill — do not add a discovery skill here.
+*(Superseded 2026-10.)* This section used to say web sweeps for new businesses live on the CMO Hermes. That CMO skill was archived, and discovery now runs in this repo as `skills/business/business-discovery/` (sweep → verify → dedup against live businesses; proposes only, never POSTs). See `docs/business-discovery-handoff.md`.
 
 ## Files worth re-reading before major changes
 

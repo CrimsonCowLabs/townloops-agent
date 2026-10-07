@@ -21,28 +21,16 @@ import argparse
 import json
 import os
 import sys
-from pathlib import Path
-
-import yaml
 
 from engine import business_discovery as bd
 from engine import lock as _lock
-from engine.derive_helpers import open_db, record_activity
+from engine.derive_helpers import load_town_profile, open_db, record_activity
 
 _WORKER = "business-discovery"
-_PROFILE_PATH = Path(os.environ.get("TOWN_PROFILE_PATH") or os.path.join(
-    os.environ.get("HERMES_HOME", "/home/agent/.hermes"), "town-profile.yaml"))
 
 
 def _town_slug() -> str:
     return os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
-
-
-def _load_town_profile() -> dict:
-    try:
-        return yaml.safe_load(_PROFILE_PATH.read_text()) or {}
-    except (OSError, yaml.YAMLError):
-        return {}
 
 
 def _client():
@@ -53,13 +41,10 @@ def _client():
 
 
 def _locked_run(action: str, fn) -> int:
-    if not _town_slug():
-        print("TOWNLOOPS_TOWN_SLUG not set", file=sys.stderr)
-        return 1
     conn = open_db()
     try:
         with _lock.acquire(_WORKER):
-            out = fn(conn, _client(), _load_town_profile(), _town_slug())
+            out = fn(conn, _client(), load_town_profile(), _town_slug())
     except _lock.LockHeld:
         print("previous business-discovery run still active — skipped")
         return 0
@@ -112,6 +97,9 @@ def main() -> int:
     ls.add_argument("--limit", type=int, default=50)
     sub.add_parser("stats")
     args = ap.parse_args()
+    if not _town_slug():
+        print("TOWNLOOPS_TOWN_SLUG not set", file=sys.stderr)
+        return 1
     return {"sweep": _sweep, "verify": _verify, "list": _list, "stats": _stats}[args.cmd](args)
 
 

@@ -47,17 +47,22 @@ def iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
-def town_name() -> str:
-    """The town's display name from town-profile.yaml (search queries,
-    locality checks), falling back to the slug."""
+def load_town_profile() -> dict:
+    """town-profile.yaml ($TOWN_PROFILE_PATH, else $HERMES_HOME), or {} when
+    missing/unreadable."""
     import yaml
     path = Path(os.environ.get("TOWN_PROFILE_PATH") or os.path.join(
         os.environ.get("HERMES_HOME", "/home/agent/.hermes"), "town-profile.yaml"))
     try:
-        profile = yaml.safe_load(path.read_text()) or {}
+        return yaml.safe_load(path.read_text()) or {}
     except (OSError, yaml.YAMLError):
-        profile = {}
-    return profile.get("name") or os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
+        return {}
+
+
+def town_name() -> str:
+    """The town's display name from town-profile.yaml (search queries,
+    locality checks), falling back to the slug."""
+    return load_town_profile().get("name") or os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
 
 
 def open_db() -> sqlite3.Connection:

@@ -142,6 +142,15 @@ def test_store_round_trip_through_verify_and_list(fresh_db):
     assert bd.stats(fresh_db, "slt") == {"verified": 1, "rejected": 1, "already-live": 1}
 
 
+def test_verdict_never_overwrites_an_operator_decision_made_mid_run(fresh_db):
+    bd.record_sweep(fresh_db, "slt", [_cand("https://brand-new.example/", "Brand New Bakery")], _index())
+    row = bd.pending_verify(fresh_db, "slt", limit=1)[0]
+    fresh_db.execute("UPDATE discovery_candidates SET status = 'rejected', reject_reason = 'operator'")
+    assert bd.record_verdict(fresh_db, row, {"verified": True, "reasons": []}, _index()) is None
+    stored = _rows(fresh_db)["https://brand-new.example/"]
+    assert (stored["status"], stored["reject_reason"]) == ("rejected", "operator")
+
+
 def test_verify_names_a_directory_candidate_from_its_page_title_and_dedups(fresh_db):
     bd.record_sweep(fresh_db, "slt", [_cand("https://alibi.example/", None, "directory:x")], _index())
     row = bd.pending_verify(fresh_db, "slt", limit=1)[0]
