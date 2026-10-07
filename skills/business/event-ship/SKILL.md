@@ -39,3 +39,12 @@ town onboarding, before TownLoops.com even has the town record.
 
 When the town is finally registered on TownLoops, an operator-triggered
 `resync` will POST the accumulated shipped-locally events.
+
+## Reconcile-staged rows
+
+- An event whose `extra_json.reconcile.kind == "changed"` (staged by
+  `event-reconcile`) is a source-side change to an existing live event: ship
+  **PATCHes** `events/<live_slug>` with the changed `start_at`/`end_at` and/or
+  `venue_name` + `venue_id`, instead of POSTing a new event.
+- Linked entities with `source_kind='live'` are local mirrors of TownLoops rows;
+  ship returns their `townloops_slug` without POSTing.

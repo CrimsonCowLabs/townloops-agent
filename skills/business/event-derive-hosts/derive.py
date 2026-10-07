@@ -70,6 +70,19 @@ def main() -> int:
         print(f"event not found: {event_uid}", file=sys.stderr)
         return 2
 
+    # event-reconcile may have already resolved the host business/community
+    # from the source page's organizer field — honor it over the title rule.
+    preset, preset_kind = event.get("derived_host_uid"), event.get("derived_host_kind")
+    preset_table = {"business": "businesses", "community": "communities"}.get(preset_kind or "")
+    if preset and preset_table and conn.execute(
+        f"SELECT 1 FROM {preset_table} WHERE entity_uid = ?", (preset,),
+    ).fetchone():
+        link_event_to_entity(conn, event_uid, preset_kind, preset, role="host")
+        record_activity(conn, _WORKER, "host-preset", event_uid,
+                        detail=f"kept pre-resolved {preset_kind} {preset[:12]}")
+        print(f"derived host ({preset_kind}): {preset} for event {event_uid[:12]} (preset)")
+        return 0
+
     title = event.get("title") or event.get("name") or ""
     m = _COMMUNITY_KEYWORDS.search(title)
     if not m:

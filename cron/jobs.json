@@ -29,6 +29,15 @@
       "prompt": "python /home/agent/.hermes/skills/business/event-find/find.py"
     },
     {
+      "id": "event-reconcile-weekly",
+      "name": "Weekly reconcile (re-pull seeds, cross-reference live TownLoops for date/venue changes + missing events, stage locally, enrich venues/hosts/images)",
+      "schedule": "0 2 * * 0",
+      "skills": ["event-reconcile"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /app/scripts/event_reconcile.py"
+    },
+    {
       "id": "event-seed-discovery-weekly",
       "name": "Weekly seed discovery (LLM proposes seed URLs → operator approves)",
       "schedule": "0 4 * * 0",

@@ -60,6 +60,18 @@ def main() -> int:
         print(f"event not found: {event_uid}", file=sys.stderr)
         return 2
 
+    # event-reconcile may have already resolved the venue (incl. matching a
+    # live TownLoops venue whose name differs from venue_raw) — honor it.
+    preset = event.get("derived_venue_uid")
+    if preset and conn.execute(
+        "SELECT 1 FROM venues WHERE entity_uid = ?", (preset,),
+    ).fetchone():
+        link_event_to_entity(conn, event_uid, "venue", preset, role="primary")
+        record_activity(conn, _WORKER, "venue-preset", event_uid,
+                        detail=f"kept pre-resolved venue {preset[:12]}")
+        print(f"derived venue: {preset} for event {event_uid[:12]} (preset)")
+        return 0
+
     venue_name = (event.get("venue_raw") or event.get("venue_name")
                   or event.get("hosting_group") or "").strip()
     if not venue_name:

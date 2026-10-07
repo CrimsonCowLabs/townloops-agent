@@ -126,6 +126,10 @@ def _ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     ).fetchone()
     if not row:
         return None
+    if row["source_kind"] == "live" and row["townloops_slug"]:
+        # Local mirror of a row that already exists on TownLoops (staged by
+        # event-reconcile) — nothing to create.
+        return row["townloops_slug"]
     payload = _PAYLOAD_BUILDERS[kind](row)
     proposed_slug = row["townloops_slug"] or _slug_for(kind, entity_uid)
     payload["slug"] = proposed_slug
@@ -172,6 +176,50 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
     else:
         slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
     return slug
+
+
+def _reconcile_change(event: dict) -> Optional[dict]:
+    """event-reconcile metadata when this row is a change to a live event."""
+    import json
+    try:
+        meta = (json.loads(event.get("extra_json") or "{}") or {}).get("reconcile") or {}
+    except (json.JSONDecodeError, AttributeError):
+        return None
+    if meta.get("kind") == "changed" and meta.get("live_slug"):
+        return meta
+    return None
+
+
+def _patch_live_event(client, conn, event: dict, meta: dict) -> Optional[str]:
+    """Apply a source-side date/venue change to the existing live event."""
+    import json
+    changes = meta.get("changes") or {}
+    patch: dict[str, Any] = {}
+    if "start_at" in changes:
+        patch["start_at"] = event["date_utc"] or changes["start_at"]["source"]
+        if event["end_at_utc"] or event["end_at"]:
+            patch["end_at"] = event["end_at_utc"] or event["end_at"]
+    if "venue" in changes:
+        patch["venue_name"] = event["venue_name"] or event["venue_raw"]
+        if event.get("derived_venue_uid"):
+            v = conn.execute(
+                "SELECT extra_json FROM venues WHERE entity_uid = ?",
+                (event["derived_venue_uid"],),
+            ).fetchone()
+            try:
+                live_id = (json.loads(v["extra_json"] or "{}") if v else {}).get("live_id")
+            except json.JSONDecodeError:
+                live_id = None
+            if live_id:
+                patch["venue_id"] = live_id
+    if not patch:
+        return meta["live_slug"]
+    try:
+        client.update("events", meta["live_slug"], patch)
+    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+        print(f"patch event {meta['live_slug']} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
+    return meta["live_slug"]
 
 
 def _mark_shipped(conn, event_uid: str, slug: str, disabled: bool = False) -> None:
@@ -237,8 +285,13 @@ def main() -> int:
                 error=None if slug else "ship failed",
             )
 
-    # 2) Ship the event itself.
-    event_slug = _ship_event(client, conn, event, venue_slug)
+    # 2) Ship the event itself — PATCH the live row if event-reconcile staged
+    #    this as a change to an existing TownLoops event, else create.
+    change = _reconcile_change(event)
+    if change:
+        event_slug = _patch_live_event(client, conn, event, change)
+    else:
+        event_slug = _ship_event(client, conn, event, venue_slug)
     if not event_slug:
         return 1
 
