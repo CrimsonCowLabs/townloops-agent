@@ -5,23 +5,16 @@ kind auto-detection + og:image capture + JSON-LD extraction. The CLI /
 drafts-DB plumbing is intentionally omitted; consumers here are the
 enrichment skills (venue/business/performer) that manage their own queues.
 
-Env:
-  FIRECRAWL_API_KEY  cloud bearer (or self-hosted bearer if the instance
-                     validates keys). Optional when FIRECRAWL_API_URL is set —
-                     a placeholder bearer is sent so self-hosted requests
-                     satisfy the schema.
-  FIRECRAWL_API_URL  base URL (no /v1). Default: https://api.firecrawl.dev.
-                     Set to e.g. http://localhost:8302 for self-hosted.
-                     Also unblocks firecrawl_fetch when no API key is set.
-  When both are missing, firecrawl_fetch returns (None, None) and consumers
-  fall back to plain requests via research_url()'s degrade path.
+Firecrawl: the town's local instance only (engine.firecrawl_env —
+TOWNLOOPS_FIRECRAWL_URL / FIRECRAWL_API_URL, never cloud). With none
+configured, firecrawl_fetch returns (None, None) and consumers fall back to
+plain requests via research_url()'s degrade path.
 """
 
 from __future__ import annotations
 
 import html as html_lib
 import json
-import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -29,14 +22,13 @@ from urllib.parse import urljoin, urlparse
 
 import requests
 
-from engine.firecrawl_env import self_hosted_url
+from engine import firecrawl_env
 from engine.log import get_logger
 
 log = get_logger("research")
 
 
 UA = "townloops-agent/1.0 (+https://townloops.com)"
-FIRECRAWL_DEFAULT_BASE = "https://api.firecrawl.dev"
 
 
 class FirecrawlAuthError(RuntimeError):
@@ -53,12 +45,7 @@ def firecrawl_stats() -> dict:
 
 
 def _firecrawl_base() -> str:
-    """Base URL. Honors $FIRECRAWL_API_URL for self-hosted; strips a trailing /v1
-    since we always append /v1/... ourselves."""
-    raw = (self_hosted_url() or FIRECRAWL_DEFAULT_BASE).rstrip("/")
-    if raw.endswith("/v1"):
-        raw = raw[:-3]
-    return raw
+    return firecrawl_env.base_url()
 
 
 @dataclass
@@ -93,17 +80,11 @@ def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
     Raises FirecrawlAuthError on 401/403 — the caller should escalate,
     not silently degrade for the rest of the sweep.
     """
-    # 2026-07-10: honor self-hosted mode when FIRECRAWL_API_URL is set — the
-    # docstring above always said "optional; falls back to plain requests",
-    # but the old key check silently no-op'd for self-hosted deployments too.
-    # Now: real key takes priority; otherwise, if URL is set (self-hosted),
-    # send a placeholder bearer that satisfies Firecrawl's schema. Only both-
-    # missing is a real "not configured" state.
-    key = (os.environ.get("FIRECRAWL_API_KEY") or "").strip()
-    self_hosted = bool(self_hosted_url())
-    if not key and not self_hosted:
+    try:
+        endpoint = f"{_firecrawl_base()}/v1/scrape"
+    except firecrawl_env.FirecrawlNotConfigured as exc:
         _STATS["http_error"] += 1
-        _STATS["last_error"] = "FIRECRAWL_API_KEY not set and no FIRECRAWL_API_URL"
+        _STATS["last_error"] = str(exc)
         return None, None
     # Shared QPS ceiling with engine.discovery's Firecrawl calls.
     from engine.policy import firecrawl_bucket
@@ -113,13 +94,11 @@ def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
         _STATS["last_error"] = f"rate limited: {exc}"
         return None, None
     _STATS["calls"] += 1
-    endpoint = f"{_firecrawl_base()}/v1/scrape"
-    bearer = key or "self-hosted"
     try:
         r = requests.post(
             endpoint,
             json={"url": url, "formats": ["html"]},
-            headers={"Authorization": f"Bearer {bearer}"},
+            headers=firecrawl_env.headers(),
             timeout=45,
         )
     except requests.RequestException as exc:

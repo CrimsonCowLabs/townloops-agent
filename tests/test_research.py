@@ -137,6 +137,7 @@ class TestFirecrawlErrorSurfacing:
         response.text = "Unauthorized"
         monkeypatch.setattr(research.requests, "post", MagicMock(return_value=response))
         monkeypatch.setenv("FIRECRAWL_API_KEY", "obviously-invalid")
+        monkeypatch.setenv("TOWNLOOPS_FIRECRAWL_URL", "http://localhost:8302")
         with pytest.raises(research.FirecrawlAuthError):
             research.firecrawl_fetch("https://example.com")
 
@@ -147,6 +148,7 @@ class TestFirecrawlErrorSurfacing:
         response.text = "Forbidden"
         monkeypatch.setattr(research.requests, "post", MagicMock(return_value=response))
         monkeypatch.setenv("FIRECRAWL_API_KEY", "invalid")
+        monkeypatch.setenv("TOWNLOOPS_FIRECRAWL_URL", "http://localhost:8302")
         with pytest.raises(research.FirecrawlAuthError):
             research.firecrawl_fetch("https://example.com")
 
@@ -159,6 +161,7 @@ class TestFirecrawlErrorSurfacing:
         response.text = "Internal server error"
         monkeypatch.setattr(research.requests, "post", MagicMock(return_value=response))
         monkeypatch.setenv("FIRECRAWL_API_KEY", "any")
+        monkeypatch.setenv("TOWNLOOPS_FIRECRAWL_URL", "http://localhost:8302")
         html, url = research.firecrawl_fetch("https://example.com")
         assert html is None and url is None
         stats = research.firecrawl_stats()

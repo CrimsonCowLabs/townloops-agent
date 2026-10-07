@@ -65,7 +65,7 @@ from engine.ingest_core import (  # noqa: E402
     # Phase 2: HTTP fetch layer
     _http_get, _firecrawl_endpoint, _firecrawl_scrape,
     _detail_links_from_html,
-    FIRECRAWL_CLOUD_BASE, DEFAULT_MAX_DETAIL_FETCHES,
+    DEFAULT_MAX_DETAIL_FETCHES,
     # Phase 2: JSON-LD + selector helpers
     _walk_jsonld, _jsonld_to_event, _extract_jsonld_from_html,
     _text, _attr_or_text, _extract_selectors_from_html,
@@ -97,7 +97,6 @@ MIGRATIONS_DIR = _ENGINE_MIG_DIR if _ENGINE_MIG_DIR.is_dir() else (SCRIPT_DIR / 
 # from $AGENT_TZ, defaulting to America/Los_Angeles). Kept as the local name
 # `PT` so legacy references throughout this file (parse_ical, etc.) are unchanged.
 
-FIRECRAWL_CLOUD_BASE = "https://api.firecrawl.dev"
 DEFAULT_MAX_DETAIL_FETCHES = 50
 
 def _require_env(name: str) -> str:

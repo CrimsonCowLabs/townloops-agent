@@ -150,6 +150,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Leader/follower for HA.** Two hosts can share a slug; only the leader runs cron (follower binds
   `cron/jobs.empty.json` over `cron/jobs.json` via a gitignored `docker-compose.override.yml`). Server-side
   Idempotency-Key dedup makes duplicate POSTs safe. See README §"Second instance / failover".
+- **Firecrawl is always the local instance, never cloud.** Every Firecrawl call resolves its endpoint through
+  `engine/firecrawl_env.base_url()` (`TOWNLOOPS_FIRECRAWL_URL` → `FIRECRAWL_API_URL`); unset, or a
+  `firecrawl.dev` URL, raises `FirecrawlNotConfigured`. Don't add a cloud default or a second endpoint resolver.
 - **Codex CLI is best-effort.** If the CLI is missing/throttled, LLM (classifier, event-find extraction)
   calls no-op and retry on the next tick — don't treat a single throttle as a bug.
 - **Business discovery is in-repo** (`skills/business/business-discovery/`, ported from the CMO's

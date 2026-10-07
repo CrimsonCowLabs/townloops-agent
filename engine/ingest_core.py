@@ -48,7 +48,7 @@ from dateutil import parser as dateparser
 from dateutil import tz
 from icalendar import Calendar
 
-from engine.firecrawl_env import self_hosted_url
+from engine import firecrawl_env
 
 
 # =====================================================================
@@ -474,7 +474,6 @@ def _entity_content_hash(kind: str, ent) -> str:
 # =====================================================================
 
 
-FIRECRAWL_CLOUD_BASE = "https://api.firecrawl.dev"
 DEFAULT_MAX_DETAIL_FETCHES = 50
 
 
@@ -489,34 +488,19 @@ def _http_get(url: str, timeout: int = 20) -> requests.Response:
 
 
 def _firecrawl_endpoint() -> str:
-    """Honor the self-hosted URL (engine.firecrawl_env) if set, else fall back to the cloud."""
-    base = (self_hosted_url() or FIRECRAWL_CLOUD_BASE).rstrip("/")
-    return f"{base}/v1/scrape"
+    """The local Firecrawl scrape endpoint (engine.firecrawl_env) — never cloud."""
+    return f"{firecrawl_env.base_url()}/v1/scrape"
 
 
 def _firecrawl_scrape(url: str, timeout: int = 60) -> str:
     """POST to Firecrawl's /v1/scrape and return rendered HTML.
 
-    Honors FIRECRAWL_API_URL for self-hosted instances. Falls back to the
-    cloud endpoint. Self-hosted instances ignore the bearer token but the
-    Firecrawl API still requires one to be present.
+    Local Firecrawl only (engine.firecrawl_env); raises FirecrawlNotConfigured
+    when no local instance is configured.
     """
-    endpoint = _firecrawl_endpoint()
-    is_self_hosted = bool(self_hosted_url())
-    key = os.getenv("FIRECRAWL_API_KEY", "").strip()
-    if not key and not is_self_hosted:
-        raise RuntimeError(
-            "FIRECRAWL_API_KEY not set and no FIRECRAWL_API_URL configured. "
-            "Either set FIRECRAWL_API_KEY for cloud, or FIRECRAWL_API_URL for self-host."
-        )
-    headers = {"Content-Type": "application/json"}
-    if key:
-        headers["Authorization"] = f"Bearer {key}"
-    elif is_self_hosted:
-        headers["Authorization"] = "Bearer self-hosted"
     resp = requests.post(
-        endpoint,
-        headers=headers,
+        _firecrawl_endpoint(),
+        headers=firecrawl_env.headers(),
         json={"url": url, "formats": ["html"]},
         timeout=timeout,
     )

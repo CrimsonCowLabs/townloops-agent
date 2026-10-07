@@ -8,11 +8,8 @@ own that. The kernel returns plain dataclasses / dicts.
 Callers:
   - engine/business_discovery.py (the business-discovery skill)
 
-Firecrawl access rules (matches CMO version):
-  - $FIRECRAWL_API_KEY set → use it (cloud or self-hosted-with-keys).
-  - $FIRECRAWL_API_URL set (self-hosted, no key) → placeholder "Bearer
-    self-hosted" satisfies the schema.
-  - Neither → hard fail.
+Firecrawl access: the town's local instance only (engine.firecrawl_env) —
+no local URL configured → FirecrawlNotConfigured, never cloud.
 
 Rate limiting: every Firecrawl call goes through
 `engine.policy.firecrawl_bucket.wait()` — configurable ceiling shared across
@@ -21,7 +18,6 @@ the process.
 
 from __future__ import annotations
 
-import os
 import re
 import sys
 import time
@@ -33,11 +29,10 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 from engine.ingest_core import DEFAULT_TZ
-from engine.firecrawl_env import self_hosted_url
+from engine import firecrawl_env
 from engine.policy import firecrawl_bucket
 
 
-FIRECRAWL_DEFAULT_BASE = "https://api.firecrawl.dev"
 FIRECRAWL_SEARCH_LIMIT = 10
 FIRECRAWL_TIMEOUT_S = 45
 BETWEEN_QUERIES_S = 0.5
@@ -162,24 +157,12 @@ def directory_link_block_reason(seed_host: str, link: str) -> Optional[str]:
 # --------------------------------------------------------------------------
 
 def _firecrawl_base() -> str:
-    raw = (self_hosted_url() or FIRECRAWL_DEFAULT_BASE).rstrip("/")
-    if raw.endswith("/v1"):
-        raw = raw[:-3]
-    return raw
+    return firecrawl_env.base_url()
 
 
 def _firecrawl_headers() -> dict:
-    key = os.getenv("FIRECRAWL_API_KEY", "").strip()
-    self_hosted = bool(self_hosted_url())
-    if not key and not self_hosted:
-        raise RuntimeError(
-            "Firecrawl misconfigured: neither FIRECRAWL_API_KEY nor "
-            "FIRECRAWL_API_URL is set."
-        )
-    return {
-        "Authorization": f"Bearer {key or 'self-hosted'}",
-        "Content-Type": "application/json",
-    }
+    firecrawl_env.base_url()   # local instance configured, or raise — never cloud
+    return firecrawl_env.headers()
 
 
 def firecrawl_search(query: str, *, limit: int = FIRECRAWL_SEARCH_LIMIT,

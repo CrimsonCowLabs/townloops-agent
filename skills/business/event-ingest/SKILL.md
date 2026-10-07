@@ -32,7 +32,7 @@ For requests such as “find events,” “review sources,” “collect current
 ## Environment (required)
 
 - `TOWNLOOPS_API_URL`, `TOWNLOOPS_API_KEY`, `TOWNLOOPS_TOWN_SLUG`
-- Optional: `SOURCES_YAML_PATH` (default `$HERMES_HOME/state/sources.yaml`), `TOWNLOOPS_DB_PATH` (default `$HERMES_HOME/state/townloops.db`), `AGENT_TZ` (default `America/Los_Angeles`), `FIRECRAWL_API_KEY` (optional; needed only for firecrawl-typed sources).
+- Optional: `SOURCES_YAML_PATH` (default `$HERMES_HOME/state/sources.yaml`), `TOWNLOOPS_DB_PATH` (default `$HERMES_HOME/state/townloops.db`), `AGENT_TZ` (default `America/Los_Angeles`), `TOWNLOOPS_FIRECRAWL_URL` / `FIRECRAWL_API_URL` (the local Firecrawl; needed only for firecrawl-typed sources — cloud Firecrawl is never used).
 
 ## Commands
 
