@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""event-enrich-entities — research every entity linked to an event (venue,
-business, community, performer, creator) from its own site and fill its
-blank fields, under a per-event lookup budget (engine.entity_enrich).
+"""event-enrich-entities — research every venue, business and community
+linked to an event from its own site and fill its blank fields, under a
+per-event lookup budget (engine.entity_enrich). Performers and creators are
+left to the scheduled performer-research batch (engine.performer_research).
 
 Exits 0 whenever the event's entities were dealt with — including "not
 found" and "budget ran out" — so a hard-to-find entity never parks the
@@ -11,13 +12,10 @@ from __future__ import annotations
 
 import os
 import sys
-from pathlib import Path
 
-import yaml
-
-from engine import entity_enrich
+from engine import entity_enrich, performer_research
 from engine.derive_helpers import (
-    load_event, open_db, parse_event_uid_arg, record_activity,
+    load_event, open_db, parse_event_uid_arg, record_activity, town_name,
 )
 from engine.research import FirecrawlAuthError
 
@@ -26,16 +24,6 @@ _WORKER = "event-enrich-entities"
 # Firecrawl searches + page reads per event; an event has ~1-4 entities and
 # each costs 1-3 lookups.
 _DEFAULT_MAX_LOOKUPS = 8
-
-
-def _town_name() -> str:
-    path = Path(os.environ.get("TOWN_PROFILE_PATH") or os.path.join(
-        os.environ.get("HERMES_HOME", "/home/agent/.hermes"), "town-profile.yaml"))
-    try:
-        profile = yaml.safe_load(path.read_text()) or {}
-    except (OSError, yaml.YAMLError):
-        profile = {}
-    return profile.get("name") or os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
 
 
 def main() -> int:
@@ -57,10 +45,15 @@ def main() -> int:
     except ValueError:
         max_lookups = _DEFAULT_MAX_LOOKUPS
     budget = entity_enrich.Budget(max_lookups)
-    town = _town_name()
+    town = town_name()
     notes = []
     try:
         for kind, uid in links:
+            if kind in performer_research.KINDS:
+                # A name search can't tell a local act from a namesake; the
+                # scheduled performer-research batch walks the evidence ladder.
+                notes.append(f"{kind} {uid[:12]}: left for performer-research")
+                continue
             out = entity_enrich.enrich_entity(conn, kind, uid, town, budget)
             note = f"{kind} {uid[:12]}: {out.status}"
             if out.filled:

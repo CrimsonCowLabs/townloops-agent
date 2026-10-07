@@ -417,7 +417,7 @@ class TestEnrichEntitiesSkill:
             "SELECT action, detail, ok FROM agent_activity WHERE worker = 'event-enrich-entities' "
             "AND target = ?", (uid,))]
 
-    def test_every_linked_kind_is_enriched(self, conn, web, monkeypatch):
+    def test_venue_and_hosts_enriched_performers_left_for_their_ladder(self, conn, web, monkeypatch):
         venue = _entity(conn, "venue", "Lakeview Commons", website="https://city.example/lakeview")
         band = _entity(conn, "performer", "The Reggae Cowboys", website="https://cowboys.example/")
         host = _entity(conn, "community", "Rotary Club of Tahoe", website="https://rotary.example/")
@@ -425,9 +425,13 @@ class TestEnrichEntitiesSkill:
                                  ("community", host, "host")])
         assert self._run(conn, monkeypatch, uid) == 0
         assert _row(conn, "venue", venue)["address"].startswith("1077 Lakeview Ave")
-        assert _row(conn, "performer", band)["spotify_url"] == "https://open.spotify.com/artist/abc"
         assert _row(conn, "community", host)["enrichment_status"] == "enriched"
-        assert [a["action"] for a in self._activity(conn, uid)] == ["enriched"]
+        # Performers go to performer-research (evidence ladder), not name search.
+        assert _row(conn, "performer", band)["spotify_url"] is None
+        assert _row(conn, "performer", band)["enrichment_status"] == "pending"
+        activity = self._activity(conn, uid)
+        assert [a["action"] for a in activity] == ["enriched"]
+        assert "left for performer-research" in activity[0]["detail"]
 
     def test_entity_not_found_still_exits_zero_and_records_it(self, conn, web, monkeypatch):
         web["search"] = []

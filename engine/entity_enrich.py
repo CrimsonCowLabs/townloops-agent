@@ -61,7 +61,7 @@ TABLES = {k: SPECS[k].table for k in ("venue", "business", "community")}
 ENRICH_FIELDS = ("description", "address", "website", "phone", "image_path",
                  "image_alt", *_SOCIALS)
 # enrichment_status values that mean "already researched — don't repeat".
-DONE_STATUSES = ("enriched", "not-found", "image-proposed", "live")
+DONE_STATUSES = ("enriched", "not-found", "image-proposed", "live", "needs-review")
 
 
 class Budget:

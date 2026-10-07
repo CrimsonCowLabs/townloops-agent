@@ -65,6 +65,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5
     entity kinds, `enrich_entity` research + schema validation + fill-blanks; event-reconcile and
     event-enrich-entities use it — new enrichment work builds on it, not on a skill script),
+    `performer_research.py` (performer/creator evidence ladder: event evidence → venue-page links →
+    profile metadata → search as discovery only; bios verbatim or null; ambiguous → `needs-review`;
+    driven by the `performer-research` skill, ≤3 per 20-min cron run),
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
     `entity-live-sync`), `live_patch.py` (full-body PATCH + GET verify for events and entities),
     `live_lookup.py` (find a live record before creating one).
@@ -131,6 +134,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   (event-ship + the daily `entity-live-sync` sweep): resync from the live row first (live values win), then
   PATCH only live's blanks, GET-verify, and only then set `pushed_hash`. A 404 or a PATCH that doesn't land
   flags the entity (`extra_json.live_sync`) for the operator — never re-created, never retried until cleared.
+- **Performer/creator identity is never inferred from a name.** They're researched only by the
+  `performer-research` batch (event-enrich-entities skips them); a profile is attached only when a venue page
+  links it or its metadata names the town/a linked venue *and* the role. Bios are the profile's own text or
+  null — never template copy. Don't route performers back through `entity_enrich`'s name search.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
   `--yes-really-send`. Sunday cron only *composes* a draft. Never wire auto-push.
 - **`SPONSORS_ENABLED=false` is the safe default** — never flip it in a template. Money placements are

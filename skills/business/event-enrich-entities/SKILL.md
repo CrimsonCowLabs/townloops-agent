@@ -3,23 +3,26 @@
 Workqueue action: **enrich-entities**. Runs for events in
 `state=people-derived`.
 
-Researches every entity linked to the event (`linked_events`: venue, host
-business/community, performers, creators) from the entity's own site and
-fills fields that are still blank. All logic lives in
-`engine/entity_enrich.py` (`enrich_entity`, `SPECS`); this script is the
-per-event driver.
+Researches the venue and host business/community linked to the event
+(`linked_events`) from the entity's own site and fills fields that are still
+blank. All logic lives in `engine/entity_enrich.py` (`enrich_entity`,
+`SPECS`); this script is the per-event driver.
+
+Performers and creators are **skipped** (noted as "left for
+performer-research"): a name search can't tell a local act from a namesake,
+so the scheduled `performer-research` batch researches them along its
+evidence ladder.
 
 ## What it does per entity
 
 1. **Skip** live mirrors (`source_kind='live'` — their values are
    TownLoops') and rows already researched (`enrichment_status` in
-   `enriched | not-found | image-proposed | live`).
+   `enriched | not-found | image-proposed | live | needs-review`).
 2. **Find the site**: the row's `website`, else its `facebook` page, else a
    Firecrawl search for `"<name>" <town>` (first hit plausibly the entity's
    own site; directories/aggregators are blocked).
-   `meeting_info` / `accessibility_notes` / performer bios beyond the page's
-   own description are not extracted here (no structured source; performer
-   research is issue 10).
+   `meeting_info` / `accessibility_notes` are not extracted here (no
+   structured source).
 3. **Read it** (kind-aware fetch plan): a Facebook page root also reads its
    `/about/` tab, where contact details and LocalBusiness JSON-LD live.
 4. **Extract verbatim**: description from og:description / meta description as written (never
