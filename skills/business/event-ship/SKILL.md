@@ -29,6 +29,16 @@ If TownLoops returns `409 slug_taken`, we treat it as already-shipped
 success (this is the same convention `event-ingest ship` uses at
 `ingest.py:668`).
 
+## Times are UTC only
+
+`start_at` / `end_at` come from the `date_utc` / `end_at_utc` columns, which
+`engine.event_extract.upsert_event` fills from the extracted local times in the
+town timezone (`$AGENT_TZ`). A row queued before those columns were set is
+converted the same way at ship time. An event with no UTC start is **not
+shipped**: ship records a failed `ship-event` activity and exits 1, so the
+workqueue retries and then marks it `stuck-` for the operator. A naive local
+date is never sent; an end time with no UTC form is left off.
+
 ## When TownLoops isn't ready yet
 
 If `TOWNLOOPS_API_KEY` env is missing or empty, this skill logs the

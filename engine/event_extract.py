@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import sqlite3
@@ -18,6 +19,8 @@ import subprocess
 from datetime import datetime, timezone
 
 import requests
+from dateutil import tz as _tz
+from dateutil.parser import isoparse as _isoparse
 
 from engine.discovery import (
     FIRECRAWL_TIMEOUT_S,
@@ -29,6 +32,36 @@ from engine.policy import firecrawl_bucket
 
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def town_tz_name() -> str:
+    """IANA name of the town's timezone ($AGENT_TZ), read per call so a
+    process never ships with a timezone frozen at import time."""
+    return os.environ.get("AGENT_TZ", "America/Los_Angeles")
+
+
+def to_utc(value) -> str | None:
+    """An extracted ISO 8601 date/time as a UTC ISO string. Naive values are
+    local time in the town's timezone; explicit offsets are kept. None for
+    anything that isn't ISO — a lenient parser would fill missing parts
+    ("Saturday", "7pm") from today and ship a made-up date."""
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        dt = _isoparse(value.strip())
+    except (ValueError, OverflowError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=_tz.gettz(town_tz_name()))
+    return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
+
+
+def utc_times(start, end) -> tuple[str | None, str | None]:
+    """(start, end) as UTC; an end that isn't after the start is dropped."""
+    start_utc, end_utc = to_utc(start), to_utc(end)
+    if start_utc and end_utc and end_utc <= start_utc:
+        end_utc = None
+    return start_utc, end_utc
 
 
 def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[bool, str, str]:
@@ -75,8 +108,8 @@ Below is the scraped markdown of "{seed_name}" ({seed_url}). Extract every upcom
 
 Return ONLY a JSON array — no prose, no markdown, no code fence. Each object must have these keys (use null for missing fields, never omit):
   "title":       event name (concise)
-  "date":        start date/time in ISO 8601 (e.g. "2026-08-15T19:00:00" — infer timezone as America/Los_Angeles if not stated)
-  "end_at":      end date/time in ISO 8601, or null
+  "date":        start date/time in ISO 8601 as local wall-clock time in {town_tz_name()}, with no UTC offset (e.g. "2026-08-15T19:00:00")
+  "end_at":      end date/time in the same form, or null
   "venue":       venue name if stated (e.g. "Kings Beach Community Center"), else null
   "location":    street address / city if stated, else null
   "description": short description (first 400 chars max)
@@ -178,23 +211,25 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
     ).fetchone()
     date_iso = evt.get("date") or ""
     date_day = date_iso[:10] if date_iso else ""
+    date_utc, end_at_utc = utc_times(date_iso, evt.get("end_at"))
     if row is None:
         conn.execute(
             """
             INSERT INTO events (
               event_uid, source, source_kind, name, title, date, date_day,
-              date_local, end_at, end_at_local, venue_name, venue_raw,
+              date_local, date_utc, end_at, end_at_local, end_at_utc,
+              venue_name, venue_raw,
               location, location_raw, description, category_slug,
               hosting_group, source_url,
               first_seen_at, last_seen_at, content_hash, last_modified_at,
               status, approval_status, state, state_updated_at, discovered_via
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'pending', 'metadata-extracted', ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'pending', 'metadata-extracted', ?, ?)
             """,
             (
                 uid, f"seed:{seed_name}", "scraped",
                 evt.get("title") or "", evt.get("title") or "",
-                date_iso, date_day, date_iso,
-                evt.get("end_at") or None, evt.get("end_at") or None,
+                date_iso, date_day, date_iso, date_utc,
+                evt.get("end_at") or None, evt.get("end_at") or None, end_at_utc,
                 evt.get("venue") or None, evt.get("venue") or None,
                 evt.get("location") or None, evt.get("location") or None,
                 (evt.get("description") or "")[:2000], evt.get("category") or None,
@@ -206,16 +241,18 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
         )
         return "inserted"
     if row[0] == chash:
+        # Rows written before the UTC columns were set get them on next sight.
         conn.execute(
-            "UPDATE events SET last_seen_at = ? WHERE event_uid = ?",
-            (now, uid),
+            "UPDATE events SET last_seen_at = ?, date_utc = COALESCE(date_utc, ?), "
+            "  end_at_utc = COALESCE(end_at_utc, ?) WHERE event_uid = ?",
+            (now, date_utc, end_at_utc, uid),
         )
         return "unchanged"
     conn.execute(
         """
         UPDATE events SET
-          name = ?, title = ?, date = ?, date_day = ?, date_local = ?,
-          end_at = ?, end_at_local = ?,
+          name = ?, title = ?, date = ?, date_day = ?, date_local = ?, date_utc = ?,
+          end_at = ?, end_at_local = ?, end_at_utc = ?,
           venue_name = ?, venue_raw = ?, location = ?, location_raw = ?,
           description = ?, category_slug = ?, source_url = ?,
           last_seen_at = ?, content_hash = ?, last_modified_at = ?
@@ -223,8 +260,8 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
         """,
         (
             evt.get("title") or "", evt.get("title") or "",
-            date_iso, date_day, date_iso,
-            evt.get("end_at") or None, evt.get("end_at") or None,
+            date_iso, date_day, date_iso, date_utc,
+            evt.get("end_at") or None, evt.get("end_at") or None, end_at_utc,
             evt.get("venue") or None, evt.get("venue") or None,
             evt.get("location") or None, evt.get("location") or None,
             (evt.get("description") or "")[:2000], evt.get("category") or None,

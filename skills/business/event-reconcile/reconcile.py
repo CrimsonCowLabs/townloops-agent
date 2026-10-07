@@ -32,7 +32,7 @@ from engine.derive_helpers import (
 )
 from engine.event_extract import (
     build_extraction_prompt, codex_exec, event_uid, firecrawl_markdown,
-    parse_json_array, upsert_event,
+    parse_json_array, town_tz_name, upsert_event,
 )
 
 
@@ -72,7 +72,7 @@ def _load_profile() -> dict:
 
 
 def _town_tz():
-    return _tz.gettz(os.environ.get("AGENT_TZ", "America/Los_Angeles"))
+    return _tz.gettz(town_tz_name())
 
 
 def _columns(conn, table: str) -> set[str]:
@@ -136,11 +136,6 @@ def _seeds(conn, seed_id: Optional[int], limit: Optional[int]) -> list[dict]:
     return [dict(r) for r in conn.execute(q, params).fetchall()]
 
 
-def _to_utc(value: Optional[str]) -> Optional[str]:
-    dt, _ = rc.parse_start(value, _town_tz())
-    return dt.astimezone(timezone.utc).isoformat(timespec="seconds") if dt else None
-
-
 def _reopen_for_review(conn, uid: str, venue_changed: bool) -> bool:
     """A source change to an event this agent already shipped (or gave up on)
     goes back to the operator queue; on approval it re-runs the pipeline and
@@ -166,9 +161,8 @@ def _reopen_for_review(conn, uid: str, venue_changed: bool) -> bool:
 def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str, str]:
     """Upsert one new/changed extraction locally. Returns (event_uid, upsert action).
 
-    `end_at_utc` always mirrors the current extraction (no stale end survives
-    the source dropping it). The live slug of a changed event lives only in
-    the reconcile metadata —
+    `upsert_event` sets the UTC times from the extraction. The live slug of a
+    changed event lives only in the reconcile metadata —
     `townloops_slug` is set by event-ship once the PATCH lands, so a row later
     re-staged as `new` can't inherit a slug that makes its create 409."""
     ev = c.extracted
@@ -200,13 +194,11 @@ def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str
             else f"[reconcile] live event {live.get('slug')} changed: {c.summary()}")
     conn.execute(
         "UPDATE events SET extra_json = ?, "
-        "  date_utc = COALESCE(?, date_utc), end_at_utc = ?, "
         "  image_url = COALESCE(image_url, ?), "
         "  townloops_slug = CASE WHEN ? AND pushed_at IS NULL THEN NULL ELSE townloops_slug END, "
         "  approval_note = CASE WHEN approval_status = 'pending' THEN ? ELSE approval_note END "
         "WHERE event_uid = ?",
         (_merge_extra(row["extra_json"], "reconcile", meta),
-         _to_utc(ev.get("date")), _to_utc(ev.get("end_at")),
          ev.get("image_url") if isinstance(ev.get("image_url"), str) and ev["image_url"].startswith("http") else None,
          1 if c.kind == "new" else 0,
          note, uid),

@@ -15,6 +15,7 @@ from typing import Any, Optional
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, record_activity,
 )
+from engine.event_extract import town_tz_name, utc_times
 
 
 _WORKER = "event-ship"
@@ -100,14 +101,15 @@ _PAYLOAD_BUILDERS = {
 
 
 def _event_payload(row) -> dict:
+    """Times go out as UTC only — a naive local `date`/`end_at` is never sent."""
     payload = {
         "title": row["title"] or row["name"],
-        "start_at": row["date_utc"] or row["date"],
+        "start_at": row["date_utc"],
     }
     if row["description"]:
         payload["description"] = row["description"]
-    if row["end_at_utc"] or row["end_at"]:
-        payload["end_at"] = row["end_at_utc"] or row["end_at"]
+    if row["end_at_utc"]:
+        payload["end_at"] = row["end_at_utc"]
     if row["venue_name"] or row["venue_raw"]:
         payload["venue_name"] = row["venue_name"] or row["venue_raw"]
     if row["category_slug"]:
@@ -178,6 +180,25 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
     return slug
 
 
+def _ensure_utc_times(conn, event: dict) -> bool:
+    """Fill the UTC columns of a row queued before extraction set them,
+    converting its local times in the town timezone. False when the start
+    has no UTC form — the event must not ship."""
+    if event.get("date_utc"):
+        date_utc, end_at_utc = event["date_utc"], event.get("end_at_utc")
+    else:
+        date_utc, end_at_utc = utc_times(event.get("date"), event.get("end_at"))
+    if not date_utc:
+        return False
+    if (date_utc, end_at_utc) != (event.get("date_utc"), event.get("end_at_utc")):
+        conn.execute(
+            "UPDATE events SET date_utc = ?, end_at_utc = ? WHERE event_uid = ?",
+            (date_utc, end_at_utc, event["event_uid"]),
+        )
+        event["date_utc"], event["end_at_utc"] = date_utc, end_at_utc
+    return True
+
+
 def _reconcile_change(event: dict) -> Optional[dict]:
     """event-reconcile metadata when this row is a change to a live event."""
     import json
@@ -193,7 +214,7 @@ def _reconcile_change(event: dict) -> Optional[dict]:
 def _to_dt(value: Optional[str]):
     from dateutil import tz as _tz
     from engine.reconcile import parse_start
-    dt, _ = parse_start(value, _tz.gettz(os.environ.get("AGENT_TZ", "America/Los_Angeles")))
+    dt, _ = parse_start(value, _tz.gettz(town_tz_name()))
     return dt
 
 
@@ -246,7 +267,7 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     live_slug = meta["live_slug"]
     patch: dict[str, Any] = {}
     if "start_at" in changes:
-        patch["start_at"] = event["date_utc"] or changes["start_at"]["source"]
+        patch["start_at"] = event["date_utc"]
         if "live_end_at" in meta:
             live_start = meta.get("live_start_at") or changes["start_at"].get("live")
             live_end = meta["live_end_at"]
@@ -314,6 +335,13 @@ def main() -> int:
     if not event:
         print(f"event not found: {event_uid}", file=sys.stderr)
         return 2
+
+    if not _ensure_utc_times(conn, event):
+        # rc 1 → workqueue retries, then marks the event stuck for the operator.
+        msg = f"no UTC start time (date={event.get('date')!r}) — not shipped"
+        record_activity(conn, _WORKER, "ship-event", event_uid, ok=False, error=msg)
+        print(f"event {event_uid[:12]}: {msg}", file=sys.stderr)
+        return 1
 
     if not _tl_configured():
         _mark_shipped(conn, event_uid, _slug_for("event", event_uid), disabled=True)
