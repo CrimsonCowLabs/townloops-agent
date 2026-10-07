@@ -35,7 +35,7 @@
       "skills": ["event-reconcile"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /app/scripts/event_reconcile.py"
+      "prompt": "python /home/agent/.hermes/scripts/event_reconcile.py"
     },
     {
       "id": "event-seed-discovery-weekly",
