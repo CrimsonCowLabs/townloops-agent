@@ -65,6 +65,14 @@ A 404 whose URL is `/towns/<slug>/...` without `/api/v1` indicates this base-pat
   cap is 200 pages so a runaway filter can't hang. Time-range endpoints use
   `--from` / `--to`, which become the API's `from` / `to` query params.
 
+## Editing live events (PATCH)
+
+PATCH merges per field, but `category_slugs`/`tags` replace the whole set, an
+unresolved `venue_name` clears the venue, and `venue_slug` is silently ignored.
+Never hand-build a partial PATCH: use `engine.live_patch.apply_event_patch`
+(full body from the current live row + GET verify). Details:
+`references/event-patch-semantics.md`.
+
 ## Freeze semantics
 
 `state/api_freeze.json`:

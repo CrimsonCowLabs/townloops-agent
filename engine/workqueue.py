@@ -202,6 +202,19 @@ def fail(conn: sqlite3.Connection, queue_id: int, error: str) -> None:
     conn.commit()
 
 
+def park(conn: sqlite3.Connection, event_uid: str) -> None:
+    """Hand an event to the operator now, without spending its remaining
+    attempts: mark it stuck and resolve its open queue rows so nothing
+    retries it before a human has looked."""
+    event_state.mark_stuck(conn, event_uid)
+    conn.execute(
+        "UPDATE event_workqueue SET resolved_at = ? "
+        "WHERE event_uid = ? AND resolved_at IS NULL",
+        (_iso_utc_now(), event_uid),
+    )
+    conn.commit()
+
+
 def reap_stale_claims(conn: sqlite3.Connection,
                       older_than_minutes: int = 15) -> int:
     """Reclaim rows whose worker claimed them but never resolved them.

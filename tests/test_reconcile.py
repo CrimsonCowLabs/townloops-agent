@@ -11,6 +11,7 @@ import pytest
 from dateutil import tz
 
 from engine import reconcile as rc
+from tests.fake_townloops import FakeAPI
 
 
 TZ = tz.gettz("America/Los_Angeles")
@@ -443,51 +444,51 @@ class TestDownstream:
         mod.enrich(conn, live, {}, [uid], max_lookups=0)
         return conn, uid
 
-    def test_ship_patches_live_event(self, skill):
-        conn, uid = self._staged_change(skill)
-        ship = _load("skills/business/event-ship/ship.py", "event_ship")
-        event = dict(conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone())
-        client = FakeClient()
-        slug = ship._patch_live_event(client, conn, event, ship._reconcile_change(event))
-        assert slug == "jazz"
-        [(verb, res, s, payload)] = client.calls
-        assert (verb, res, s) == ("PATCH", "events", "jazz")
-        assert payload["start_at"] == "2026-10-17T03:00:00+00:00"
-        assert payload["venue_name"] == "Tipsy Putt" and payload["venue_id"] == 99
+    def _api(self, end=None, ignore=()):
+        row = {**live_event("jazz", "Jazz Night", "2026-10-10T03:00:00Z", "gunbarrel-tavern", end=end),
+               "description": "Weekly jazz.", "venue_id": 69, "is_featured": False,
+               "category_slugs": ["food-drink", "live-music"], "tags": ["jazz"]}
+        venues = VENUES + [{"id": 123, "slug": "brand-new-hall", "name": "Brand New Hall"},
+                           {"id": 124, "slug": "hermes-slt-abc", "name": "Brand New Hall (hermes)"}]
+        return FakeAPI([row], venues, ignore=ignore)
 
-    def _patch(self, conn, uid, venue_slug=None, client=None, meta_edit=None):
+    def _patch(self, conn, uid, venue_slug=None, client=None, end=None):
         ship = _load("skills/business/event-ship/ship.py", "event_ship")
         event = dict(conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone())
-        client = client or FakeClient()
-        meta = ship._reconcile_change(event)
-        if meta_edit:
-            meta_edit(meta)
-        slug = ship._patch_live_event(client, conn, event, meta, venue_slug=venue_slug)
-        patches = [c[3] for c in client.calls if c[0] == "PATCH"]
+        client = client or self._api(end=end)
+        slug = ship._patch_live_event(client, conn, event, ship._reconcile_change(event),
+                                      venue_slug=venue_slug)
+        patches = client.patches()
         return (patches[0] if patches else None) if slug else None
 
-    def test_legacy_meta_without_live_end_reads_live_row(self, skill):
-        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
-        client = FakeClient(live={"jazz": {"slug": "jazz", "start_at": "2026-10-10T03:00:00Z",
-                                           "end_at": "2026-10-10T05:00:00Z"}})
-        def legacy(meta):
-            meta.pop("live_start_at", None)
-            meta.pop("live_end_at", None)
-        payload = self._patch(conn, uid, client=client, meta_edit=legacy)
-        assert payload["end_at"] == "2026-10-17T05:00:00+00:00"
+    def test_ship_patches_live_event_with_full_body(self, skill):
+        conn, uid = self._staged_change(skill)
+        client = self._api()
+        payload = self._patch(conn, uid, client=client)
+        assert payload["start_at"] == "2026-10-17T03:00:00+00:00"
+        assert payload["venue_id"] == 99
+        # untouched live fields go back as they were — nothing is blanked
+        assert payload["title"] == "Jazz Night"
+        assert payload["description"] == "Weekly jazz."
+        assert payload["category_slugs"] == ["food-drink", "live-music"]
+        assert payload["tags"] == ["jazz"]
+        live = client.events["jazz"]
+        assert live["title"] == "Jazz Night" and live["venue_slug"] == "tipsy-putt"
 
     def test_venue_change_unresolved_fails_for_retry(self, skill):
         conn, uid = self._staged_change(skill, venue="Brand New Hall")
-        client = FakeClient()
+        client = self._api()
         assert self._patch(conn, uid, venue_slug=None, client=client) is None
-        assert not [c for c in client.calls if c[0] == "PATCH"]
+        assert not client.patches()
 
     def test_venue_slug_comes_from_derived_venue(self, skill):
         conn, uid = self._staged_change(skill, venue="Brand New Hall")
         vuid = conn.execute("SELECT derived_venue_uid FROM events WHERE event_uid = ?", (uid,)).fetchone()[0]
         conn.execute("UPDATE venues SET townloops_slug = 'brand-new-hall' WHERE entity_uid = ?", (vuid,))
         payload = self._patch(conn, uid, venue_slug="some-other-linked-venue")
-        assert payload["venue_slug"] == "brand-new-hall"
+        # PATCH has no venue_slug field (the API drops it) — the slug is
+        # resolved to the live venue id.
+        assert payload["venue_id"] == 123 and "venue_slug" not in payload
 
     def test_patch_supersedes_older_local_copy(self, skill):
         conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
@@ -503,7 +504,7 @@ class TestDownstream:
     def test_date_change_without_source_end_shifts_live_end(self, skill):
         # Live 20:00–22:00 PT on Oct 9; source moves it to Oct 16 20:00, no end.
         conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern", end="2026-10-10T05:00:00Z")
-        payload = self._patch(conn, uid)
+        payload = self._patch(conn, uid, end="2026-10-10T05:00:00Z")
         assert payload["start_at"] == "2026-10-17T03:00:00+00:00"
         assert payload["end_at"] == "2026-10-17T05:00:00+00:00"
 
@@ -516,8 +517,27 @@ class TestDownstream:
         conn, uid = self._staged_change(skill, venue="Brand New Hall")
         vuid = conn.execute("SELECT derived_venue_uid FROM events WHERE event_uid = ?", (uid,)).fetchone()[0]
         conn.execute("UPDATE venues SET townloops_slug = 'hermes-slt-abc' WHERE entity_uid = ?", (vuid,))
-        payload = self._patch(conn, uid)
-        assert payload["venue_slug"] == "hermes-slt-abc"
+        client = self._api()
+        payload = self._patch(conn, uid, client=client)
+        assert payload["venue_id"] == 124
+        assert client.events["jazz"]["venue_slug"] == "hermes-slt-abc"
+
+    def test_verify_mismatch_flags_event_for_operator(self, skill):
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
+        from engine import workqueue
+        conn.execute("UPDATE events SET state = 'entities-enriched' WHERE event_uid = ?", (uid,))
+        workqueue.enqueue(conn, uid, "ship")
+        client = self._api(ignore={"start_at"})
+        assert self._patch(conn, uid, client=client) is None
+        row = conn.execute("SELECT state, townloops_slug FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        assert row["state"] == "stuck-entities-enriched"
+        assert row["townloops_slug"] is None
+        open_rows = conn.execute("SELECT COUNT(*) FROM event_workqueue "
+                                 "WHERE event_uid = ? AND resolved_at IS NULL", (uid,)).fetchone()[0]
+        assert open_rows == 0  # no automatic re-PATCH; the operator decides
+        act = conn.execute("SELECT * FROM agent_activity WHERE target = ? AND ok = 0 "
+                           "ORDER BY rowid DESC LIMIT 1", (uid,)).fetchone()
+        assert "start_at" in act["error"]
 
     def test_ship_skips_post_for_live_mirror(self, skill):
         conn, uid = self._staged_change(skill)

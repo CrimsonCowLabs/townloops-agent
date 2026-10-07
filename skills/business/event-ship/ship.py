@@ -239,7 +239,8 @@ def _patched_end(source_end: Optional[str], live_start: Optional[str],
 def _venue_ref(conn, event: dict, venue_slug: Optional[str]) -> dict:
     """How to point the live event at its new venue: the live id of a live
     mirror, else the slug of the derived venue (shipped in step 1 of main()),
-    else the step-1 slug when nothing was derived. {} when unresolved."""
+    else the step-1 slug when nothing was derived. {} when unresolved.
+    A slug still has to become a `venue_id` — PATCH ignores `venue_slug`."""
     import json
     vuid = event.get("derived_venue_uid")
     if not vuid:
@@ -258,43 +259,57 @@ def _venue_ref(conn, event: dict, venue_slug: Optional[str]) -> dict:
     return {"venue_slug": v["townloops_slug"]} if v["townloops_slug"] else {}
 
 
+def _flag_for_review(conn, event_uid: str, live_slug: str, mismatches: list[str]) -> None:
+    """The PATCH landed but the live row doesn't show what was sent. Park the
+    event as stuck for the operator and resolve its queue rows, so no retry
+    PATCHes the live row again before a human has looked."""
+    from engine import workqueue
+    msg = f"live event {live_slug} doesn't match the PATCH: " + "; ".join(mismatches)
+    record_activity(conn, _WORKER, "verify-live-event", event_uid, ok=False, error=msg[:1000])
+    workqueue.park(conn, event_uid)
+    print(f"event {event_uid[:12]}: {msg[:400]}", file=sys.stderr)
+
+
 def _patch_live_event(client, conn, event: dict, meta: dict,
                       venue_slug: Optional[str] = None) -> Optional[str]:
-    """Apply a source-side date/venue change to the existing live event.
-    Returns the live slug, or None (→ rc 1, workqueue retry) when the change
-    can't be applied correctly."""
+    """Apply a source-side date/venue change to the existing live event as a
+    full-body PATCH built from the current live row, then GET-verify it.
+    Returns the live slug, or None (→ rc 1) when the change can't be applied
+    correctly or didn't land as sent (then the event is flagged stuck)."""
+    from engine.live_patch import apply_event_patch
     changes = meta.get("changes") or {}
     live_slug = meta["live_slug"]
-    patch: dict[str, Any] = {}
-    if "start_at" in changes:
-        patch["start_at"] = event["date_utc"]
-        if "live_end_at" in meta:
-            live_start = meta.get("live_start_at") or changes["start_at"].get("live")
-            live_end = meta["live_end_at"]
-        else:
-            # Staged before live times were recorded — read the live row.
-            try:
-                cur = client.get("events", live_slug) or {}
-            except Exception as e:  # noqa: BLE001
-                print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
-                return None
-            live_start, live_end = cur.get("start_at"), cur.get("end_at")
-        end = _patched_end(event.get("end_at_utc"), live_start, live_end, patch["start_at"])
-        if end:
-            patch["end_at"] = end
-    if "venue" in changes:
-        ref = _venue_ref(conn, event, venue_slug)
-        if not ref:
-            print(f"patch event {live_slug}: new venue not resolved/shipped yet", file=sys.stderr)
-            return None
-        patch["venue_name"] = event["venue_name"] or event["venue_raw"]
-        patch.update(ref)
-    if not patch:
+    if not ({"start_at", "venue"} & changes.keys()):
         return live_slug
     try:
-        client.update("events", live_slug, patch)
+        current = client.get("events", live_slug) or {}
+    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+        print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
+    overrides: dict[str, Any] = {}
+    if "start_at" in changes:
+        overrides["start_at"] = event["date_utc"]
+        overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),
+                                           current.get("end_at"), event["date_utc"])
+    if "venue" in changes:
+        ref = _venue_ref(conn, event, venue_slug)
+        if "venue_slug" in ref:
+            try:
+                ref = {"venue_id": (client.get("venues", ref["venue_slug"]) or {}).get("id")}
+            except Exception as e:  # noqa: BLE001
+                print(f"read live venue {ref['venue_slug']} failed: {str(e)[:200]}", file=sys.stderr)
+                ref = {}
+        if not ref.get("venue_id"):
+            print(f"patch event {live_slug}: new venue not resolved/shipped yet", file=sys.stderr)
+            return None
+        overrides.update(ref)
+    try:
+        result = apply_event_patch(client, live_slug, overrides, current=current)
     except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
         print(f"patch event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
+    if result.mismatches:
+        _flag_for_review(conn, event["event_uid"], live_slug, result.mismatches)
         return None
     return live_slug
 
