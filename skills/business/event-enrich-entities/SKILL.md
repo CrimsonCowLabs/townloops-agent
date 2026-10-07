@@ -35,6 +35,17 @@ evidence ladder.
 6. **Fill blanks only** (`fill_blanks`) — never overwrites an operator- or
    live-sourced value — and record `enrichment_status` = `enriched` or
    `not-found`.
+7. **Categorize** (`engine/entity_classify.py`) a venue/business/community
+   whose `category_slug` is still blank, from the town's live vocabulary
+   (`state/categories.json`): a whole-word keyword map over name +
+   description decides clear cases; when it finds no hint or conflicting
+   hints, Codex picks from the town's slugs (any other answer is discarded).
+   At most 2 Codex calls (30s each) per event, none started that could end
+   past 100s into the run; a failed, throttled or skipped call leaves the
+   category blank, and it is retried the next time an event links the
+   entity (already-researched rows skip research but still get categorized).
+   Live mirrors are never categorized. Deferred entities aren't categorized
+   until they're researched.
 
 Image rules: og:image → JSON-LD `image` (never `logo`) → hero `<img>`;
 logos, icons, placeholders, SVG/GIF/ICO and data URIs are rejected; each

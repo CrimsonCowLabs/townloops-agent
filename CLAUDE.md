@@ -65,6 +65,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5
     entity kinds, `enrich_entity` research + schema validation + fill-blanks; event-reconcile and
     event-enrich-entities use it — new enrichment work builds on it, not on a skill script),
+    `entity_classify.py` (blank `category_slug` on venues/businesses/communities ← town vocabulary:
+    whole-word keyword map, Codex fallback constrained to the town's slugs; run by `enrich_entity`),
     `performer_research.py` (performer/creator evidence ladder: event evidence → venue-page links →
     profile metadata → search as discovery only; bios verbatim or null; ambiguous → `needs-review`;
     driven by the `performer-research` skill, ≤3 per 20-min cron run),

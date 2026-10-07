@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """event-enrich-entities — research every venue, business and community
 linked to an event from its own site and fill its blank fields, under a
-per-event lookup budget (engine.entity_enrich). Performers and creators are
+per-event lookup budget (engine.entity_enrich), then give any still without
+a category one from the town's vocabulary (engine.entity_classify). Performers and creators are
 left to the scheduled performer-research batch (engine.performer_research).
 
 Exits 0 whenever the event's entities were dealt with — including "not
@@ -12,8 +13,9 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
-from engine import entity_enrich, performer_research
+from engine import entity_classify, entity_enrich, performer_research
 from engine.derive_helpers import (
     load_event, open_db, parse_event_uid_arg, record_activity, town_name,
 )
@@ -24,9 +26,16 @@ _WORKER = "event-enrich-entities"
 # Firecrawl searches + page reads per event; an event has ~1-4 entities and
 # each costs 1-3 lookups.
 _DEFAULT_MAX_LOOKUPS = 8
+# Codex calls to categorize entities the keyword map can't place — capped, and
+# none started that could end past _CLASSIFY_DEADLINE_S into the run, so the
+# skill stays inside the orchestrator's 120s subprocess timeout.
+_MAX_CLASSIFY_CALLS = 2
+_CLASSIFY_TIMEOUT_S = 30
+_CLASSIFY_DEADLINE_S = 100
 
 
 def main() -> int:
+    started = time.monotonic()
     event_uid = parse_event_uid_arg()
     conn = open_db()
 
@@ -45,6 +54,8 @@ def main() -> int:
     except ValueError:
         max_lookups = _DEFAULT_MAX_LOOKUPS
     budget = entity_enrich.Budget(max_lookups)
+    llm = entity_classify.codex_llm(_MAX_CLASSIFY_CALLS, _CLASSIFY_TIMEOUT_S,
+                                    started + _CLASSIFY_DEADLINE_S)
     town = town_name()
     notes = []
     try:
@@ -54,7 +65,7 @@ def main() -> int:
                 # scheduled performer-research batch walks the evidence ladder.
                 notes.append(f"{kind} {uid[:12]}: left for performer-research")
                 continue
-            out = entity_enrich.enrich_entity(conn, kind, uid, town, budget)
+            out = entity_enrich.enrich_entity(conn, kind, uid, town, budget, llm)
             note = f"{kind} {uid[:12]}: {out.status}"
             if out.filled:
                 note += f" ({','.join(out.filled)})"

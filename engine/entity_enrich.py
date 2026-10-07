@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
+from engine import entity_classify
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity,
     names_match, normalize_name,
@@ -213,29 +214,42 @@ class EnrichOutcome:
 
 
 def enrich_entity(conn: sqlite3.Connection, kind: str, entity_uid: str, town: str,
-                  budget: Budget) -> EnrichOutcome:
+                  budget: Budget, llm: Optional[entity_classify.LLM] = None) -> EnrichOutcome:
     """Research one entity of any kind and fill its blank fields.
 
     - skipped: live mirrors (their values are TownLoops') and rows already
-      researched (DONE_STATUSES);
+      researched (DONE_STATUSES) — the latter still get a blank category
+      classified;
     - deferred: the entity's site wasn't read (budget ran out, search
       errored, page unreadable) — status stays as it was, so a later run
       can retry;
     - not-found: no plausible site found — recorded as the row's status;
     - enriched: the site was read; blank fields filled.
+
+    Once researched, a blank category is classified from the town's
+    vocabulary (engine.entity_classify; `llm` is the fallback for names the
+    keyword map can't place).
     """
     row = conn.execute(f"SELECT * FROM {SPECS[kind].table} WHERE entity_uid = ?",
                        (entity_uid,)).fetchone()
     if not row:
         return EnrichOutcome("skipped")
     row = dict(row)
-    if row.get("source_kind") == "live" or row.get("enrichment_status") in DONE_STATUSES:
+    if row.get("source_kind") == "live":
+        return EnrichOutcome("skipped")
+    if row.get("enrichment_status") in DONE_STATUSES:
+        # Researched already — but a category a failed or capped LLM call
+        # left blank is retried.
+        if entity_classify.classify_entity(conn, kind, entity_uid, llm):
+            return EnrichOutcome("skipped", ["category_slug"])
         return EnrichOutcome("skipped")
     found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind)
     if found.exhausted:
         return EnrichOutcome("deferred", errors=found.errors)
     status = "enriched" if found.payload else "not-found"
     filled = fill_blanks(conn, kind, entity_uid, found.payload, status)
+    if entity_classify.classify_entity(conn, kind, entity_uid, llm):
+        filled.append("category_slug")
     return EnrichOutcome(status, filled, found.errors)
 
 

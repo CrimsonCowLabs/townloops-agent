@@ -148,41 +148,6 @@ class TestConfidence:
         assert ok, why
 
 
-class TestCategoryResolution:
-    def test_unique_match(self):
-        from engine import policy
-        slug = policy.resolve_category_slug(
-            "business", "Sunrise Cafe", "coffee and pastries",
-            {"food-and-drink", "shopping"},
-        )
-        assert slug == "food-and-drink"
-
-    def test_ambiguous(self):
-        from engine import policy
-        slug = policy.resolve_category_slug(
-            "business", "Mix Shop", "gallery restaurant boutique",
-            {"food-and-drink", "shopping", "arts"},
-        )
-        assert slug is None
-
-    def test_no_match(self):
-        from engine import policy
-        slug = policy.resolve_category_slug(
-            "business", "Foo", "asdfghjkl",
-            {"food-and-drink", "shopping"},
-        )
-        assert slug is None
-
-    def test_skips_unavailable_slugs(self):
-        from engine import policy
-        # 'nonprofit' would match "foundation" but isn't in available.
-        slug = policy.resolve_category_slug(
-            "community", "The Foundation", "we do good work",
-            {"food-and-drink"},
-        )
-        assert slug is None
-
-
 class TestCategoryExistsGuard:
     def test_has_category_yes(self, tmp_state_dir):
         from engine import policy
