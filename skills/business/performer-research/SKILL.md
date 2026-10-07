@@ -76,7 +76,10 @@ python performers.py resolve --kind performer --entity-uid UID --reject       # 
 ```
 
 `--accept` fills blanks from the fields recorded for that candidate when it
-was researched (no re-fetch). Only `needs-review` rows can be resolved. Review items also show on the dashboard
+was researched (no re-fetch). Only `needs-review` rows can be resolved.
+The queue also holds the CMO's imported research drafts (`scripts/import_cmo.py`,
+status `imported`; performers and communities): the draft is the one candidate,
+so `--accept <draft url>` fills the entity from it and `--reject` drops it. Review items also show on the dashboard
 ticker as failed `needs-review` activity.
 
 ## Schedule & budget

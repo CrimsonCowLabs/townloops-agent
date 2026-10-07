@@ -31,6 +31,7 @@ from engine import entity_ship
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid,
 )
+from engine.entity_enrich import SPECS
 from engine.entity_sync import refresh_content_hash
 
 
@@ -42,6 +43,9 @@ ProposalKind = Literal["promote", "decline"]
 _PROPOSAL_KINDS = {"promote": "promote_businesses", "decline": "decline_businesses"}
 # What each proposal can act on.
 _PROPOSABLE = {"promote": ("verified",), "decline": ("new", "verified", "approved")}
+
+# What an imported research draft (`verify.draft`) may fill.
+_DRAFT_FIELDS = (*SPECS[bd.KIND].fillable, "category_slug")
 
 # Social pages ship as that link, not as the business website.
 _SOCIAL_HOSTS = {"facebook.com": "facebook", "instagram.com": "instagram", "tiktok.com": "tiktok"}
@@ -209,7 +213,8 @@ def _local_business(conn: sqlite3.Connection, cand: dict, name: str) -> str:
     """The local business for this candidate: the one an earlier run made,
     else an unshipped local business of the same name (event mining may
     have made it), else a new one. The candidate's page and verified
-    details fill only blanks."""
+    details — and the fields of a research draft it was imported from
+    (engine/cmo_import) — fill only blanks."""
     entity_uid = cand.get("research_entity_uid")
     if not entity_uid:
         unshipped = [dict(r) for r in conn.execute(
@@ -218,7 +223,8 @@ def _local_business(conn: sqlite3.Connection, cand: dict, name: str) -> str:
         entity_uid = same["entity_uid"] if same else mint_entity_uid(
             bd.KIND, name, f"candidate:{cand['candidate_uid']}")
     verify = cand["verify"] or {}
-    fields = {_page_field(cand["canonical_url"]): cand["canonical_url"],
+    fields = {**{k: v for k, v in (verify.get("draft") or {}).items() if k in _DRAFT_FIELDS},
+              _page_field(cand["canonical_url"]): cand["canonical_url"],
               **{k: verify[k] for k in ("address", "phone") if verify.get(k)}}
     if not conn.execute("SELECT 1 FROM businesses WHERE entity_uid = ?", (entity_uid,)).fetchone():
         insert_entity(conn, "businesses", entity_uid, {

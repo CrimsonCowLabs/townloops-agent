@@ -79,10 +79,12 @@ def _host(url: str) -> str:
 
 
 class LiveIndex:
-    """The town's live businesses, indexed for candidate dedup."""
+    """The town's live businesses, indexed for candidate dedup. Works for
+    any live entity list; `kind` names it in match reasons."""
 
-    def __init__(self, rows: list[dict]):
+    def __init__(self, rows: list[dict], kind: str = KIND):
         self.rows = rows
+        self.kind = kind
         self._by_url: dict[str, dict] = {}
         self._by_site: dict[tuple[str, str], dict] = {}   # (host, path) → row
         for r in sorted(rows, key=entity_richness):   # richest row wins a shared key
@@ -96,8 +98,8 @@ class LiveIndex:
                 self._by_site[(host, urlparse(canon).path or "/")] = r
 
     @classmethod
-    def build(cls, rows: Iterable[dict]) -> "LiveIndex":
-        return cls([r for r in rows if r.get("slug")])
+    def build(cls, rows: Iterable[dict], kind: str = KIND) -> "LiveIndex":
+        return cls([r for r in rows if r.get("slug")], kind)
 
     @classmethod
     def from_api(cls, client) -> "LiveIndex":
@@ -106,11 +108,12 @@ class LiveIndex:
     def match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
         row = self._by_url.get(canonical_url)
         if row:
-            return LiveMatch(row["slug"], row.get("name") or "", "url matches live business website")
+            return LiveMatch(row["slug"], row.get("name") or "",
+                             f"url matches live {self.kind} website")
         row = self._site_match(canonical_url)
         if row:
             return LiveMatch(row["slug"], row.get("name") or "",
-                             f"under live business website {row.get('website')}")
+                             f"under live {self.kind} website {row.get('website')}")
         target = normalize_name(name or "")
         if not target:
             return None
@@ -125,7 +128,7 @@ class LiveIndex:
         if best is None:
             return None
         return LiveMatch(best["slug"], best.get("name") or "",
-                         f"name fuzzy-matches live business {best.get('name')!r} "
+                         f"name fuzzy-matches live {self.kind} {best.get('name')!r} "
                          f"({best_rank[0]:.2f})")
 
 
@@ -180,7 +183,7 @@ def declined_match(conn: sqlite3.Connection, town_slug: str,
     return None
 
 
-def _declined_reason(d: dict) -> str:
+def declined_reason(d: dict) -> str:
     return f"operator declined {d['display_name']!r} earlier ({d['candidate_uid'][:12]})"
 
 
@@ -215,7 +218,7 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
         if existing is None:
             declined = None if live else declined_match(conn, town_slug, c.display_name)
             status = "already-live" if live else "rejected" if declined else "new"
-            reason = live.reason if live else _declined_reason(declined) if declined else None
+            reason = live.reason if live else declined_reason(declined) if declined else None
             conn.execute(
                 """INSERT INTO discovery_candidates
                      (candidate_uid, town_slug, kind, target_category_slug, canonical_url,
@@ -271,7 +274,7 @@ def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
     if live:
         status, live_slug, reason = "already-live", live.slug, live.reason
     elif declined:
-        status, live_slug, reason = "rejected", None, _declined_reason(declined)
+        status, live_slug, reason = "rejected", None, declined_reason(declined)
     elif verdict.get("verified"):
         status, live_slug, reason = "verified", None, None
     else:

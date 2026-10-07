@@ -40,6 +40,9 @@ from engine.derive_helpers import iso_utc_now, normalize_name
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
 
 KINDS = ("performer", "creator")
+# The review queue also holds the CMO's imported community drafts
+# (engine/cmo_import).
+REVIEW_KINDS = (*KINDS, "community")
 REVIEW_STATUS = "needs-review"
 REVIEW_FINDINGS = ("probable", "ambiguous")
 DEFAULT_LOOKUPS = 6
@@ -514,9 +517,10 @@ def run_batch(conn: sqlite3.Connection, town: str, *, limit: int = 3,
 
 
 def review_queue(conn: sqlite3.Connection) -> list[dict]:
-    """Performers/creators waiting for an operator identity decision."""
+    """Entities waiting for an operator identity decision: performers and
+    creators this research couldn't settle, and imported drafts."""
     out = []
-    for kind in KINDS:
+    for kind in REVIEW_KINDS:
         for r in conn.execute(f"SELECT entity_uid, name, extra_json FROM {SPECS[kind].table} "
                               "WHERE enrichment_status = ? ORDER BY name", (REVIEW_STATUS,)):
             rec = _parse_extra(r["extra_json"]).get("research") or {}

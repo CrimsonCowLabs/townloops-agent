@@ -76,7 +76,7 @@ def main() -> int:
                      help="Firecrawl searches + page reads per entity")
     sub.add_parser("review")
     resolve = sub.add_parser("resolve")
-    resolve.add_argument("--kind", required=True, choices=pr.KINDS)
+    resolve.add_argument("--kind", required=True, choices=pr.REVIEW_KINDS)
     resolve.add_argument("--entity-uid", required=True)
     choice = resolve.add_mutually_exclusive_group(required=True)
     choice.add_argument("--accept", metavar="URL", help="a candidate URL from `review`")

@@ -164,6 +164,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   (no CLI flag can), and the `business-promote` cron ships only `approved` rows — live re-check, local
   business, enrich, then `engine/entity_ship.ship_entity` (event-ship's entity path) → `promoted`. Operator
   declines are remembered by name. See `docs/business-discovery-handoff.md`.
+  The CMO's stranded candidates and research drafts come in once via `scripts/import_cmo.py`
+  (`engine/cmo_import.py`): candidates and business drafts as `verified` candidates
+  (`source_signal` `cmo-import:…`), other drafts as `needs-review` entities in `performers.py review`.
 
 ## Deployment / routing (VPS)
 

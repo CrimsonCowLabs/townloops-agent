@@ -101,6 +101,13 @@ operator declines mid-run is not shipped. Declining one candidate also
 declines open candidates of the same business under other URLs. `promote` never touches a candidate the operator hasn't approved, so
 running it is always safe — but never claim you approved or shipped anything.
 
+Candidates with `source_signal` `cmo-import:…` came from the CMO's old
+discovery run and research drafts (`scripts/import_cmo.py`, one-off). The
+CMO's verifier passed listicle and directory pages, so expect the operator
+to decline many of those. A `cmo-import:research-draft` candidate carries the
+CMO's researched fields (`verify.draft`), which fill the business's blanks on
+promote.
+
 ## Boundaries
 
 - **sweep / verify / list / propose-* never write to TownLoops.** Reads the
