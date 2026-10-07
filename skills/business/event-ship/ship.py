@@ -2,8 +2,9 @@
 """event-ship — POST one event + its derived entities to TownLoops.
 
 Per plan adversarial pass #19: entities go first (venue, host, people),
-then the event. TownLoops references venue by slug, so the venue must
-exist before the event references it.
+then the event. The event references its venue by live `venue_id`, so the
+venue must exist before the event references it. Nothing is created
+without first looking it up live (`engine/live_lookup.py`).
 """
 
 from __future__ import annotations
@@ -137,8 +138,12 @@ def _event_payload(row) -> dict:
 
 
 def _ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
-    """POST or PATCH one entity. Returns TownLoops slug if successful,
-    None if we couldn't ship."""
+    """Make sure one entity exists live. Returns its TownLoops slug, or None
+    if we couldn't ship it. A row already live at its slug is adopted (live
+    id recorded, nothing POSTed); a 409 on create is resolved the same way —
+    never assumed. Updating an adopted row is the enrichment PATCH path's
+    job: its pushed_hash stays unset."""
+    from engine.live_lookup import find_live_entity, is_conflict
     table, resource = _ENTITY_TABLES[kind]
     row = conn.execute(
         f"SELECT * FROM {table} WHERE entity_uid = ?", (entity_uid,),
@@ -149,60 +154,157 @@ def _ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         # Local mirror of a row that already exists on TownLoops (staged by
         # event-reconcile) — nothing to create.
         return row["townloops_slug"]
-    payload = _PAYLOAD_BUILDERS[kind](row)
     proposed_slug = row["townloops_slug"] or _slug_for(kind, entity_uid)
-    payload["slug"] = proposed_slug
-    idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:{kind}:{entity_uid[:16]}"
+    created = False
     try:
-        result = client.create(resource, payload, idempotency_key=idem)
-    except Exception as e:
-        # 409 slug_taken → already shipped (mirrors event-ingest behavior)
-        msg = str(e)
-        if "409" in msg or "slug_taken" in msg:
-            slug = proposed_slug
-        else:
-            print(f"  ship {kind} {entity_uid[:12]} failed: {msg[:120]}",
-                  file=sys.stderr)
-            return None
-    else:
-        slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
-    now = iso_utc_now()
-    conn.execute(
-        f"UPDATE {table} SET townloops_slug = ?, pushed_at = ?, "
-        f"  pushed_hash = COALESCE(content_hash, ?) WHERE entity_uid = ?",
-        (slug, now, now, entity_uid),
-    )
+        live = find_live_entity(client, resource, proposed_slug)
+        if live is None:
+            payload = _PAYLOAD_BUILDERS[kind](row)
+            payload["slug"] = proposed_slug
+            idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:{kind}:{entity_uid[:16]}"
+            try:
+                live, created = client.create(resource, payload, idempotency_key=idem), True
+            except Exception as e:
+                if not is_conflict(e):
+                    raise
+                live = find_live_entity(client, resource, proposed_slug)
+                if live is None:
+                    raise RuntimeError(f"409 on create but no live {kind} at {proposed_slug}") from e
+    except Exception as e:  # noqa: BLE001 — surfaced as a failed ship-<kind> activity
+        print(f"  ship {kind} {entity_uid[:12]} failed: {str(e)[:120]}", file=sys.stderr)
+        return None
+    live = live if isinstance(live, dict) else {}
+    slug = live.get("slug") or proposed_slug
+    town = os.environ.get("TOWNLOOPS_TOWN_SLUG")
+    # The server may file a new venue under another (ghost) town, e.g. a Reno
+    # venue. Events resolve `venue_id` in-town only, so such an id would
+    # silently unbind the event — leave it unrecorded and bind by name.
+    in_town = live.get("town_slug") in (None, "", town)
+    _record_live_entity(conn, table, row, slug, live.get("id") if in_town else None, created)
     return slug
 
 
+def _record_live_entity(conn, table: str, row, slug: str, live_id: Optional[int],
+                        created: bool) -> None:
+    import json
+    try:
+        extra = json.loads(row["extra_json"] or "{}")
+    except json.JSONDecodeError:
+        extra = {}
+    if not isinstance(extra, dict):
+        extra = {}
+    if live_id is not None:
+        extra["live_id"] = live_id
+    now = iso_utc_now()
+    conn.execute(
+        f"UPDATE {table} SET townloops_slug = ?, pushed_at = ?, extra_json = ?, "
+        f"  pushed_hash = CASE WHEN ? THEN COALESCE(content_hash, ?) ELSE pushed_hash END "
+        f"WHERE entity_uid = ?",
+        (slug, now, json.dumps(extra) if extra else row["extra_json"], int(created), now,
+         row["entity_uid"]),
+    )
+
+
 def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optional[str]:
+    """Create the event live — unless it is already there (by slug, or by
+    source_url at the same time), in which case the live row is filled in
+    instead. Several live rows for it park the event for the operator."""
+    from engine.live_lookup import find_live_event, is_conflict
     payload = _event_payload(event)
-    if venue_slug:
-        payload["venue_slug"] = venue_slug
+    venue_id = _resolve_venue_id(client, conn, event, venue_slug)
+    if venue_id:
+        # By id: the server's name lookup fails outright on duplicate names.
+        # The name rides along — unused when the id resolves, kept as the
+        # curator's hint when it doesn't.
+        payload["venue_id"] = venue_id
     event_uid = event["event_uid"]
     proposed_slug = event.get("townloops_slug") or _slug_for("event", event_uid)
     payload["slug"] = proposed_slug
+    try:
+        found = find_live_event(client, slug=proposed_slug, source_url=payload.get("source_url"),
+                                start_at=payload["start_at"])
+    except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry; never create blind
+        msg = f"look up live event failed: {str(e)[:200]}"
+        record_activity(conn, _WORKER, "find-live-event", event_uid, ok=False, error=msg)
+        print(f"event {event_uid[:12]}: {msg}", file=sys.stderr)
+        return None
+    if found.ambiguous:
+        slugs = ", ".join(sorted(r.get("slug") or "?" for r in found.ambiguous))
+        _park_for_review(conn, event_uid, "find-live-event",
+                         f"several live events share source_url {payload.get('source_url')} "
+                         f"at this time: {slugs} — duplicate for the operator")
+        return None
+    if found.row:
+        return _fill_live_event(client, conn, event, found.row, payload)
+
     idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:event:{event_uid[:16]}"
     try:
         result = client.create("events", payload, idempotency_key=idem)
     except Exception as e:
         msg = str(e)
-        if not ("409" in msg or "slug_taken" in msg):
-            print(f"ship event {event_uid[:12]} failed: {msg[:200]}", file=sys.stderr)
-            return None
-        # Already created (a retry, or an operator requeue after a failed
-        # repair): check the live row's sets all the same.
-        slug = proposed_slug
-        try:
-            result = client.get("events", slug)
-        except Exception as e:  # noqa: BLE001 — sets go unchecked; the event did ship
-            print(f"read live event {slug} failed: {str(e)[:200]}", file=sys.stderr)
-            result = None
-    else:
-        slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
+        if is_conflict(e):
+            # Created since the lookup (another worker): reconcile to it.
+            try:
+                found = find_live_event(client, slug=proposed_slug, source_url=None, start_at=None)
+            except Exception as e2:  # noqa: BLE001
+                print(f"read live event {proposed_slug} failed: {str(e2)[:200]}", file=sys.stderr)
+                return None
+            if found.row:
+                return _fill_live_event(client, conn, event, found.row, payload)
+            msg = f"409 on create but no live event at {proposed_slug}: {msg}"
+        elif "Multiple rows were found" in msg and "venue_id" not in payload:
+            msg = (f"venue name {payload['venue_name']!r} matches several live venues — "
+                   "derive/link the venue so the event can reference it by id")
+        record_activity(conn, _WORKER, "ship-event", event_uid, ok=False, error=msg[:1000])
+        print(f"ship event {event_uid[:12]} failed: {msg[:200]}", file=sys.stderr)
+        return None
+    slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
     if isinstance(result, dict) and not _repair_dropped_sets(client, conn, event, slug, payload, result):
         return None
     return slug
+
+
+def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Optional[str]:
+    """Bring an event that is already live up to what we'd have created,
+    without overriding anything on it: blank fields are filled, local
+    categories/tags are added to the live sets, and a venue is bound only
+    when it has none. Sent as a full-body PATCH and GET-verified; a mismatch
+    parks the event for the operator. Returns the live slug."""
+    from engine.live_patch import apply_event_patch
+    slug = live["slug"]
+    overrides = _fill_overrides(live, payload)
+    if not overrides:
+        return slug
+    try:
+        result = apply_event_patch(client, slug, overrides, current=live)
+    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+        print(f"patch live event {slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
+    if result.mismatches:
+        conn.execute("UPDATE events SET townloops_slug = ? WHERE event_uid = ?",
+                     (slug, event["event_uid"]))
+        _flag_for_review(conn, event["event_uid"], slug, result.mismatches)
+        return None
+    return slug
+
+
+def _fill_overrides(live: dict, payload: dict) -> dict:
+    out: dict[str, Any] = {}
+    for k in ("title", "description", "start_at", "source_url"):
+        if payload.get(k) and not live.get(k):
+            out[k] = payload[k]
+    # A source_url match may start at another time; our end only fits ours.
+    if (payload.get("end_at") and not live.get("end_at")
+            and _to_dt(payload["start_at"]) == _to_dt(live.get("start_at"))):
+        out["end_at"] = payload["end_at"]
+    for k, cap in (("category_slugs", cats.MAX_CATEGORIES), ("tags", cats.MAX_TAGS)):
+        have = list(live.get(k) or [])
+        merged = (have + [v for v in payload.get(k) or [] if v not in have])[:max(cap, len(have))]
+        if merged != have:
+            out[k] = merged
+    if payload.get("venue_id") and not live.get("venue_id"):
+        out["venue_id"] = payload["venue_id"]
+    return out
 
 
 def _repair_dropped_sets(client, conn, event: dict, slug: str, payload: dict,
@@ -285,36 +387,48 @@ def _patched_end(source_end: Optional[str], live_start: Optional[str],
     return None
 
 
-def _venue_ref(conn, event: dict, venue_slug: Optional[str]) -> dict:
-    """How to point the live event at its new venue: the live id of a live
-    mirror, else the slug of the derived venue (shipped in step 1 of main()),
-    else the step-1 slug when nothing was derived. {} when unresolved.
-    A slug still has to become a `venue_id` — PATCH ignores `venue_slug`."""
+def _resolve_venue_id(client, conn, event: dict, venue_slug: Optional[str]) -> Optional[int]:
+    """Live id of the event's venue: the derived venue's recorded live id
+    (live mirror, or adopted/created by step 1 of main()), else its slug —
+    or the step-1 slug when nothing was derived — looked up live. None when
+    unresolved. Events bind venues by `venue_id`; `venue_slug` is ignored by
+    the API and `venue_name` fails on duplicate names."""
     import json
+    from engine.live_lookup import find_live_entity
     vuid = event.get("derived_venue_uid")
-    if not vuid:
-        return {"venue_slug": venue_slug} if venue_slug else {}
-    v = conn.execute(
-        "SELECT extra_json, townloops_slug FROM venues WHERE entity_uid = ?", (vuid,),
-    ).fetchone()
-    if not v:
-        return {}
+    if vuid:
+        v = conn.execute(
+            "SELECT extra_json, townloops_slug FROM venues WHERE entity_uid = ?", (vuid,),
+        ).fetchone()
+        if not v:
+            return None
+        try:
+            live_id = (json.loads(v["extra_json"] or "{}") or {}).get("live_id")
+        except (json.JSONDecodeError, AttributeError):
+            live_id = None
+        if live_id:
+            return live_id
+        venue_slug = v["townloops_slug"]
+    if not venue_slug:
+        return None
     try:
-        live_id = json.loads(v["extra_json"] or "{}").get("live_id")
-    except (json.JSONDecodeError, AttributeError):
-        live_id = None
-    if live_id:
-        return {"venue_id": live_id}
-    return {"venue_slug": v["townloops_slug"]} if v["townloops_slug"] else {}
+        return (find_live_entity(client, "venues", venue_slug) or {}).get("id")
+    except Exception as e:  # noqa: BLE001 — treated as unresolved
+        print(f"read live venue {venue_slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
 
 
 def _flag_for_review(conn, event_uid: str, live_slug: str, mismatches: list[str]) -> None:
     """The PATCH landed but the live row doesn't show what was sent. Park the
     event as stuck for the operator and resolve its queue rows, so no retry
     PATCHes the live row again before a human has looked."""
+    _park_for_review(conn, event_uid, "verify-live-event",
+                     f"live event {live_slug} doesn't match the PATCH: " + "; ".join(mismatches))
+
+
+def _park_for_review(conn, event_uid: str, action: str, msg: str) -> None:
     from engine import workqueue
-    msg = f"live event {live_slug} doesn't match the PATCH: " + "; ".join(mismatches)
-    record_activity(conn, _WORKER, "verify-live-event", event_uid, ok=False, error=msg[:1000])
+    record_activity(conn, _WORKER, action, event_uid, ok=False, error=msg[:1000])
     workqueue.park(conn, event_uid)
     print(f"event {event_uid[:12]}: {msg[:400]}", file=sys.stderr)
 
@@ -341,17 +455,11 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
         overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),
                                            current.get("end_at"), event["date_utc"])
     if "venue" in changes:
-        ref = _venue_ref(conn, event, venue_slug)
-        if "venue_slug" in ref:
-            try:
-                ref = {"venue_id": (client.get("venues", ref["venue_slug"]) or {}).get("id")}
-            except Exception as e:  # noqa: BLE001
-                print(f"read live venue {ref['venue_slug']} failed: {str(e)[:200]}", file=sys.stderr)
-                ref = {}
-        if not ref.get("venue_id"):
+        venue_id = _resolve_venue_id(client, conn, event, venue_slug)
+        if not venue_id:
             print(f"patch event {live_slug}: new venue not resolved/shipped yet", file=sys.stderr)
             return None
-        overrides.update(ref)
+        overrides["venue_id"] = venue_id
     try:
         result = apply_event_patch(client, live_slug, overrides, current=current)
     except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry

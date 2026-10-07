@@ -49,3 +49,15 @@ as sent, plus a live end left before the start. `event-ship` then parks the
 event (`workqueue.park`: `stuck-` + queue rows resolved) for the operator, so
 nothing re-PATCHes it automatically. An empty live row or a time override
 without a UTC offset raises instead of patching.
+
+## Before a POST: look up live (ticket 06)
+
+`GET /events` filters only by `status`/`from`/`to`/`category` (no
+`source_url`, `limit` ≤ 200, deleted rows excluded, pending included), so an
+existing event is found by slug GET, then by `source_url` among the events
+listed in a ±12h window. `POST` answers a taken slug with `409 slug_taken`,
+which only says *a* row has that slug — GET it before calling it shipped.
+On create, the venue goes by `venue_id`: `_resolve_venue` uses
+`scalar_one_or_none` on a case-insensitive in-town name match, so a name
+shared by two in-town venues errors with "Multiple rows were found".
+`event-ship` does all of this via `engine/live_lookup.py`.

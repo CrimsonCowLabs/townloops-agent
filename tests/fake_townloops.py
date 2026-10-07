@@ -7,14 +7,20 @@ globally and clears the venue when unresolved, a title under 3 chars is a
 422, and unknown keys (e.g. `venue_slug`) are silently ignored.
 
 `create` mirrors `EventPayload` + `EventResource`: tags come back as slugs,
-both sets sorted. `create_drops` names fields a create path loses (the CMO
-saw bulk create drop `tags`).
+both sets sorted, the venue bound like PATCH does; a duplicate slug is a
+409. `create_drops` names fields a create path loses (the CMO saw bulk
+create drop `tags`). A `venue_name` naming several in-town venues fails the
+way the server's `scalar_one_or_none` does ("Multiple rows were found").
+A missing slug (or another town's) GETs as a 404; `list("events")` honours `from`/`to`.
 """
 
 from __future__ import annotations
 
 import copy
 import re
+from datetime import datetime, timezone
+
+from engine.townloops_api import TownloopsError
 
 
 EVENT_PATCH_FIELDS = {
@@ -28,26 +34,65 @@ class FakeAPI:
     def __init__(self, events=None, venues=None, ignore=(), create_drops=()):
         self.events = {e["slug"]: copy.deepcopy(e) for e in (events or [])}
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
+        self.tables = {"events": self.events, "venues": self.venues}
         self.ignore = set(ignore)  # fields the "server" drops — forces a verify mismatch
         self.create_drops = set(create_drops)
         self.calls: list[tuple] = []
 
     def get(self, resource, slug):
         self.calls.append(("GET", resource, slug))
-        table = self.events if resource == "events" else self.venues
+        table = self.tables.setdefault(resource, {})
+        # Town-scoped like the server: another town's venue is a 404 here.
+        if slug not in table or table[slug].get("town", "slt") != "slt":
+            raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found")
         return copy.deepcopy(table[slug])
+
+    def list(self, resource, **params):
+        self.calls.append(("LIST", resource, dict(params)))
+        rows = list(self.tables.setdefault(resource, {}).values())
+        lo, hi = _instant(params.get("from")), _instant(params.get("to"))
+        if lo or hi:
+            rows = [r for r in rows if (not lo or _instant(r["start_at"]) >= lo)
+                    and (not hi or _instant(r["start_at"]) <= hi)]
+        return copy.deepcopy(rows[params.get("offset", 0):][:params.get("limit", 50)])
 
     def create(self, resource, payload, idempotency_key=None):
         self.calls.append(("POST", resource, copy.deepcopy(payload)))
+        table = self.tables.setdefault(resource, {})
+        if payload["slug"] in table:
+            raise TownloopsError(409, "slug_taken", f"slug {payload['slug']!r} taken")
+        if resource != "events":
+            row = {**copy.deepcopy(payload), "id": 1000 + len(table)}
+            table[row["slug"]] = row
+            return copy.deepcopy(row)
         row = {"id": len(self.events) + 1, "slug": payload["slug"], "town_slug": "slt",
                "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": []}
         for k in EVENT_PATCH_FIELDS - {"venue_id", "venue_name"}:
             if k in payload and k not in self.create_drops:
                 row[k] = payload[k]
+        self._bind_venue(row, payload.get("venue_id"), payload.get("venue_name"))
         row["category_slugs"] = sorted(row["category_slugs"])
         row["tags"] = sorted(_slug(t) for t in row["tags"])
         self.events[row["slug"]] = row
         return copy.deepcopy(row)
+
+    def _bind_venue(self, row, venue_id, venue_name):
+        if venue_id is None and not venue_name:
+            return
+        town = row.get("town_slug", "slt")
+        if venue_id is not None:
+            v = next((v for v in self.venues.values()
+                      if v["id"] == venue_id and v.get("town", "slt") == town), None)
+        else:
+            in_town = [v for v in self.venues.values()
+                       if v["name"].lower() == venue_name.lower() and v.get("town", "slt") == town]
+            if len(in_town) > 1:
+                raise TownloopsError(500, "internal_error",
+                                     "Multiple rows were found when one or none was required")
+            v = in_town[0] if in_town else next(
+                (v for v in self.venues.values() if v["name"].lower() == venue_name.lower()), None)
+        row["venue_id"] = v["id"] if v else None
+        row["venue_slug"] = v["slug"] if v else None
 
     def update(self, resource, slug, payload):
         self.calls.append(("PATCH", resource, slug, copy.deepcopy(payload)))
@@ -56,16 +101,7 @@ class FakeAPI:
             raise RuntimeError("[422 validation_error] title too short")
         body = {k: v for k, v in payload.items()
                 if k in EVENT_PATCH_FIELDS and k not in self.ignore and v is not None}
-        venue_id, venue_name = body.pop("venue_id", None), body.pop("venue_name", None)
-        if venue_id is not None or venue_name:
-            if venue_id is not None:
-                v = next((v for v in self.venues.values()
-                          if v["id"] == venue_id and v.get("town", "slt") == row.get("town_slug", "slt")), None)
-            else:
-                v = next((v for v in self.venues.values()
-                          if v["name"].lower() == venue_name.lower()), None)
-            row["venue_id"] = v["id"] if v else None
-            row["venue_slug"] = v["slug"] if v else None
+        self._bind_venue(row, body.pop("venue_id", None), body.pop("venue_name", None))
         for k in ("category_slugs", "tags"):
             if k in body:
                 row[k] = sorted(body.pop(k) if k == "category_slugs"
@@ -78,6 +114,13 @@ class FakeAPI:
 
     def creates(self):
         return [c[2] for c in self.calls if c[0] == "POST"]
+
+
+def _instant(value):
+    if not value:
+        return None
+    dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
 def _slug(name):

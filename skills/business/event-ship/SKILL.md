@@ -4,8 +4,8 @@ Workqueue action: **ship**. Runs for events in
 `state=entities-enriched`.
 
 POSTs derived entities FIRST, then the event, to TownLoops. Ordering
-matters — the event references venue by slug, so venue must exist
-first. Per plan adversarial pass #19: venue → host → performers →
+matters — the event references its venue by live `venue_id`, so the venue
+must exist first. Per plan adversarial pass #19: venue → host → performers →
 creators → event.
 
 ## Contract
@@ -15,19 +15,50 @@ ship.py --event-uid <uid>
 ```
 
 Exit codes:
-- `0` — event POSTed successfully (or was already-shipped), `events.pushed_at` + `events.townloops_slug` set.
+- `0` — event POSTed, or found live and filled in; `events.pushed_at` + `events.townloops_slug` set.
 - `1` — TownLoops API returned a non-recoverable error (401/403/404 on town endpoint, malformed payload). Orchestrator retries up to 3 times then marks stuck.
 - `2` — event not found in local DB.
 
 ## Idempotency
 
 Each POST uses `Idempotency-Key: hermes-{town_slug}:ship:{entity_kind}:{entity_uid}`.
-Re-shipping the same event on retry is safe — TownLoops returns 200
-with the existing record.
+Replaying the same request (same key) is safe — TownLoops returns 200 with
+the existing record. A *different* request that hits a taken slug gets a 409,
+which is handled below.
 
-If TownLoops returns `409 slug_taken`, we treat it as already-shipped
-success (this is the same convention `event-ingest ship` uses at
-`ingest.py:668`).
+## Look up live before creating
+
+Nothing is POSTed until a lookup says it isn't live yet
+(`engine/live_lookup.py`). A lookup error is rc 1 (retry), never a blind create.
+
+- **Entities**: GET by slug (the row's `townloops_slug`, else the proposed
+  `hermes-<town>-…` slug). Found → adopted: `townloops_slug` and
+  `extra_json.live_id` recorded, nothing POSTed, `pushed_hash` left unset so
+  the enrichment PATCH path (not this skill) updates it. Created → the live id
+  from the create response is recorded the same way.
+- **Events**: GET by slug, then — the list endpoint has no `source_url`
+  filter — list the events starting within 12h and match `source_url`
+  (trailing `/` ignored; with several, the one at the same start wins).
+  Found → **filled, not overridden**: blank live fields get the local value,
+  local categories/tags are added to the live sets, a venue is bound only if
+  the live event has none; sent as a full-body PATCH + GET verify
+  (`engine.live_patch.apply_event_patch`), nothing sent when there's nothing
+  to add. Several live rows for one event → a failed `find-live-event`
+  activity listing their slugs, the event parked `stuck-` for the operator.
+- **409 `slug_taken` is not success**: ship looks the row up again and
+  continues as "found"; if it still isn't there, rc 1.
+
+## Venue by id
+
+The event payload carries `venue_id` — the derived venue's recorded live id,
+else its slug resolved with a (town-scoped) GET. The API has no `venue_slug`
+field, and a `venue_name` alone that matches several in-town venues fails
+server-side ("Multiple rows were found"); with a `venue_id` the server binds
+by id and keeps `venue_name` only as the curator's hint if the id doesn't
+resolve. A venue the server filed under another (ghost) town, e.g. Reno, gets
+no live id recorded — `venue_id` resolves in-town only — so its events bind by
+name. If a name-only event's venue is ambiguous live, ship records why and
+exits 1 — derive/link the venue.
 
 ## Times are UTC only
 
@@ -54,10 +85,10 @@ created row lacks a category or tag set that was sent, ship follows with a
 full-body PATCH (`engine.live_patch.apply_event_patch`) and GET-verifies it.
 If the sets still don't stick, the event's live slug is recorded, a failed
 `verify-live-event` activity is logged, the event is parked `stuck-` for the
-operator, and ship exits 1. A `409 slug_taken` create (a retry, or an
-operator requeue after a failed repair) GETs the live row and runs the same
-check. With no `state/categories.json` snapshot, events ship without
-categories and ship warns on stderr — run `town-init setup`.
+operator, and ship exits 1. A requeued event already live goes through the
+lookup above, whose fill-in adds any missing categories/tags. With no
+`state/categories.json` snapshot, events ship without categories and ship
+warns on stderr — run `town-init setup`.
 
 ## When TownLoops isn't ready yet
 
@@ -74,9 +105,9 @@ When the town is finally registered on TownLoops, an operator-triggered
 
 - An event whose `extra_json.reconcile.kind == "changed"` (staged by
   `event-reconcile`) is a source-side change to an existing live event: ship
-  **PATCHes** `events/<live_slug>` with the changed `start_at`/`end_at` and/or
-  `venue_name` + `venue_id` (live mirror) or `venue_slug` (venue shipped in
-  step 1), instead of POSTing a new event. On a date change with no usable
+  **PATCHes** `events/<live_slug>` (full body, GET-verified) with the changed
+  `start_at`/`end_at` and/or the new venue's `venue_id` (see "Venue by id"),
+  instead of POSTing a new event. On a date change with no usable
   source end time, the live end is shifted by the same amount as the start;
   an end before the start is never sent (rows staged without the live times
   read them with a GET first). A venue change whose new venue has no live id

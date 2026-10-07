@@ -116,6 +116,13 @@ class FakeClient:
         FakeClient.calls.append((resource, payload))
         return {"slug": payload.get("slug")}
 
+    def get(self, resource, slug):  # nothing is live yet
+        from engine.townloops_api import TownloopsError
+        raise TownloopsError(404, "not_found", slug)
+
+    def list(self, resource, **params):
+        return []
+
 
 @pytest.fixture
 def ship(conn, monkeypatch):
