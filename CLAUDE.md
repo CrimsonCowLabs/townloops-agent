@@ -64,7 +64,10 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py`,
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5
     entity kinds, `enrich_entity` research + schema validation + fill-blanks; event-reconcile and
-    event-enrich-entities use it — new enrichment work builds on it, not on a skill script).
+    event-enrich-entities use it — new enrichment work builds on it, not on a skill script),
+    `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
+    `entity-live-sync`), `live_patch.py` (full-body PATCH + GET verify for events and entities),
+    `live_lookup.py` (find a live record before creating one).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -124,8 +127,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   It fails closed if the bearer's scope or the `categories.json` snapshot drifts. Called at the top of
   ingest and enrichment sweeps.
 - **Enrichment is "fill blanks only"** (`engine/entity_enrich.fill_blanks` writes only NULL-locally fields, to
-  protect operator edits). Failure mode: an operator edit made *on TownLoops* isn't seen locally, so a
-  sweep may refill with worse data. Use `enrich.py resync` (remote→local) before sweeping if this is a risk.
+  protect operator edits) and refreshes `content_hash`. It reaches live via `engine/entity_sync.py`
+  (event-ship + the daily `entity-live-sync` sweep): resync from the live row first (live values win), then
+  PATCH only live's blanks, GET-verify, and only then set `pushed_hash`. A 404 or a PATCH that doesn't land
+  flags the entity (`extra_json.live_sync`) for the operator — never re-created, never retried until cleared.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
   `--yes-really-send`. Sunday cron only *composes* a draft. Never wire auto-push.
 - **`SPONSORS_ENABLED=false` is the safe default** — never flip it in a template. Money placements are

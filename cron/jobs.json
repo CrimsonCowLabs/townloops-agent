@@ -47,6 +47,15 @@
       "prompt": "python /home/agent/.hermes/skills/business/event-seed-discovery/discover.py discover --limit 15"
     },
     {
+      "id": "entity-live-sync",
+      "name": "Daily entity live sync (resync shipped venues/hosts/people from TownLoops, PATCH enrichment into live blanks, GET-verify)",
+      "schedule": "30 3 * * *",
+      "skills": ["entity-live-sync"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/entity-live-sync/sync.py run --limit 15"
+    },
+    {
       "id": "api-check",
       "name": "Daily TownLoops OpenAPI snapshot + breaking-change check",
       "schedule": "15 4 * * *",

@@ -12,6 +12,12 @@ both sets sorted, the venue bound like PATCH does; a duplicate slug is a
 create drop `tags`). A `venue_name` naming several in-town venues fails the
 way the server's `scalar_one_or_none` does ("Multiple rows were found").
 A missing slug (or another town's) GETs as a 404; `list("events")` honours `from`/`to`.
+
+Entity PATCH (venues, businesses, ...) mirrors `update_venue` & co.: a
+per-field merge where `None` leaves a field alone, an empty `name` is
+ignored, any other value — `""` included — is written, a `category_slug`
+not in `categories` (when given) clears the category, and a missing slug
+is a 404.
 """
 
 from __future__ import annotations
@@ -31,13 +37,20 @@ EVENT_PATCH_FIELDS = {
 
 
 class FakeAPI:
-    def __init__(self, events=None, venues=None, ignore=(), create_drops=()):
+    def __init__(self, events=None, venues=None, ignore=(), create_drops=(),
+                 entities=None, categories=None):
         self.events = {e["slug"]: copy.deepcopy(e) for e in (events or [])}
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
         self.tables = {"events": self.events, "venues": self.venues}
+        for resource, rows in (entities or {}).items():
+            self.tables.setdefault(resource, {}).update({r["slug"]: dict(r) for r in rows})
+        self.categories = set(categories) if categories is not None else None
         self.ignore = set(ignore)  # fields the "server" drops — forces a verify mismatch
         self.create_drops = set(create_drops)
         self.calls: list[tuple] = []
+
+    def verify_town(self, *a, **k):
+        return {"town_slug": "slt"}
 
     def get(self, resource, slug):
         self.calls.append(("GET", resource, slug))
@@ -96,6 +109,8 @@ class FakeAPI:
 
     def update(self, resource, slug, payload):
         self.calls.append(("PATCH", resource, slug, copy.deepcopy(payload)))
+        if resource != "events":
+            return self._update_entity(resource, slug, payload)
         row = self.events[slug]
         if "title" in payload and payload["title"] is not None and len(payload["title"]) < 3:
             raise RuntimeError("[422 validation_error] title too short")
@@ -107,6 +122,19 @@ class FakeAPI:
                 row[k] = sorted(body.pop(k) if k == "category_slugs"
                                 else (_slug(t) for t in body.pop(k)))
         row.update(body)
+        return copy.deepcopy(row)
+
+    def _update_entity(self, resource, slug, payload):
+        table = self.tables.setdefault(resource, {})
+        if slug not in table or table[slug].get("town", "slt") != "slt":
+            raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found")
+        row = table[slug]
+        for k, v in payload.items():
+            if v is None or k in self.ignore or (k == "name" and v == ""):
+                continue
+            if k == "category_slug" and self.categories is not None and v not in self.categories:
+                v = None
+            row[k] = v
         return copy.deepcopy(row)
 
     def patches(self):

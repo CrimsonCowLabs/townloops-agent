@@ -44,6 +44,12 @@ step is not built yet — the orchestrator skips its `extract-metadata` action).
 | `event-enrich-entities` | `enrich-entities` | `people-derived` → `entities-enriched` | Researches each linked entity from its own site; fills blanks only (`engine/entity_enrich.py`). |
 | `event-ship` | `ship` | `entities-enriched` → `shipped` | POST entities then event (venue→host→people→event). No-op exit 0 if `TOWNLOOPS_API_KEY` unset. |
 
+### Live sync (cron, daily)
+
+| Skill | CLI | When |
+|---|---|---|
+| `entity-live-sync` | `sync.py run [--limit N] [--kind K] / list / clear --kind K --entity-uid UID` | Daily 03:30. Entities shipped earlier whose local content changed (enrichment) → resync from live, PATCH live blanks, GET-verify (`engine/entity_sync.py`); cross-town rows skipped. `list`/`clear` for operator-flagged 404/mismatch rows. |
+
 ### Legacy structured-source pipeline (LLM-free, `sources.yaml`)
 
 | Skill | CLI | When |

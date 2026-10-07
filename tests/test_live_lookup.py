@@ -316,14 +316,74 @@ class TestShipEntityLookup:
         return conn.execute("SELECT * FROM venues WHERE entity_uid = 'v-uid'").fetchone()
 
     def test_live_entity_is_adopted_not_posted(self, ship, conn):
-        api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill"}])
-        self._venue(conn, townloops_slug="riva-grill")
+        api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill",
+                               "address": "1 Lakeshore Blvd"}])
+        self._venue(conn, townloops_slug="riva-grill", phone="530-555-0100")
         assert ship._ship_entity(api, conn, "venue", "v-uid") == "riva-grill"
         assert api.creates() == []
         row = self._venue_row(conn)
         assert json.loads(row["extra_json"])["live_id"] == 7
-        # never pushed by us — left for the enrichment PATCH path (ticket 09)
-        assert row["pushed_hash"] is None and row["pushed_at"] is not None
+        # synced both ways: live's address kept locally, our phone filled live
+        assert row["address"] == "1 Lakeshore Blvd"
+        assert api.venues["riva-grill"]["phone"] == "530-555-0100"
+        assert row["pushed_hash"] == row["content_hash"]
+
+    def test_created_entity_gets_what_create_doesnt_send(self, ship, conn):
+        """The create payload has no image_path; the post-create sync fills it."""
+        api = FakeAPI()
+        self._venue(conn, image_path="https://riva.example/hero.jpg")
+        slug = ship._ship_entity(api, conn, "venue", "v-uid")
+        assert api.venues[slug]["image_path"] == "https://riva.example/hero.jpg"
+        row = self._venue_row(conn)
+        assert row["pushed_hash"] == row["content_hash"]
+
+    def test_enriched_after_shipping_is_patched_on_the_next_ship(self, ship, conn):
+        from engine import entity_enrich
+        api = FakeAPI()
+        self._venue(conn)
+        slug = ship._ship_entity(api, conn, "venue", "v-uid")
+        entity_enrich.fill_blanks(conn, "venue", "v-uid", {"phone": "530-555-0100"}, "enriched")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") == slug
+        assert api.venues[slug]["phone"] == "530-555-0100"
+        assert len(api.creates()) == 1
+
+    def test_cross_town_entity_is_neither_synced_nor_flagged(self, ship, conn):
+        """A venue the server filed under another town 404s on our town's
+        GETs — that's not 'gone', and its pushed_hash can't be verified."""
+        from engine import entity_enrich, entity_sync
+        api = FakeAPI()
+        real_create = api.create
+
+        def ghost_town(resource, payload, idempotency_key=None):
+            row = real_create(resource, payload, idempotency_key)
+            api.venues[row["slug"]]["town"] = "reno"
+            return {**row, "town_slug": "reno"}
+        api.create = ghost_town
+        self._venue(conn)
+        slug = ship._ship_entity(api, conn, "venue", "v-uid")
+        row = self._venue_row(conn)
+        assert row["pushed_hash"] is None
+        assert json.loads(row["extra_json"])["cross_town"] == "reno"
+        entity_enrich.fill_blanks(conn, "venue", "v-uid", {"phone": "530-555-0100"}, "enriched")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") == slug
+        assert entity_sync.sweep(api, conn) == {}
+        assert "live_sync" not in json.loads(self._venue_row(conn)["extra_json"])
+        assert len(api.creates()) == 1
+
+    def test_flagged_entity_is_not_flagged_again_on_every_ship(self, ship, conn):
+        api = FakeAPI()
+        self._venue(conn, townloops_slug="riva-grill", pushed_at="2026-10-01T00:00:00+00:00")
+        ship._ship_entity(api, conn, "venue", "v-uid")
+        ship._ship_entity(api, conn, "venue", "v-uid")
+        n = conn.execute("SELECT COUNT(*) FROM agent_activity WHERE worker = 'entity-sync'").fetchone()[0]
+        assert n == 1
+
+    def test_shipped_entity_gone_from_live_is_flagged_not_recreated(self, ship, conn):
+        api = FakeAPI()
+        self._venue(conn, townloops_slug="riva-grill", pushed_at="2026-10-01T00:00:00+00:00")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") is None
+        assert api.creates() == []
+        assert json.loads(self._venue_row(conn)["extra_json"])["live_sync"]["status"] == "missing"
 
     def test_not_found_is_created_and_its_live_id_recorded(self, ship, conn):
         api = FakeAPI()

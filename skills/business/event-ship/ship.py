@@ -138,11 +138,15 @@ def _event_payload(row) -> dict:
 
 
 def _ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
-    """Make sure one entity exists live. Returns its TownLoops slug, or None
-    if we couldn't ship it. A row already live at its slug is adopted (live
-    id recorded, nothing POSTed); a 409 on create is resolved the same way —
-    never assumed. Updating an adopted row is the enrichment PATCH path's
-    job: its pushed_hash stays unset."""
+    """Make sure one entity exists live and reflects our local values.
+    Returns its TownLoops slug, or None if we couldn't ship it. A row
+    already live at its slug is adopted (live id recorded, nothing POSTed);
+    a 409 on create is resolved the same way — never assumed. Adopted,
+    created and since-enriched rows are then synced (engine/entity_sync):
+    live values kept, live blanks filled, GET-verified. A row we shipped
+    before that is gone from live is flagged for the operator, not
+    re-created."""
+    from engine import entity_sync
     from engine.live_lookup import find_live_entity, is_conflict
     table, resource = _ENTITY_TABLES[kind]
     row = conn.execute(
@@ -154,10 +158,17 @@ def _ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         # Local mirror of a row that already exists on TownLoops (staged by
         # event-reconcile) — nothing to create.
         return row["townloops_slug"]
+    if row["townloops_slug"] and entity_sync.is_cross_town(dict(row)):
+        # Filed under another town: our town-scoped GET 404s; nothing to do.
+        return row["townloops_slug"]
     proposed_slug = row["townloops_slug"] or _slug_for(kind, entity_uid)
     created = False
     try:
         live = find_live_entity(client, resource, proposed_slug)
+        if live is None and row["pushed_at"] and row["townloops_slug"]:
+            entity_sync.flag_for_operator(conn, kind, dict(row), "missing",
+                                          f"live {kind} {proposed_slug} not found (404) — not re-created")
+            return None
         if live is None:
             payload = _PAYLOAD_BUILDERS[kind](row)
             payload["slug"] = proposed_slug
@@ -180,12 +191,20 @@ def _ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     # venue. Events resolve `venue_id` in-town only, so such an id would
     # silently unbind the event — leave it unrecorded and bind by name.
     in_town = live.get("town_slug") in (None, "", town)
-    _record_live_entity(conn, table, row, slug, live.get("id") if in_town else None, created)
+    _record_live_entity(conn, table, row, slug, live.get("id") if in_town else None,
+                        None if in_town else live.get("town_slug"))
+    if in_town:
+        res = entity_sync.sync_entity(client, conn, kind, entity_uid)
+        if res.status == "error":
+            print(f"  sync {kind} {entity_uid[:12]} → {slug}: {res.detail}", file=sys.stderr)
     return slug
 
 
 def _record_live_entity(conn, table: str, row, slug: str, live_id: Optional[int],
-                        created: bool) -> None:
+                        cross_town: Optional[str]) -> None:
+    """Record the live slug/id, or the other town the server filed it under
+    (entity_sync then leaves it alone). pushed_hash is entity_sync's to set,
+    after a GET verify."""
     import json
     try:
         extra = json.loads(row["extra_json"] or "{}")
@@ -195,12 +214,12 @@ def _record_live_entity(conn, table: str, row, slug: str, live_id: Optional[int]
         extra = {}
     if live_id is not None:
         extra["live_id"] = live_id
-    now = iso_utc_now()
+    if cross_town:
+        extra["cross_town"] = cross_town
     conn.execute(
-        f"UPDATE {table} SET townloops_slug = ?, pushed_at = ?, extra_json = ?, "
-        f"  pushed_hash = CASE WHEN ? THEN COALESCE(content_hash, ?) ELSE pushed_hash END "
+        f"UPDATE {table} SET townloops_slug = ?, pushed_at = ?, extra_json = ? "
         f"WHERE entity_uid = ?",
-        (slug, now, json.dumps(extra) if extra else row["extra_json"], int(created), now,
+        (slug, iso_utc_now(), json.dumps(extra) if extra else row["extra_json"],
          row["entity_uid"]),
     )
 

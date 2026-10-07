@@ -123,3 +123,72 @@ def _instant(value: Any) -> Optional[datetime]:
     except ValueError:
         return None
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+# --- Entities (venues, businesses, communities, performers, creators) -------
+#
+# Entity PATCH is a plain per-field merge (townloops `update_venue` & co.):
+# `None` leaves a field alone, an empty `name` is ignored, but any other
+# value — `""` included — overwrites, and a `category_slug` that doesn't
+# resolve CLEARS the category. There are no replace-the-set fields, so the
+# full body is the live row's own values plus the overrides; resending a
+# live value is a no-op.
+
+# Patchable fields per resource, with the max length the API accepts.
+ENTITY_FIELDS: dict[str, dict[str, int]] = {
+    "venues": {"name": 160, "description": 5000, "address": 255, "website": 500, "phone": 60,
+               "accessibility_notes": 5000, "image_path": 500, "image_alt": 255,
+               "category_slug": 140},
+    "businesses": {"name": 160, "description": 5000, "address": 255, "website": 500,
+                   "phone": 60, "image_path": 500, "image_alt": 255, "instagram": 500,
+                   "facebook": 500, "tiktok": 500, "twitter": 500, "youtube": 500,
+                   "linkedin": 500, "category_slug": 140},
+    "communities": {"name": 160, "kind": 32, "description": 5000, "website": 500,
+                    "meeting_info": 5000, "instagram": 500, "facebook": 500, "tiktok": 500,
+                    "twitter": 500, "youtube": 500, "linkedin": 500, "image_path": 500,
+                    "image_alt": 255, "category_slug": 140},
+    "performers": {"name": 160, "kind": 32, "description": 5000, "website": 500,
+                   "instagram": 500, "spotify_url": 500, "facebook": 500, "tiktok": 500,
+                   "twitter": 500, "youtube": 500, "linkedin": 500, "image_path": 500,
+                   "image_alt": 255},
+    "creators": {"name": 160, "kind": 32, "bio": 5000, "website": 500, "instagram": 500,
+                 "youtube_url": 500, "facebook": 500, "tiktok": 500, "twitter": 500,
+                 "linkedin": 500, "image_path": 500, "image_alt": 255},
+}
+
+
+def sendable(resource: str, key: str, value: Any) -> bool:
+    """A non-blank string the API accepts for `key` (name needs 2+ chars)."""
+    limit = ENTITY_FIELDS[resource].get(key)
+    if limit is None or not isinstance(value, str) or not value.strip():
+        return False
+    return len(value) <= limit and (key != "name" or len(value) >= 2)
+
+
+def build_entity_patch(resource: str, current: dict, overrides: dict) -> dict[str, Any]:
+    """Full PATCH body: every patchable non-blank value of the live row
+    `current`, with the non-blank `overrides` on top. Values the API would
+    reject are left out, and blanks are never sent — `""` would clear."""
+    if not current.get("slug"):
+        raise ValueError("no live row to build a PATCH from")
+    body = {k: v for k, v in current.items() if sendable(resource, k, v)}
+    body.update({k: v for k, v in overrides.items() if sendable(resource, k, v)})
+    return body
+
+
+def verify_entity(row: dict, body: dict) -> list[str]:
+    """Fields of `body` that the live `row` doesn't reflect."""
+    return [f"{k}: sent {v!r}, live has {row.get(k)!r}"
+            for k, v in body.items() if row.get(k) != v]
+
+
+def apply_entity_patch(client, resource: str, slug: str, overrides: dict,
+                       current: Optional[dict] = None) -> PatchResult:
+    """GET (unless `current` is given) → full-body PATCH → GET verify. API
+    errors raise (a 404 as the client's error with status 404)."""
+    if current is None:
+        current = client.get(resource, slug) or {}
+    body = build_entity_patch(resource, current, overrides)
+    client.update(resource, slug, body)
+    after = client.get(resource, slug) or {}
+    return PatchResult(body=body, mismatches=verify_entity(after, body))

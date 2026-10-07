@@ -23,6 +23,7 @@ from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity,
     names_match, normalize_name,
 )
+from engine.entity_sync import refresh_content_hash
 
 
 @dataclass(frozen=True)
@@ -260,6 +261,10 @@ def fill_blanks(conn: sqlite3.Connection, kind: str, entity_uid: str, payload: d
     if sets:
         conn.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE entity_uid = ?",
                      (*vals, entity_uid))
+    if filled:
+        # A changed hash is what sends the new values to an entity that is
+        # already live (engine/entity_sync).
+        refresh_content_hash(conn, kind, entity_uid)
     return filled
 
 
@@ -299,6 +304,7 @@ def borrow_property_image(conn: sqlite3.Connection, venue_uid: str,
                 "last_modified_at = ? WHERE entity_uid = ? AND image_path IS NULL",
                 (other["image_path"], other["image_alt"] or other["name"], iso_utc_now(), venue_uid),
             )
+            refresh_content_hash(conn, "venue", venue_uid)
             return other["image_path"]
     return None
 

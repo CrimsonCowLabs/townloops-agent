@@ -61,3 +61,15 @@ On create, the venue goes by `venue_id`: `_resolve_venue` uses
 `scalar_one_or_none` on a case-insensitive in-town name match, so a name
 shared by two in-town venues errors with "Multiple rows were found".
 `event-ship` does all of this via `engine/live_lookup.py`.
+
+## Entity PATCH (venues, businesses, communities, performers, creators) — ticket 09
+
+`update_venue` & co. are a plain per-field merge: `None`/omitted leaves a
+field alone and an empty `name` is ignored, but any other value — **`""`
+included — overwrites**, and a `category_slug` that doesn't resolve
+**clears** the category (with a `category_not_found` warning). No field
+replaces a set. `engine/live_patch.apply_entity_patch` sends the live row's
+own non-blank values plus the fills (within the API's length limits, never
+blanks) and GET-verifies; `engine/entity_sync.py` only ever fills fields
+that are blank live, and only sends a `category_slug` from the town's
+category snapshot.

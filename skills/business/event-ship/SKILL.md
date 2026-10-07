@@ -33,9 +33,14 @@ Nothing is POSTed until a lookup says it isn't live yet
 
 - **Entities**: GET by slug (the row's `townloops_slug`, else the proposed
   `hermes-<town>-…` slug). Found → adopted: `townloops_slug` and
-  `extra_json.live_id` recorded, nothing POSTed, `pushed_hash` left unset so
-  the enrichment PATCH path (not this skill) updates it. Created → the live id
-  from the create response is recorded the same way.
+  `extra_json.live_id` recorded, nothing POSTed. Created → the live id
+  from the create response is recorded the same way. Either way (and for a
+  row shipped earlier whose content changed since, e.g. by enrichment) the
+  entity is then **synced** (`engine/entity_sync.py`, see the
+  `entity-live-sync` skill): live values copied locally, live blanks filled
+  by a full-body PATCH, GET-verified before `pushed_hash` moves. A row we
+  shipped before that now 404s is flagged for the operator
+  (`extra_json.live_sync`), never re-created.
 - **Events**: GET by slug, then — the list endpoint has no `source_url`
   filter — list the events starting within 12h and match `source_url`
   (trailing `/` ignored; with several, the one at the same start wins).
