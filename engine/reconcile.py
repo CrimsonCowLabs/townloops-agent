@@ -31,13 +31,12 @@ from typing import Any, Iterable, Optional
 
 from dateutil import parser as _dtparser
 
-from engine.derive_helpers import normalize_name
+from engine.derive_helpers import names_match, normalize_name
 from engine.discovery import canonicalize_url
 
 
 TITLE_MATCH_RATIO = 0.88
 VENUE_MATCH_RATIO = 0.80
-NAME_MATCH_RATIO = 0.88
 # A start-time shift smaller than this is treated as rounding noise between
 # the source page and what was published (e.g. "doors 6:45 / show 7").
 TIME_TOLERANCE = timedelta(minutes=30)
@@ -102,43 +101,6 @@ def _canon(url: Optional[str]) -> Optional[str]:
         return canonicalize_url(url)
     except ValueError:
         return None
-
-
-def names_match(a: Optional[str], b: Optional[str],
-                ratio: float = NAME_MATCH_RATIO) -> bool:
-    """Loose entity-name equality. Exact normalized match, high similarity,
-    or token containment when the shorter name is specific enough
-    ("Gunbarrel" vs "Gunbarrel Tavern" yes; "Tahoe" vs anything no)."""
-    na, nb = normalize_name(a or ""), normalize_name(b or "")
-    if not na or not nb:
-        return False
-    if na == nb:
-        return True
-    if SequenceMatcher(None, na, nb).ratio() >= ratio:
-        return True
-    short, long_ = sorted((na, nb), key=len)
-    if len(short) >= 8 and set(short.split()) <= set(long_.split()):
-        return True
-    return False
-
-
-def best_name_match(name: Optional[str], rows: Iterable[dict],
-                    key: str = "name") -> Optional[dict]:
-    """Return the row whose `key` best matches `name`, or None."""
-    target = normalize_name(name or "")
-    if not target:
-        return None
-    best, best_score = None, 0.0
-    for r in rows:
-        cand = r.get(key)
-        if not names_match(name, cand):
-            continue
-        score = SequenceMatcher(None, target, normalize_name(cand)).ratio()
-        if normalize_name(cand) == target:
-            score = 2.0
-        if score > best_score:
-            best, best_score = r, score
-    return best
 
 
 # --------------------------------------------------------------------------

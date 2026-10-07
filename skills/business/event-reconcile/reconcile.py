@@ -11,7 +11,6 @@ event-ship PATCHes the live row for events staged as `changed`.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import sqlite3
@@ -28,7 +27,8 @@ from engine import inspection
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import (
-    iso_utc_now, mint_entity_uid, normalize_name, open_db, record_activity,
+    best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity, names_match,
+    normalize_name, open_db, record_activity,
 )
 from engine.event_extract import (
     build_extraction_prompt, codex_exec, event_uid, firecrawl_markdown,
@@ -54,10 +54,6 @@ EXTRA_FIELDS = (
 
 _TABLES = {"venue": "venues", "business": "businesses", "community": "communities"}
 _LIVE_RESOURCES = {"venue": "venues", "business": "businesses", "community": "communities"}
-# Fields copied from a live TownLoops row into its local mirror.
-_MIRROR_FIELDS = ("name", "description", "address", "website", "phone", "kind",
-                  "meeting_info", "image_path", "image_alt", "category_slug",
-                  "instagram", "facebook", "tiktok", "twitter", "youtube", "linkedin")
 # Fields research_url() can fill on a local row (fill-blanks only).
 _ENRICH_FIELDS = ("description", "address", "website", "phone", "image_path",
                   "image_alt", "instagram", "facebook", "tiktok", "twitter",
@@ -304,7 +300,7 @@ def _pick_site(name: str, results: list[dict]) -> Optional[str]:
             continue
         host = (urlparse(url).hostname or "").replace("-", "").replace(".", "")
         title = (r.get("title") or "").split("|")[0].split(" - ")[0]
-        if rc.names_match(name, title) or (len(compact) >= 5 and compact[:12] in host):
+        if names_match(name, title) or (len(compact) >= 5 and compact[:12] in host):
             return url
     return None
 
@@ -351,28 +347,12 @@ def _fill_blanks(conn, table: str, entity_uid: str, payload: dict, status: str) 
     return filled
 
 
-def _insert_entity(conn, table: str, entity_uid: str, fields: dict) -> None:
-    cols = _columns(conn, table)
-    now = iso_utc_now()
-    base = {
-        "entity_uid": entity_uid, "first_seen_at": now, "last_seen_at": now,
-        "last_modified_at": now,
-        "content_hash": hashlib.sha1(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest(),
-        "linked_event_count": 0,
-    }
-    data = {k: v for k, v in {**base, **fields}.items() if k in cols and v is not None}
-    conn.execute(
-        f"INSERT OR IGNORE INTO {table} ({', '.join(data)}) VALUES ({', '.join('?' for _ in data)})",
-        tuple(data.values()),
-    )
-
-
 def resolve_entity(conn, kind: str, name: str, event: dict, live: Live,
                    town: str, budget: Budget, report: dict) -> Optional[str]:
     """Local match → live mirror → new shell; enrich as needed. Returns entity_uid."""
     table = _TABLES[kind]
     local_rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
-    hit = rc.best_name_match(name, local_rows)
+    hit = best_name_match(name, local_rows)
     if hit:
         if not hit.get("image_path") and hit.get("enrichment_status") not in ("enriched", "not-found", "image-proposed"):
             payload = _research(hit["name"], hit.get("website"), town, budget)
@@ -381,17 +361,9 @@ def resolve_entity(conn, kind: str, name: str, event: dict, live: Live,
                 _fill_blanks(conn, table, hit["entity_uid"], payload, status)
         return hit["entity_uid"]
 
-    live_hit = rc.best_name_match(name, live.entities[kind])
+    live_hit = best_name_match(name, live.entities[kind])
     if live_hit:
-        entity_uid = mint_entity_uid(kind, live_hit["name"], f"live:{live_hit['slug']}")
-        fields = {k: live_hit.get(k) for k in _MIRROR_FIELDS}
-        fields.update({
-            "source": "live:townloops", "source_kind": "live",
-            "townloops_slug": live_hit["slug"], "pushed_at": iso_utc_now(),
-            "extra_json": json.dumps({"live_id": live_hit.get("id")}),
-            "enrichment_status": "live",
-        })
-        _insert_entity(conn, table, entity_uid, fields)
+        entity_uid = mirror_live_entity(conn, kind, live_hit)
         if not live_hit.get("image_path"):
             # Live row has no image: stage one locally for the operator.
             payload = _research(live_hit["name"], live_hit.get("website"), town, budget)
@@ -415,7 +387,7 @@ def resolve_entity(conn, kind: str, name: str, event: dict, live: Live,
         fields["address"] = event.get("location") or event.get("location_raw")
     if kind == "community":
         fields["kind"] = "group"
-    _insert_entity(conn, table, entity_uid, fields)
+    insert_entity(conn, table, entity_uid, fields)
     payload = _research(name, None, town, budget)
     filled = _fill_blanks(conn, table, entity_uid, payload, "enriched" if payload else "not-found")
     report["created"][kind].append({"name": name, "filled": filled})
