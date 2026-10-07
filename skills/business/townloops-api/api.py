@@ -498,6 +498,10 @@ def _parse_filter(kv: str) -> tuple[str, str]:
 
 def cmd_query(args) -> int:
     base = (os.environ.get("TOWNLOOPS_API_URL") or "").rstrip("/")
+    # Deployments commonly configure the API host root while OpenAPI paths
+    # include /api/v1. Accept either shape instead of emitting /towns/... 404s.
+    if base and not base.endswith("/api/v1"):
+        base += "/api/v1"
     key = os.environ.get("TOWNLOOPS_API_KEY", "").strip()
     slug = os.environ.get("TOWNLOOPS_TOWN_SLUG", "").strip()
     if not (base and key and slug):

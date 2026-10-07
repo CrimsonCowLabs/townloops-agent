@@ -29,6 +29,29 @@ python skills/business/townloops-api/api.py query <resource> \
     [--limit N] [--offset N] [--all]
 ```
 
+## Live event-listing workflow
+
+For audience-facing requests such as “what’s on?” or “what’s happening this weekend?”:
+
+1. Read the current local time with `date`; report times in the town timezone.
+2. Run `describe events` before constructing filters when the snapshot or contract may have changed.
+3. Query the **live** API, normally with `--filter status=published`, a bounded `--from` / `--to` window, and a reasonable limit. Do not substitute the local operator review queue; older-pipeline records may exist only in TownLoops.
+4. To include events already in progress, start the API window at the beginning of the local day (or earlier for overnight events), then retain rows whose `end_at` is absent or later than now. A query beginning exactly at “now” can omit ongoing events because filtering is based on `start_at`.
+5. Convert UTC timestamps to the town timezone, group by local day, and flag obvious catalog conflicts rather than silently presenting them (for example, source/title mismatch or two events assigned to the same room at the same time).
+6. Keep broad future catalogs out of the response. Summarize the requested date range and state the count.
+
+### API base-path pitfall
+
+The query helper builds `TOWNLOOPS_API_URL + /towns/{slug}/{resource}`. Therefore `TOWNLOOPS_API_URL` must include the API prefix, currently `/api/v1`. If the profile sets only the origin (for example `https://townloops.com`), override it for the command:
+
+```bash
+TOWNLOOPS_API_URL=https://townloops.com/api/v1 \
+  python skills/business/townloops-api/api.py query events \
+  --filter status=published --from 2026-10-06 --to 2026-10-12 --all
+```
+
+A 404 whose URL is `/towns/<slug>/...` without `/api/v1` indicates this base-path mismatch. Confirm the current route with `describe`; do not infer that the town has no records.
+
 - `snapshot` — fetch and save; emits one-line JSON status.
 - `diff` — structured diff of current vs. previous snapshot; distinguishes
   breaking from non-breaking; maps schema/path changes to affected resources.
@@ -74,7 +97,10 @@ operator clears it. On additive changes: silent snapshot update.
 - `TOWNLOOPS_OPENAPI_URL` — default `https://townloops.com/api/v1/openapi.json`.
 - `TOWNLOOPS_SWAGGER_URL` — default `https://townloops.com/api/v1/docs`.
 - `TOWNLOOPS_API_URL`, `TOWNLOOPS_API_KEY`, `TOWNLOOPS_TOWN_SLUG` —
-  used by `query` and by `Client` writes.
+  used by `query` and by `Client` writes. `TOWNLOOPS_API_URL` may be either the
+  host root (`https://townloops.com`) or already include `/api/v1`; the query
+  helper must normalize both forms and must not construct bare `/towns/...`
+  routes from a host-root value.
 - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — optional; enables `check` alerts.
 
 ## Non-goals

@@ -1,41 +1,65 @@
+---
+name: event-find
+description: Discover upcoming events from approved event seeds, validate source automation, and stage normalized events for operator review.
+---
+
 # event-find
 
-Daily pass that scrapes every `approved` event_seed and uses the LLM
-(Codex CLI) to extract a JSON list of upcoming events from each seed's
-page. Events land directly at `state=metadata-extracted`,
-`approval_status=pending` so the operator can approve/decline in the
-dashboard.
+Daily pass that scrapes every `approved` event seed and uses the LLM (Codex CLI) to extract upcoming events. Events land at `state=metadata-extracted`, `approval_status=pending` so the operator can approve or decline them in the dashboard.
+
+The current implementation is a generic Firecrawl + LLM path. It is useful for simple pages but is not proof that every approved source is safely automatable. Known calendar platforms and large or recurring sources should use deterministic adapters when implemented.
 
 ## Why one skill does find+extract in v1
 
-The spec has separate `event-find` (populate) and `event-extract-metadata`
-(deep enrichment) skills. In practice the LLM prompt at find-time already
-returns clean structured metadata (title, date, venue, description). We
-skip the extract-metadata separate pass for v1 and mark events
-`state=metadata-extracted` directly. When per-event Firecrawl re-fetch
-matters (e.g. images, RSVP URLs, price), a dedicated extract-metadata
-skill can be built and slot into the workqueue.
+The specification has separate `event-find` and `event-extract-metadata` stages. In v1, the find-time LLM prompt already returns title, date, venue, and description, so events skip the separate metadata pass and enter `metadata-extracted`. A future per-event extraction stage can add images, RSVP URLs, prices, or detail-page metadata without changing source discovery.
 
 ## CLI
 
-```
+```bash
 find.py                       # scrape every approved seed
 find.py --seed-id N           # scrape one seed by id
-find.py --limit N             # cap seeds this run (default: all approved)
-find.py --dry-run             # scrape + LLM, print without insert
+find.py --limit N             # cap seeds this run
+find.py --dry-run             # scrape + extract, print without insert
 ```
 
-## Per-seed loop
+## Current generic per-seed loop
 
-1. Firecrawl-scrape seed URL (markdown format — LLM parses better than raw HTML).
-2. LLM prompt: "given this scraped page for town {town}, extract upcoming events as JSON array". Return exactly the fields the events table needs.
-3. For each returned event, upsert via `event_uid = sha1(seed_name + normalized_title + start_iso)`.
-4. Set `state=metadata-extracted`, `approval_status=pending`, `discovered_via=seed:<name>`.
-5. Record `source_runs` row for the seed with fetched/inserted counts.
-6. Update `event_seeds.last_scraped_at` + `last_event_count`.
+1. Firecrawl-scrape the seed URL as markdown.
+2. Ask the LLM for a JSON array of upcoming events for the configured town.
+3. Upsert each record with `event_uid = sha1(seed_name + normalized_title + start_iso)`.
+4. Set `state=metadata-extracted`, `approval_status=pending`, and `discovered_via=seed:<name>`.
+5. Record fetched and inserted counts in `source_runs`.
+6. Update `event_seeds.last_scraped_at` and `last_event_count`.
 
-## Notes
+## Reviewing manual-only sources for automation
 
-- **No affinity filter** in v1 — everything the LLM extracts lands as pending. Operator manually rejects out-of-town noise via the approval UX. Later: LLM-scored `in_town_confidence` filters low-scoring events into a "nearby" tab.
-- **Idempotency**: rerunning against the same seed dedupes on `event_uid`; already-approved events are not clobbered.
-- **Cost**: 1 Firecrawl call + 1 LLM call per seed. 13 approved seeds → ~26 calls per run.
+Do not approve a manual source merely because it returns HTTP 200 or produces one plausible LLM result.
+
+1. Use a copied town database for `--dry-run`; do not alter production seed status during the audit.
+2. Record a generic-path baseline per seed, including zero-result sources and likely overcounts.
+3. Inspect rendered content, raw HTML, links, iframes, JSON-LD, and calendar-vendor scripts.
+4. Probe structured vendor APIs or iCal endpoints before designing an HTML scraper.
+5. Validate pagination, timezone behavior, recurrence representation, stable source IDs, and town or branch affinity.
+6. Prefer deterministic adapters in this order: JSON/iCal, stable HTML cards, specialized recurrence or annual parser, then LLM fallback.
+7. Normalize adapter records into `engine.event_extract.upsert_event()` so event state, deduplication, pending approval, and workqueue behavior remain unchanged.
+8. Re-run all reviewed seeds against the copied database and compare counts and deduplication with the generic baseline before changing production configuration.
+
+If adapters are implemented, select them through per-seed configuration such as an adapter key. Do not scatter hostname or URL conditionals through the extraction loop.
+
+## Failure and quality checks
+
+- Treat branded 404s, Cloudflare or Incapsula challenges, empty JS widgets, and vendor error text as failed source runs, not successful zero-event runs.
+- Handle every pagination mechanism explicitly. Never infer full coverage from the first API response or rendered page.
+- Avoid passing entire large calendars through a fixed LLM content window; truncation silently drops events.
+- For annual landing pages, constrain extraction to the primary event section or canonical ticket listing. Social and news dates often become false events.
+- Expand recurrence text only when the rule is explicit, within a bounded rolling horizon.
+- For multi-region sources, apply reliable source-level branch or geography filters where available.
+- Automation changes extraction, not approval. New events remain pending unless an explicit product policy says otherwise.
+
+## Idempotency and cost
+
+Rerunning a seed deduplicates on `event_uid`; already approved events are not clobbered. The generic path costs one Firecrawl call and one LLM call per seed. Deterministic adapters can remove the LLM call but may require pagination and detail-page requests.
+
+## References
+
+- `references/manual-source-automation-review.md` — reusable audit checklist, adapter-selection hierarchy, failure semantics, and the 2026 South Lake Tahoe manual-seed findings.
