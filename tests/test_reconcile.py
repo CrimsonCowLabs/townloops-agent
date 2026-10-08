@@ -199,6 +199,7 @@ def skill(fresh_db, monkeypatch):
             self.payload = {"image_path": f"{url}/og.png", "description": "From site",
                             "phone": "555-0100"}
             self.fetched_from = [url]
+            self.text = "Pumpkin Patch Co\nThe growers' guild meets every Monday at 6pm in the barn."
 
     def fake_research(url, use_firecrawl=False):
         research_calls.append(url)
@@ -243,6 +244,27 @@ class TestStageAndEnrich:
         biz = conn.execute("SELECT * FROM businesses WHERE entity_uid = ?", (row["derived_host_uid"],)).fetchone()
         assert biz["image_path"] and biz["website"] == "https://pumpkinpatch.example"
         assert len(report["created"]["venue"]) == 1
+
+    def test_new_community_host_gets_meeting_info_from_its_site(self, skill):
+        mod, conn = skill
+        live = FakeLive(venues=VENUES)
+        [c] = _classified(live, [{"title": "Harvest Social", "date": "2026-10-21T15:00:00",
+                                  "organizer": "Pumpkin Patch Co", "organizer_kind": "community",
+                                  "source_url": "https://pumpkinpatch.example/social"}])
+        uid, _ = mod._stage(conn, "Seed", c, "run-1")
+        prompts = []
+
+        def llm(prompt):
+            prompts.append(prompt)
+            return json.dumps({"meeting_info": [
+                "The growers' guild meets every Monday at 6pm in the barn."]})
+        mod.enrich(conn, live, {}, [uid], max_lookups=5, llm=llm)
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        assert row["derived_host_kind"] == "community"
+        com = conn.execute("SELECT * FROM communities WHERE entity_uid = ?",
+                           (row["derived_host_uid"],)).fetchone()
+        assert com["meeting_info"] == "The growers' guild meets every Monday at 6pm in the barn."
+        assert len(prompts) == 1
 
     def test_changed_event_mirrors_live_venue_and_sets_slug(self, skill):
         mod, conn = skill

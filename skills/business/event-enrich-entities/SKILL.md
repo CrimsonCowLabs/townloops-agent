@@ -21,14 +21,19 @@ evidence ladder.
 2. **Find the site**: the row's `website`, else its `facebook` page, else a
    Firecrawl search for `"<name>" <town>` (first hit plausibly the entity's
    own site; directories/aggregators are blocked).
-   `meeting_info` / `accessibility_notes` are not extracted here (no
-   structured source).
 3. **Read it** (kind-aware fetch plan): a Facebook page root also reads its
    `/about/` tab, where contact details and LocalBusiness JSON-LD live.
 4. **Extract verbatim**: description from og:description / meta description as written (never
    synthesized), address/phone/socials from JSON-LD, socials from `sameAs`.
    Creators get `bio` and `youtube_url` per the payload contract. A Facebook
    URL goes in `facebook`, never `website`.
+   **Meeting info** (communities with a blank `meeting_info`): one Codex
+   call over the site's visible text (`engine/page_extract.py`) copies the
+   sentences that say when/where the group meets. A sentence is kept only if
+   it is on the page and names a day, frequency, clock time or the meeting itself; none → null.
+   A failed, throttled or skipped call **defers** the community: its other
+   site fields are filled but its status stays `pending`, so a later run
+   reads the site again — it was not looked at, so it is not not-found.
 5. **Validate** each value against `engine/entity_payload.schema.json`
    (strings; http(s) URLs for links; https for `image_path`). Invalid values
    are dropped — null beats wrong.
@@ -40,8 +45,8 @@ evidence ladder.
    (`state/categories.json`): a whole-word keyword map over name +
    description decides clear cases; when it finds no hint or conflicting
    hints, Codex picks from the town's slugs (any other answer is discarded).
-   At most 2 Codex calls (30s each) per event, none started that could end
-   past 100s into the run; a failed, throttled or skipped call leaves the
+   At most 3 Codex calls (30s each, shared with meeting info) per event,
+   none started that could end past 100s into the run; a failed, throttled or skipped call leaves the
    category blank, and it is retried the next time an event links the
    entity (already-researched rows skip research but still get categorized).
    Live mirrors are never categorized. Deferred entities aren't categorized

@@ -22,7 +22,6 @@ source_url) is never fetched.
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from dataclasses import dataclass, field
@@ -33,6 +32,7 @@ from engine.derive_helpers import iso_utc_now
 from engine.discovery import canonicalize_url
 from engine.event_extract import codex_exec, firecrawl_markdown
 from engine.event_tickets import price_kind
+from engine.page_extract import join_quotes, normalize, parse_object
 
 
 # EventPayload / EventPatch limit.
@@ -84,7 +84,7 @@ _ACCESS_TERMS = re.compile(
     re.IGNORECASE,
 )
 _ADA = re.compile(r"\bADA\b")
-_MIN_QUOTE_CHARS = 12
+_MD_EMPHASIS = re.compile(r"[*_`]+")
 
 
 @dataclass
@@ -98,22 +98,6 @@ class DetailResult:
 # Quote checks
 # --------------------------------------------------------------------------
 
-_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
-_MD_EMPHASIS = re.compile(r"[*_`]+")
-_MD_BLOCKS = re.compile(r"[#>|]+")
-_DASHES = str.maketrans({"—": "-", "–": "-", "‘": "'", "’": "'",
-                         "“": '"', "”": '"', " ": " "})
-
-
-def _norm(text: str) -> str:
-    """Page and quote text as compared: markdown links → their text, emphasis
-    and heading marks gone, dashes/quotes unified, whitespace collapsed."""
-    text = _MD_LINK.sub(r"\1", text.translate(_DASHES))
-    text = _MD_BLOCKS.sub(" ", _MD_EMPHASIS.sub("", text))
-    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    return re.sub(r"\s+", " ", text).strip().lower()
-
-
 def _about_access(quote: str) -> bool:
     return bool(_ACCESS_TERMS.search(quote) or _ADA.search(quote))
 
@@ -122,28 +106,7 @@ def accessibility_notes(quotes, page: str) -> Optional[str]:
     """The quotes that are on `page` and about access, in page order, as
     sentences joined by spaces and cut on a quote boundary to the API limit.
     None when none survive."""
-    if not isinstance(quotes, list):
-        return None
-    norm_page = _norm(page)
-    kept: dict[str, tuple[int, str]] = {}
-    for q in quotes:
-        if not isinstance(q, str):
-            continue
-        quote = re.sub(r"\s+", " ", q).strip().strip("\"'")
-        key = _norm(quote).rstrip(".,;:!? ")
-        if len(key) < _MIN_QUOTE_CHARS or key in kept or not _about_access(quote):
-            continue
-        pos = norm_page.find(key)
-        if pos < 0:
-            continue
-        kept[key] = (pos, quote if quote[-1] in ".!?" else quote.rstrip(",;:") + ".")
-    notes = ""
-    for _, sentence in sorted(kept.values()):
-        joined = f"{notes} {sentence}".strip()
-        if len(joined) > ACCESSIBILITY_MAX:
-            break
-        notes = joined
-    return notes or None
+    return join_quotes(quotes, page, _about_access, ACCESSIBILITY_MAX)
 
 
 def ticket_price(quote, page: str) -> Optional[str]:
@@ -152,11 +115,11 @@ def ticket_price(quote, page: str) -> Optional[str]:
     if not isinstance(quote, str):
         return None
     text = re.sub(r"\s+", " ", _MD_EMPHASIS.sub("", quote)).strip().strip("\"'")
-    key = _norm(text).rstrip(".,;:!? ")
+    key = normalize(text).rstrip(".,;:!? ")
     kind = price_kind(text)
     if not key or len(text) > PRICE_MAX or kind is None:
         return None
-    norm_page = _norm(page)
+    norm_page = normalize(page)
     pos = norm_page.find(key)
     if pos < 0:
         return None
@@ -217,18 +180,6 @@ Scraped page follows:
 """
 
 
-def _parse_object(stdout: str) -> Optional[dict]:
-    text = (stdout or "").strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start < 0 or end < start:
-        return None
-    try:
-        obj = json.loads(text[start:end + 1])
-    except json.JSONDecodeError:
-        return None
-    return obj if isinstance(obj, dict) else None
-
-
 def _extract(parsed: dict, page: str, seeds: set[str]) -> dict:
     """Event columns from the LLM's answer, each checked against the page."""
     return {
@@ -270,7 +221,7 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         ok, markdown, err = False, "", str(e)
     if ok:
         ok, out, err = llm(build_detail_prompt(event, url, markdown), timeout_s=CODEX_TIMEOUT_S)
-        parsed = _parse_object(out) if ok else None
+        parsed = parse_object(out) if ok else None
         if ok and parsed is None:
             ok, err = False, f"no JSON object in Codex output: {out[:200]!r}"
     if not ok:

@@ -43,7 +43,7 @@ step is not built yet — the orchestrator skips its `extract-metadata` action).
 | `event-derive-venue` | `extract-venue` | `detail-read` → `venue-derived` | Match/create shell `venues` row. Exit 2 if no venue signal. |
 | `event-derive-hosts` | `extract-hosts` | `venue-derived` → `hosts-derived` | Rule-based host detection; NULL host is legit success. |
 | `event-derive-people` | `extract-people` | `hosts-derived` → `people-derived` | Extract performers/creators; NULL is legit success. |
-| `event-enrich-entities` | `enrich-entities` | `people-derived` → `entities-enriched` | Researches each linked entity from its own site; fills blanks only (`engine/entity_enrich.py`). |
+| `event-enrich-entities` | `enrich-entities` | `people-derived` → `entities-enriched` | Researches each linked entity from its own site; fills blanks only (`engine/entity_enrich.py`), incl. a community's quote-checked `meeting_info` (`engine/page_extract.py`). |
 | `event-ship` | `ship` | `entities-enriched` → `shipped` | POST entities then event (venue→host→people→event). No-op exit 0 if `TOWNLOOPS_API_KEY` unset. |
 
 ### Live sync (cron, daily)

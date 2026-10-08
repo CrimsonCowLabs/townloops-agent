@@ -22,7 +22,7 @@ from typing import Optional
 import yaml
 from dateutil import tz as _tz
 
-from engine import entity_enrich, inspection
+from engine import entity_classify, entity_enrich, inspection
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import iso_utc_now, open_db, record_activity
@@ -48,6 +48,12 @@ EXTRA_FIELDS = (
     '(nonprofit, club, church, school, civic body, group), or null\n'
     '  "image_url":   absolute URL of an image for this specific event, if the page shows one, else null\n'
 )
+
+# Codex reads of a new community's site for its meeting info, per run. The run
+# is detached from Hermes' cron timeout, so there is no deadline; a skipped or
+# throttled read leaves the shell `pending` for event-enrich-entities.
+_MAX_PAGE_READS = 10
+_PAGE_READ_TIMEOUT_S = 40
 
 _LIVE_RESOURCES = {"venue": "venues", "business": "businesses", "community": "communities"}
 
@@ -268,9 +274,11 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
 # --------------------------------------------------------------------------
 
 def _resolve_and_tally(conn, kind: str, name: str, event: dict, live: Live,
-                   town: str, budget: Budget, report: dict) -> str:
+                   town: str, budget: Budget, report: dict,
+                   llm: Optional[entity_classify.LLM] = None) -> str:
     """Resolve via engine.entity_enrich and tally the outcome into `report`."""
-    r = entity_enrich.resolve_entity(conn, kind, name, event, live.entities[kind], town, budget)
+    r = entity_enrich.resolve_entity(conn, kind, name, event, live.entities[kind], town, budget,
+                                     llm)
     if r.image_proposal:
         # A live mirror's image proposal, whether just mirrored or matched locally.
         report["live_image_proposals"].append(r.image_proposal)
@@ -281,7 +289,8 @@ def _resolve_and_tally(conn, kind: str, name: str, event: dict, live: Live,
     return r.entity_uid
 
 
-def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, report: dict) -> None:
+def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, report: dict,
+                 llm: Optional[entity_classify.LLM] = None) -> None:
     from engine.research import research_url, verify_image
     uid = event["event_uid"]
     try:
@@ -308,14 +317,14 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
     # Venue.
     venue = (event.get("venue_raw") or event.get("venue_name") or "").strip()
     if venue and not event.get("derived_venue_uid"):
-        vuid = _resolve_and_tally(conn, "venue", venue, event, live, town, budget, report)
+        vuid = _resolve_and_tally(conn, "venue", venue, event, live, town, budget, report, llm)
         conn.execute("UPDATE events SET derived_venue_uid = ? WHERE event_uid = ? AND derived_venue_uid IS NULL",
                      (vuid, uid))
 
     # Host business / community.
     org, org_kind = meta.get("organizer"), meta.get("organizer_kind")
     if org and org_kind in ("business", "community") and not event.get("derived_host_uid"):
-        huid = _resolve_and_tally(conn, org_kind, org, event, live, town, budget, report)
+        huid = _resolve_and_tally(conn, org_kind, org, event, live, town, budget, report, llm)
         conn.execute(
             "UPDATE events SET derived_host_uid = ?, derived_host_kind = ? "
             "WHERE event_uid = ? AND derived_host_uid IS NULL",
@@ -324,7 +333,8 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
     record_activity(conn, _WORKER, "enriched", uid, detail=f"venue={venue[:40]} host={org or '-'}")
 
 
-def enrich(conn, live: Live, profile: dict, uids: Optional[list[str]], max_lookups: int) -> dict:
+def enrich(conn, live: Live, profile: dict, uids: Optional[list[str]], max_lookups: int,
+           llm: Optional[entity_classify.LLM] = None) -> dict:
     town = profile.get("name") or os.environ.get("TOWNLOOPS_TOWN_SLUG", "")
     report = {"events": 0, "event_images": 0, "live_matched": {k: 0 for k in entity_enrich.TABLES},
               "created": {k: [] for k in entity_enrich.TABLES}, "live_image_proposals": []}
@@ -338,7 +348,7 @@ def enrich(conn, live: Live, profile: dict, uids: Optional[list[str]], max_looku
         rows = conn.execute(f"SELECT * FROM events WHERE event_uid IN ({marks})", uids).fetchall()
     budget = Budget(max_lookups)
     for r in rows:
-        enrich_event(conn, dict(r), live, town, budget, report)
+        enrich_event(conn, dict(r), live, town, budget, report, llm)
         report["events"] += 1
     report["lookups_left"] = budget.left
     return report
@@ -394,10 +404,11 @@ def cmd_run(args) -> int:
                               **{f"live_{k}": len(v) for k, v in live.entities.items()}}))
             pulled = None if args.cmd == "enrich" else pull(conn, live, profile, args, run_id)
             enriched = None
+            llm = entity_classify.codex_llm(_MAX_PAGE_READS, _PAGE_READ_TIMEOUT_S, float("inf"))
             if args.cmd == "enrich":
-                enriched = enrich(conn, live, profile, None, args.max_lookups)
+                enriched = enrich(conn, live, profile, None, args.max_lookups, llm)
             elif not args.dry_run and not args.skip_enrich:
-                enriched = enrich(conn, live, profile, pulled["staged_uids"], args.max_lookups)
+                enriched = enrich(conn, live, profile, pulled["staged_uids"], args.max_lookups, llm)
     except _lock.LockHeld as e:
         # Not a failure — a slow run is still going; the supervisor in
         # scripts/event_reconcile.py would report a nonzero exit as one.

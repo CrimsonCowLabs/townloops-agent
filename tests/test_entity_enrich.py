@@ -306,6 +306,19 @@ def _entity(conn, kind, name, **fields):
     return uid
 
 
+def _reply(obj):
+    """A stub LLM answering every prompt with `obj` as JSON (None: the call
+    failed or was throttled)."""
+    import json
+    prompts = []
+
+    def call(prompt):
+        prompts.append(prompt)
+        return None if obj is None else json.dumps(obj)
+    call.prompts = prompts
+    return call
+
+
 def _row(conn, kind, uid):
     return dict(conn.execute(f"SELECT * FROM {ee.SPECS[kind].table} WHERE entity_uid = ?",
                              (uid,)).fetchone())
@@ -347,6 +360,71 @@ class TestEnrichEntity:
         assert row["description"].startswith("Service above self")
         assert row["linkedin"] == "https://www.linkedin.com/company/tahoerotary"
         assert row["image_path"] == "https://rotary.example/members-at-cleanup.jpg"
+
+    def test_community_gets_meeting_info_quoted_from_its_site(self, conn, web):
+        llm = _reply({"meeting_info": [
+            "We meet every Thursday at 12:15 pm at the Lake Tahoe Resort Hotel."]})
+        uid = _entity(conn, "community", "Rotary Club of Tahoe", website="https://rotary.example/")
+        out = ee.enrich_entity(conn, "community", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched" and "meeting_info" in out.filled
+        row = _row(conn, "community", uid)
+        assert row["meeting_info"] == "We meet every Thursday at 12:15 pm at the Lake Tahoe Resort Hotel."
+        # the prompt got the page's visible text, not its scripts
+        assert "12:15 pm" in llm.prompts[0] and "every Friday" not in llm.prompts[0]
+
+    def test_filled_meeting_info_ships_on_create_and_reaches_live_via_hash(self, conn, web):
+        from engine import entity_ship, entity_sync
+        uid = _entity(conn, "community", "Rotary Club of Tahoe", website="https://rotary.example/")
+        before = entity_sync.content_hash("community", _row(conn, "community", uid))
+        ee.enrich_entity(conn, "community", uid, "Tahoe", ee.Budget(5), _reply({"meeting_info": [
+            "We meet every Thursday at 12:15 pm at the Lake Tahoe Resort Hotel."]}))
+        row = _row(conn, "community", uid)
+        assert entity_ship._community_payload(row)["meeting_info"].startswith("We meet every Thursday")
+        assert row["content_hash"] == entity_sync.content_hash("community", row) != before
+
+    def test_hallucinated_meeting_info_is_dropped(self, conn, web):
+        llm = _reply({"meeting_info": ["We meet every Friday at 7pm at the library."]})
+        uid = _entity(conn, "community", "Rotary Club of Tahoe", website="https://rotary.example/")
+        out = ee.enrich_entity(conn, "community", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched"
+        assert _row(conn, "community", uid)["meeting_info"] is None
+
+    def test_operator_meeting_info_is_untouched_and_not_asked_for(self, conn, web):
+        llm = _reply({"meeting_info": ["We meet every Thursday at 12:15 pm at the Lake Tahoe Resort Hotel."]})
+        uid = _entity(conn, "community", "Rotary Club of Tahoe", website="https://rotary.example/",
+                      meeting_info="First Monday, 5pm, City Hall")
+        ee.enrich_entity(conn, "community", uid, "Tahoe", ee.Budget(5), llm)
+        assert _row(conn, "community", uid)["meeting_info"] == "First Monday, 5pm, City Hall"
+        assert llm.prompts == []
+
+    def test_llm_unavailable_defers_the_community_but_keeps_site_fields(self, conn, web):
+        uid = _entity(conn, "community", "Rotary Club of Tahoe", website="https://rotary.example/")
+        out = ee.enrich_entity(conn, "community", uid, "Tahoe", ee.Budget(5), _reply(None))
+        assert out.status == "deferred" and "meeting_info" not in out.filled
+        row = _row(conn, "community", uid)
+        assert row["enrichment_status"] == "pending" and row["meeting_info"] is None
+        assert row["description"].startswith("Service above self")
+        # the next run reads the site again and gets the meeting info
+        llm = _reply({"meeting_info": [
+            "We meet every Thursday at 12:15 pm at the Lake Tahoe Resort Hotel."]})
+        out = ee.enrich_entity(conn, "community", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched" and out.filled[0] == "meeting_info"
+        assert _row(conn, "community", uid)["enrichment_status"] == "enriched"
+
+    def test_meeting_info_is_only_asked_of_communities(self, conn, web):
+        llm = _reply({"meeting_info": []})
+        uid = _entity(conn, "venue", "Lakeview Commons", website="https://city.example/lakeview")
+        ee.enrich_entity(conn, "venue", uid, "South Lake Tahoe", ee.Budget(5), llm)
+        assert not any("meeting_info" in p for p in llm.prompts)
+
+    def test_created_community_shell_gets_meeting_info(self, conn, web):
+        web["search"] = [{"url": "https://rotary.example/", "title": "Rotary Club of Tahoe"}]
+        llm = _reply({"meeting_info": [
+            "We meet every Thursday at 12:15 pm at the Lake Tahoe Resort Hotel."]})
+        r = ee.resolve_entity(conn, "community", "Rotary Club of Tahoe", EVENT, [], "Tahoe",
+                              ee.Budget(5), llm)
+        assert r.outcome == "created" and "meeting_info" in r.filled
+        assert _row(conn, "community", r.entity_uid)["meeting_info"].startswith("We meet every Thursday")
 
     def test_performer_gets_spotify_and_instagram(self, conn, web):
         uid = _entity(conn, "performer", "The Reggae Cowboys", website="https://cowboys.example/")

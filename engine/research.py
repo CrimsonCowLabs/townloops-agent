@@ -21,6 +21,7 @@ from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
+from bs4 import BeautifulSoup
 
 from engine import firecrawl_env
 from engine.log import get_logger
@@ -56,6 +57,7 @@ class ResearchResult:
     payload: dict[str, Any] = field(default_factory=dict)
     fetched_from: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    text: str = ""                             # the page's visible text
 
 
 # -------- fetch layer --------
@@ -152,6 +154,15 @@ _LDJSON_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
+
+
+def page_text(html: str) -> str:
+    """A page's visible text, one block per line."""
+    soup = BeautifulSoup(html, "lxml")
+    for tag in soup(["script", "style", "noscript", "template", "svg"]):
+        tag.decompose()
+    lines = (re.sub(r"\s+", " ", ln).strip() for ln in soup.get_text("\n").splitlines())
+    return "\n".join(ln for ln in lines if ln)
 
 
 def og_tags(html: str) -> dict[str, str]:
@@ -336,6 +347,7 @@ def research_url(url: str, *, use_firecrawl: bool = False) -> ResearchResult:
         result.notes.append("fetch failed")
         return result
     result.fetched_from.append(final_url or url)
+    result.text = page_text(html)
 
     og = og_tags(html)
     meta = meta_tags(html)

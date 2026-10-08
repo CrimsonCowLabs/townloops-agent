@@ -26,12 +26,13 @@ _WORKER = "event-enrich-entities"
 # Firecrawl searches + page reads per event; an event has ~1-4 entities and
 # each costs 1-3 lookups.
 _DEFAULT_MAX_LOOKUPS = 8
-# Codex calls to categorize entities the keyword map can't place — capped, and
-# none started that could end past _CLASSIFY_DEADLINE_S into the run, so the
-# skill stays inside the orchestrator's 120s subprocess timeout.
-_MAX_CLASSIFY_CALLS = 2
-_CLASSIFY_TIMEOUT_S = 30
-_CLASSIFY_DEADLINE_S = 100
+# Codex calls — a community's site read for its meeting info, and categorizing
+# entities the keyword map can't place — capped, and none started that could
+# end past _LLM_DEADLINE_S into the run, so the skill stays inside the
+# orchestrator's 120s subprocess timeout.
+_MAX_LLM_CALLS = 3
+_LLM_TIMEOUT_S = 30
+_LLM_DEADLINE_S = 100
 
 
 def main() -> int:
@@ -54,8 +55,7 @@ def main() -> int:
     except ValueError:
         max_lookups = _DEFAULT_MAX_LOOKUPS
     budget = entity_enrich.Budget(max_lookups)
-    llm = entity_classify.codex_llm(_MAX_CLASSIFY_CALLS, _CLASSIFY_TIMEOUT_S,
-                                    started + _CLASSIFY_DEADLINE_S)
+    llm = entity_classify.codex_llm(_MAX_LLM_CALLS, _LLM_TIMEOUT_S, started + _LLM_DEADLINE_S)
     town = town_name()
     notes = []
     try:

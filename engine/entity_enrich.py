@@ -11,11 +11,18 @@ LIVE_IMAGE_RETRY_DAYS. A lookup the budget cut short leaves the entity
 `pending` for the next run. Researched values are verbatim from
 the page (no synthesized copy) and are validated against
 `entity_payload.schema.json` before they touch a row.
+
+Fields with no structured source (a community's `meeting_info`) are picked
+from the site's text by one LLM call (engine.page_extract): only sentences
+found on the page survive. A failed or throttled call defers the entity —
+the site's other fields are filled, but its status stays as it was, so a
+later run reads it again (it was not looked at, so it is not `not-found`).
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -23,7 +30,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
-from engine import entity_classify
+from engine import entity_classify, page_extract
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity,
     names_match, normalize_name,
@@ -58,6 +65,27 @@ SPECS: dict[str, KindSpec] = {
     "creator": KindSpec("creators",
                         ("bio", "website", "youtube_url", "image_path", "image_alt",
                          "instagram", "facebook", "tiktok", "twitter", "linkedin")),
+}
+
+# When a quote is about meeting: a day, a frequency, a clock time, or the
+# meeting itself ("Meetings are held in room 102").
+_MEETING_TERMS = re.compile(
+    r"\bmeet(?:s|ing|ings)?\b|\bgathers?\b"
+    r"|\b(?:mon|tues?|wed(?:nes)?|thu(?:rs?)?|fri|sat(?:ur)?|sun)(?:day)?s?\b"
+    r"|\b(?:daily|weekly|bi-?weekly|monthly|bi-?monthly|quarterly|annually)\b"
+    r"|\b(?:every|each)\s+(?:other\s+)?(?:day|week|month|year|morning|evening)\b"
+    r"|\b\d{1,2}(?::\d{2})?\s*(?:a\.?m\b\.?|p\.?m\b\.?)|\b\d{1,2}:\d{2}\b|\bnoon\b",
+    re.IGNORECASE,
+)
+MEETING_INFO = page_extract.FieldSpec(
+    hint=("when and where this group regularly meets (day or frequency, time, "
+          "place) — its own meetings, not one-off events or office hours"),
+    keep=lambda quote: bool(_MEETING_TERMS.search(quote)),
+    max_chars=1000,
+)
+# Per kind: fields read from the site's text by the LLM (fill-blanks only).
+PAGE_FIELDS: dict[str, dict[str, page_extract.FieldSpec]] = {
+    "community": {"meeting_info": MEETING_INFO},
 }
 
 # Kinds resolve_entity() can resolve by name from an event.
@@ -132,10 +160,14 @@ def fetch_plan(url: str) -> list[str]:
 class Lookup:
     payload: dict = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    text: str = ""              # the visible text of the pages read
     # The entity's site wasn't read — budget ran out, search errored or the
     # page couldn't be fetched — so an empty payload means "not looked at",
     # not "not found".
     exhausted: bool = False
+    # The site was read but the LLM call for its PAGE_FIELDS failed: the
+    # payload is good, the entity is still to be looked at again.
+    page_deferred: bool = False
 
 
 def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
@@ -153,6 +185,7 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
             return Lookup()
     raw: dict = {}
     fetched: list[str] = []
+    texts: list[str] = []
     for page in fetch_plan(url):
         if not budget.take():
             if not fetched:
@@ -160,6 +193,8 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
             break
         res = research.research_url(page, use_firecrawl=True)
         fetched.extend(res.fetched_from)
+        if getattr(res, "text", ""):
+            texts.append(res.text)
         for k, v in res.payload.items():
             if v:
                 raw.setdefault(k, v)
@@ -173,13 +208,46 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
         raw.setdefault("facebook", url)
         del raw["website"]
     payload, errors = validate_payload(kind or "venue", raw)
+    text = "\n\n".join(texts)
     if kind is None:
-        return Lookup({k: v for k, v in payload.items() if k in ENRICH_FIELDS}, errors)
+        return Lookup({k: v for k, v in payload.items() if k in ENRICH_FIELDS}, errors, text=text)
     if kind == "creator":
         for src, dst in (("description", "bio"), ("youtube", "youtube_url")):
             if src in payload:
                 payload.setdefault(dst, payload.pop(src))
-    return Lookup({k: v for k, v in payload.items() if k in SPECS[kind].fillable}, errors)
+    return Lookup({k: v for k, v in payload.items() if k in SPECS[kind].fillable}, errors,
+                  text=text)
+
+
+def _research(row: dict, kind: str, town: str, budget: Budget,
+              llm: Optional[entity_classify.LLM]) -> Lookup:
+    """Look the entity up, then have `llm` read its PAGE_FIELDS that are
+    still blank on `row` from the site's text. An LLM call that failed or
+    was throttled marks the lookup `page_deferred`. With no `llm`,
+    PAGE_FIELDS are not read."""
+    found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind)
+    wanted = {k: h for k, h in PAGE_FIELDS.get(kind, {}).items() if not row.get(k)}
+    if found.exhausted or not wanted or not found.text or llm is None:
+        return found
+    values = page_extract.extract(found.text, wanted, llm, subject=row["name"])
+    if values is None:
+        found.errors.append(f"LLM unavailable for {', '.join(wanted)}")
+        found.page_deferred = True
+        return found
+    read, errors = validate_payload(kind, {k: v for k, v in values.items() if v})
+    found.payload.update(read)
+    found.errors.extend(errors)
+    return found
+
+
+def _fill_researched(conn: sqlite3.Connection, kind: str, row: dict, found: Lookup) -> list[str]:
+    """Fill blanks from a lookup that read the site. A `page_deferred` one
+    keeps the row's status so a later run reads the site again."""
+    if found.page_deferred:
+        status = row.get("enrichment_status") or "pending"
+    else:
+        status = "enriched" if found.payload else "not-found"
+    return fill_blanks(conn, kind, row["entity_uid"], found.payload, status)
 
 
 def research_entity(name: str, website: Optional[str], town: str, budget: Budget,
@@ -232,13 +300,14 @@ def enrich_entity(conn: sqlite3.Connection, kind: str, entity_uid: str, town: st
       classified;
     - deferred: the entity's site wasn't read (budget ran out, search
       errored, page unreadable) — status stays as it was, so a later run
-      can retry;
+      can retry; or it was read but the LLM call for its PAGE_FIELDS
+      failed — the other fields are filled, the status still stays;
     - not-found: no plausible site found — recorded as the row's status;
     - enriched: the site was read; blank fields filled.
 
     Once researched, a blank category is classified from the town's
     vocabulary (engine.entity_classify; `llm` is the fallback for names the
-    keyword map can't place).
+    keyword map can't place). `llm` also reads the kind's PAGE_FIELDS.
     """
     row = conn.execute(f"SELECT * FROM {SPECS[kind].table} WHERE entity_uid = ?",
                        (entity_uid,)).fetchone()
@@ -253,11 +322,13 @@ def enrich_entity(conn: sqlite3.Connection, kind: str, entity_uid: str, town: st
         if entity_classify.classify_entity(conn, kind, entity_uid, llm):
             return EnrichOutcome("skipped", ["category_slug"])
         return EnrichOutcome("skipped")
-    found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind)
+    found = _research(row, kind, town, budget, llm)
     if found.exhausted:
         return EnrichOutcome("deferred", errors=found.errors)
+    filled = _fill_researched(conn, kind, row, found)
+    if found.page_deferred:
+        return EnrichOutcome("deferred", filled, found.errors)
     status = "enriched" if found.payload else "not-found"
-    filled = fill_blanks(conn, kind, entity_uid, found.payload, status)
     if entity_classify.classify_entity(conn, kind, entity_uid, llm):
         filled.append("category_slug")
     return EnrichOutcome(status, filled, found.errors)
@@ -365,20 +436,23 @@ def _propose_live_image(conn: sqlite3.Connection, kind: str, mirror: dict, town:
     return filled, {"kind": kind, "slug": mirror["townloops_slug"], "image_path": image["image_path"]}
 
 
-def _research_local(conn: sqlite3.Connection, kind: str, entity_uid: str, name: str,
-                    website: Optional[str], town: str, budget: Budget) -> list[str]:
+def _research_local(conn: sqlite3.Connection, kind: str, entity_uid: str, town: str,
+                    budget: Budget, llm: Optional[entity_classify.LLM]) -> list[str]:
     """Research a local (non-mirror) entity and fill its blanks. Only a
     lookup that actually ran records `enriched`/`not-found`; one the budget
-    cut short leaves the status (`pending`) for the next run."""
-    found = _lookup(name, website, town, budget, kind)
+    (or a failed LLM call) cut short leaves the status (`pending`) for the
+    next run."""
+    row = dict(conn.execute(f"SELECT * FROM {SPECS[kind].table} WHERE entity_uid = ?",
+                            (entity_uid,)).fetchone())
+    found = _research(row, kind, town, budget, llm)
     if found.exhausted:
         return []
-    return fill_blanks(conn, kind, entity_uid, found.payload,
-                       "enriched" if found.payload else "not-found")
+    return _fill_researched(conn, kind, row, found)
 
 
 def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
-                   live_rows: list[dict], town: str, budget: Budget) -> Resolution:
+                   live_rows: list[dict], town: str, budget: Budget,
+                   llm: Optional[entity_classify.LLM] = None) -> Resolution:
     """Resolve `name` (a `kind` named on `event`) to a local entity_uid:
 
     - local match → researched once if it has no image (a live mirror only
@@ -386,6 +460,8 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     - live match (from `live_rows`) → mirrored locally; if the live row has
       no image, one found on its site is staged as a proposal;
     - otherwise → a new derived shell, enriched from a site search.
+
+    `llm` reads the kind's PAGE_FIELDS when a local row is researched.
     """
     table = TABLES[kind]
     local_rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
@@ -396,8 +472,7 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
             return Resolution(hit["entity_uid"], "local", filled, proposal)
         filled = []
         if not hit.get("image_path") and hit.get("enrichment_status") not in DONE_STATUSES:
-            filled = _research_local(conn, kind, hit["entity_uid"], hit["name"],
-                                     hit.get("website"), town, budget)
+            filled = _research_local(conn, kind, hit["entity_uid"], town, budget, llm)
         return Resolution(hit["entity_uid"], "local", filled)
 
     live_hit = best_name_match(name, live_rows)
@@ -420,7 +495,7 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     if kind == "community":
         fields["kind"] = "group"
     insert_entity(conn, table, entity_uid, fields)
-    filled = _research_local(conn, kind, entity_uid, name, None, town, budget)
+    filled = _research_local(conn, kind, entity_uid, town, budget, llm)
     status = conn.execute(f"SELECT enrichment_status FROM {table} WHERE entity_uid = ?",
                           (entity_uid,)).fetchone()[0]
     return Resolution(entity_uid, "created", filled, status=status)
