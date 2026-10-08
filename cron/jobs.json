@@ -17,7 +17,7 @@
       "skills": ["event-find"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-find/find.py"
+      "prompt": "python /home/agent/.hermes/scripts/event_find.py"
     },
     {
       "id": "event-find-pm",
@@ -26,7 +26,7 @@
       "skills": ["event-find"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-find/find.py"
+      "prompt": "python /home/agent/.hermes/scripts/event_find.py"
     },
     {
       "id": "event-cancellations-apply",

@@ -22,6 +22,12 @@ find.py --limit N             # cap seeds this run
 find.py --dry-run             # scrape + extract, print without insert
 ```
 
+The cron wrapper (`scripts/event_find.py`) detaches the run because a multi-seed
+pass is longer than Hermes' 120s cron script timeout. Log:
+`state/logs/event-find-<date>.log`; the summary (or `run-failed`) also lands in the
+dashboard's live activity. A flock (`event-find`) keeps runs from overlapping — a
+second run while one is going exits 0 and records `skipped-overlap`.
+
 ## Current generic per-seed loop
 
 1. Firecrawl-scrape the seed URL as markdown.

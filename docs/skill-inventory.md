@@ -107,7 +107,7 @@ them when `SPONSORS_ENABLED=true`.
 | Job | Schedule | What it runs |
 |---|---|---|
 | `workqueue-heartbeat` | `*/10 * * * *` | `orchestrator.drain_workqueue()` — the per-event derive/enrich/ship transitions. |
-| `event-find-am` / `event-find-pm` | `0 6,18 * * *` | `event-find/find.py` over every approved seed. |
+| `event-find-am` / `event-find-pm` | `0 6,18 * * *` | `scripts/event_find.py` → `event-find/find.py` over every approved seed, detached (outlasts Hermes' 120s script timeout; flock-guarded, log in `state/logs/event-find-<date>.log`). |
 | `event-seed-discovery-weekly` | `0 4 * * 0` | `event-seed-discovery/discover.py discover --limit 15`. |
 | `api-check` | `15 4 * * *` | `townloops-api/api.py check`. |
 | `nightly-digest` | `0 21 * * *` | `orchestrator.summary(hours=24)` → report + Telegram. |
@@ -115,7 +115,7 @@ them when `SPONSORS_ENABLED=true`.
 | `newsletter-push-reminder` | `0 20 * * 0` | LLM job (Telegram): nudge operator to push. |
 | `sponsor-audit` | `0 10 * * 1` | LLM job (Telegram): placement/expiry audit. |
 
-The engine-level jobs (`workqueue-heartbeat`, `nightly-digest`) run the cron
+The engine-level jobs (`workqueue-heartbeat`, `nightly-digest`, `event-find-am/pm`) run the cron
 wrappers under `scripts/`, mounted at `/home/agent/.hermes/scripts` in both the
 root and per-town composes (`PYTHONPATH=/app`, so their `from engine import ...`
 resolves). Those same wrappers (`workqueue_heartbeat.py`, `onboarding_summary.py`,

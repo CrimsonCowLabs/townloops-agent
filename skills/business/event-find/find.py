@@ -16,6 +16,7 @@ from typing import Optional
 import yaml
 
 from engine import event_cancel, event_dedup, inspection, source_health
+from engine import lock as _lock
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
     build_extraction_prompt as _build_extraction_prompt,
     codex_exec as _codex_exec,
@@ -80,8 +81,17 @@ def _telegram(text: str) -> None:
 
 
 def cmd_find(args) -> int:
-    profile = _load_town_profile()
+    # Closed on any exit: a crash mid-write must roll back here, not hold the
+    # DB lock while main() records the failure for the dashboard.
     conn = sqlite3.connect(_DB_PATH)
+    try:
+        return _find(conn, args)
+    finally:
+        conn.close()
+
+
+def _find(conn: sqlite3.Connection, args) -> int:
+    profile = _load_town_profile()
     seeds = _seed_selection(conn, args.seed_id, args.limit)
     if not seeds:
         print(json.dumps({"error": "no approved seeds to scrape",
@@ -245,7 +255,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="scrape + LLM without DB insert")
     p.set_defaults(func=cmd_find)
     args = p.parse_args(argv)
-    return args.func(args)
+    # The cron wrapper detaches this run, so a slow pass can still be going
+    # when the next fires (or the operator kicks one off) — one at a time.
+    try:
+        with _lock.acquire("event-find"):
+            try:
+                return args.func(args)
+            except Exception as e:
+                inspection.record(worker="event-find", action="run-failed", target="find",
+                                  ok=False, error=f"{type(e).__name__}: {e}")
+                raise
+    except _lock.LockHeld as e:
+        print(json.dumps({"skipped": f"previous run still active: {e}"}))
+        inspection.record(worker="event-find", action="skipped-overlap", target="find",
+                          detail=f"previous run still active ({e.holder})")
+        return 0
 
 
 if __name__ == "__main__":
