@@ -23,8 +23,8 @@ The repo was rewritten from an **entity-first phase machine** (bootstrapping →
   (now a workqueue drainer), the `event-find` / `event-seed-discovery` / `event-derive-*` /
   `event-enrich-entities` / `event-ship` skills, `operator-*` skills, and the dashboard `/v2` views
   (`dashboard/db_v2.py`, `dashboard/templates/v2/`).
-- **Stale / partially superseded docs**: `README.md`, `SOUL.md` §Mission/Rhythm/Toolset, and
-  `docs/skill-inventory.md` still describe the old entity-first skill names (`event-source-discovery`,
+- **Stale / partially superseded docs**: `README.md` and `docs/skill-inventory.md` still describe
+  the old entity-first skill names (`event-source-discovery`,
   `venue-enrichment`, `onboarding-orchestrator` phase machine). (`business-discovery` exists again, rebuilt
   on the current engine — see Gotchas.) `docs/STATUS.md`
   is a cold-start hand-off dated 2026-07-10 and predates the rewrite. **Verify against the actual
@@ -87,6 +87,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
     alert, held until it recovers or the operator accepts the new level).
+    `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
+    skill: days with no live event, local events not live yet, sparse live metadata, venues of
+    upcoming events with no image; LIST/GET only).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -175,6 +178,11 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Firecrawl is always the local instance, never cloud.** Every Firecrawl call resolves its endpoint through
   `engine/firecrawl_env.base_url()` (`TOWNLOOPS_FIRECRAWL_URL` → `FIRECRAWL_API_URL`); unset, or a
   `firecrawl.dev` URL, raises `FirecrawlNotConfigured`. Don't add a cloud default or a second endpoint resolver.
+- **Agent judgement lives in `SOUL.md` §Judgement + skill `references/`.** The CMO's hard-won rules
+  (business vs venue vs community, recurring series, vague venues/off-town URLs → review, venue images,
+  duplicates as operator proposals, source tricks, "say whether live, local or both changed") are
+  distilled there. Add new lessons to the matching skill's `references/` and a one-line rule in SOUL.md;
+  don't copy town-specific CMO notes wholesale.
 - **Codex CLI is best-effort.** If the CLI is missing/throttled, LLM (classifier, event-find extraction)
   calls no-op and retry on the next tick — don't treat a single throttle as a bug.
 - **Business discovery is in-repo** (`skills/business/business-discovery/`, ported from the CMO's

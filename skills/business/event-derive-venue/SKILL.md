@@ -59,3 +59,9 @@ share the pre-existing row (the normalize lookup runs first).
   event-find to include enough context in `venue_raw` (usually town
   is embedded in the source seed's URL and gets folded into the LLM's
   extraction).
+
+## References
+
+- `../event-derive-hosts/references/entity-classification.md` — a live business does not bind as a venue; rooms inside a property are venues, not businesses.
+- `../operator-audit-upcoming/references/upcoming-audit-playbook.md` §Null or vague venues — truncated or ambiguous venue clues go to review, never a guessed binding.
+- `references/duplicate-entities.md` — a duplicate live venue is evidence for the operator (events by slug *and* id, local references), never a delete.

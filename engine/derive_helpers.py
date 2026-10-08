@@ -47,6 +47,23 @@ def iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def parse_instant(value) -> Optional[datetime]:
+    """An ISO timestamp with an offset (or `Z`) as an aware datetime; None for
+    blank, unparseable or naive values."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else None
+
+
+def utc_z(dt: datetime) -> str:
+    """An aware datetime as the API's `YYYY-MM-DDTHH:MM:SSZ`."""
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def load_town_profile() -> dict:
     """town-profile.yaml ($TOWN_PROFILE_PATH, else $HERMES_HOME), or {} when
     missing/unreadable."""

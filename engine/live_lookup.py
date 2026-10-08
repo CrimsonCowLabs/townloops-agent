@@ -16,8 +16,10 @@ See CMO ref `staged-events-already-live-and-duplicate-checks.md`.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Optional
+
+from engine.derive_helpers import parse_instant as _instant, utc_z as _utc_z
 
 
 _WINDOW = timedelta(hours=12)
@@ -91,17 +93,3 @@ def _events_between(client, lo: datetime, hi: datetime, page: int = 200):
 
 def _norm_url(url: Optional[str]) -> str:
     return (url or "").strip().rstrip("/")
-
-
-def _instant(value) -> Optional[datetime]:
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else None
-
-
-def _utc_z(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

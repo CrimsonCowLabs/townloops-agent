@@ -92,3 +92,5 @@ Rerunning a seed deduplicates on `event_uid`; already approved events are not cl
 ## References
 
 - `references/manual-source-automation-review.md` — reusable audit checklist, adapter-selection hierarchy, failure semantics, and the 2026 South Lake Tahoe manual-seed findings.
+- `references/source-tricks.md` — Wix-wrapped Google Calendar, Tribe paging, EventCalendarApp, POINT, regional-feed filtering, short links, Facebook login walls.
+- `../operator-audit-upcoming/references/upcoming-audit-playbook.md` §Off-town or redirecting source_url, §Null or vague venues — extracted events whose source resolves out of town, or whose venue is a fragment, go to operator review.

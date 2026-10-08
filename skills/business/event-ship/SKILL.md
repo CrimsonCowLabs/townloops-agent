@@ -121,3 +121,7 @@ When the town is finally registered on TownLoops, an operator-triggered
   date is marked `status='superseded'` and loses its `townloops_slug`.
 - Linked entities with `source_kind='live'` are local mirrors of TownLoops rows;
   ship returns their `townloops_slug` without POSTing.
+
+## References
+
+- `references/recurring-series.md` — copying shared enrichment across a recurring series without touching per-occurrence fields; idempotent title prefixes.

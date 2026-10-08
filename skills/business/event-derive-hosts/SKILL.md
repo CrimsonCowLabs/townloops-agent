@@ -29,3 +29,7 @@ derive.py --event-uid <uid>
 ```
 
 Exit 0 always (NULL host is legit). Non-zero only on DB errors.
+
+## References
+
+- `references/entity-classification.md` — business vs venue vs community: organizer vs the series it runs, rooms inside a larger property, when a place is both.

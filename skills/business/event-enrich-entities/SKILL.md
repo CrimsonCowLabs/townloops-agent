@@ -79,3 +79,8 @@ enrich.py --event-uid <uid>
 Never writes to TownLoops. Getting enrichment of already-shipped entities
 live is the PATCH path's job (issue 09); new entities ship enriched with the
 event.
+
+## References
+
+- `../event-derive-hosts/references/entity-classification.md` — business vs venue vs community.
+- `../operator-audit-upcoming/references/upcoming-audit-playbook.md` §Venue images, §Off-town or redirecting source_url — image source order and rejects; never enrich from a page that resolves to another town or event.
