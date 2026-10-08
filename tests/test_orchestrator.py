@@ -75,6 +75,19 @@ class TestDrainWorkqueue:
         ).fetchone()[0]
         assert unresolved == 0                         # nothing left pending
 
+    def test_drain_brings_a_db_behind_the_repo_up_to_date(self, tmp_state_dir, monkeypatch):
+        # Issue 25: the heartbeat runs repo code on every town, so it migrates
+        # first — a pulled-but-unmigrated DB must not crash the drain.
+        from engine import db as db_mod
+        conn = db_mod.connect(str(tmp_state_dir / "behind.db"))
+        monkeypatch.setattr(orchestrator, "_invoke_skill",
+                            lambda *a, **k: (0, "ok", ""))
+
+        summary = orchestrator.drain_workqueue(conn)
+
+        assert not summary.get("error")
+        assert db_mod.run_migrations(conn) == []
+
     def test_drain_reaps_stale_claims_first(self, fresh_db, monkeypatch):
         _insert_event(fresh_db, "e2", state="approved")
         workqueue.enqueue(fresh_db, "e2", "extract-venue")

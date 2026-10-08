@@ -163,3 +163,74 @@ class TestMigrationAtomicity:
         assert conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='good_table'"
         ).fetchone() is not None
+
+
+class TestConcurrentMigrations:
+    """Every cron entry point migrates (issue 25), so two jobs firing together
+    race on the same pending files."""
+
+    def test_racing_runners_each_succeed_and_record_files_once(self, tmp_path):
+        import threading
+        from engine import db as db_mod
+        path = str(tmp_path / "race.db")
+        db_mod.connect(path).close()   # create the WAL DB before the race
+        errors: list[BaseException] = []
+        start = threading.Barrier(4)
+
+        def runner():
+            conn = db_mod.connect(path)
+            try:
+                start.wait()
+                db_mod.run_migrations(conn)
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+            finally:
+                conn.close()
+
+        threads = [threading.Thread(target=runner) for _ in range(4)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []
+        conn = db_mod.connect(path)
+        rows = [r["filename"] for r in conn.execute("SELECT filename FROM schema_version")]
+        assert sorted(rows) == sorted(p.name for p in db_mod.MIGRATIONS_DIR.glob("*.sql"))
+
+    def test_file_applied_by_another_process_is_skipped(self, tmp_path):
+        from engine import db as db_mod
+        path = str(tmp_path / "test.db")
+        first, second = db_mod.connect(path), db_mod.connect(path)
+        db_mod.run_migrations(first)
+        good = tmp_path / "999_good.sql"
+        good.write_text("CREATE TABLE good_table (x INT);\n")
+        assert db_mod._apply_one_migration(first, good) is True
+        # `second` read schema_version before `first` applied the file.
+        assert db_mod._apply_one_migration(second, good) is False
+
+
+class TestMigrate:
+    def test_resolves_db_path_at_call_time(self, tmp_path, monkeypatch):
+        from engine import db as db_mod
+        target = tmp_path / "later.db"
+        monkeypatch.setenv("TOWNLOOPS_DB_PATH", str(target))
+
+        applied = db_mod.migrate()
+
+        assert applied and applied[0].startswith("001_")
+        conn = sqlite3.connect(target)
+        assert conn.execute("SELECT COUNT(*) FROM schema_version").fetchone()[0] == len(applied)
+
+    def test_falls_back_to_hermes_home(self, tmp_path, monkeypatch):
+        from engine import db as db_mod
+        monkeypatch.delenv("TOWNLOOPS_DB_PATH", raising=False)
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        db_mod.migrate()
+        assert (tmp_path / "state" / "townloops.db").exists()
+
+    def test_second_call_applies_nothing(self, tmp_path, monkeypatch):
+        from engine import db as db_mod
+        monkeypatch.setenv("TOWNLOOPS_DB_PATH", str(tmp_path / "t.db"))
+        db_mod.migrate()
+        assert db_mod.migrate() == []

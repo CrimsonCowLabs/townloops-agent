@@ -108,6 +108,9 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
     invoke the skill, mark complete or failed. Returns a summary dict."""
     conn = conn or _db.connect()
     conn.row_factory = sqlite3.Row
+    # Every town runs this heartbeat on repo code, so it keeps the schema in
+    # step with it: a pull no longer needs a manual `town-init setup`.
+    _db.run_migrations(conn)
     town = os.environ.get("TOWNLOOPS_TOWN_SLUG", "?")
 
     try:

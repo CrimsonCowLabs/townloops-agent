@@ -20,6 +20,8 @@ from datetime import date
 from pathlib import Path
 from typing import Optional
 
+from engine import db
+
 SKILL = Path("/home/agent/.hermes/skills/business/event-reconcile/reconcile.py")
 
 
@@ -77,6 +79,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     if not SKILL.exists():
         print(f"skill missing: {SKILL}", file=sys.stderr)
         return 1
+    db.migrate()  # a code update must not meet an older schema
     log_dir = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     log = log_dir / f"event-reconcile-{date.today().isoformat()}.log"

@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+from engine import db
+
 SKILL = Path("/home/agent/.hermes/skills/business/event-seed-discovery/discover.py")
 
 
@@ -14,6 +16,7 @@ def main() -> int:
     if not SKILL.exists():
         print(f"skill missing: {SKILL}", file=sys.stderr)
         return 1
+    db.migrate()  # a code update must not meet an older schema
     # exec under $PYTHON, not in-process: Hermes runs cron scripts with the
     # gateway venv's interpreter, which lacks the skill deps (feedparser etc.)
     # in the docker image. Same convention as engine.orchestrator._PYTHON.

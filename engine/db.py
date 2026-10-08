@@ -13,11 +13,12 @@ from pathlib import Path
 # event-source-discovery, newsletter-weekly). db.py used to hardcode
 # /home/agent/.hermes/... which broke bare-systemd deploys where the agent
 # home isn't `/home/agent/`. Fixed 2026-07-08 to match the pattern.
-_HERMES_HOME = os.environ.get("HERMES_HOME", "/home/agent/.hermes")
-DEFAULT_DB_PATH = os.environ.get(
-    "TOWNLOOPS_DB_PATH",
-    os.path.join(_HERMES_HOME, "state", "townloops.db"),
-)
+def _db_path_from_env() -> str:
+    return os.environ.get("TOWNLOOPS_DB_PATH") or os.path.join(
+        os.environ.get("HERMES_HOME", "/home/agent/.hermes"), "state", "townloops.db")
+
+
+DEFAULT_DB_PATH = _db_path_from_env()
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
@@ -69,18 +70,27 @@ def _split_sql(text: str) -> list[str]:
     return stmts
 
 
-def _apply_one_migration(conn: sqlite3.Connection, path: Path) -> None:
+def _apply_one_migration(conn: sqlite3.Connection, path: Path) -> bool:
     """Run one migration + record schema_version in a single transaction.
+    Returns False when another process recorded it first.
 
     On failure, rolls back — schema is unchanged AND schema_version is NOT
-    written, so the next boot retries the same migration cleanly.
+    written, so the next run retries the same migration cleanly.
 
     executescript() would auto-commit before running, defeating atomicity;
     we split statements ourselves and drive BEGIN/COMMIT manually.
+    BEGIN IMMEDIATE takes the write lock up front (waiting out the connect
+    timeout), so two cron jobs migrating at once apply each file once: the
+    loser re-checks schema_version under the lock and skips.
     """
     stmts = _split_sql(path.read_text())
-    conn.execute("BEGIN")
+    conn.execute("BEGIN IMMEDIATE")
     try:
+        if conn.execute(
+            "SELECT 1 FROM schema_version WHERE filename = ?", (path.name,)
+        ).fetchone():
+            conn.execute("ROLLBACK")
+            return False
         for stmt in stmts:
             conn.execute(stmt)
         conn.execute(
@@ -95,6 +105,7 @@ def _apply_one_migration(conn: sqlite3.Connection, path: Path) -> None:
             # Already rolled back / no active txn — safe to ignore.
             pass
         raise
+    return True
 
 
 def run_migrations(conn: sqlite3.Connection) -> list[str]:
@@ -121,6 +132,20 @@ def run_migrations(conn: sqlite3.Connection) -> list[str]:
     for path in sorted(MIGRATIONS_DIR.glob("*.sql")):
         if path.name in applied:
             continue
-        _apply_one_migration(conn, path)
-        new_files.append(path.name)
+        if _apply_one_migration(conn, path):
+            new_files.append(path.name)
     return new_files
+
+
+def migrate(path: str | None = None) -> list[str]:
+    """Bring the town DB up to the repo's migrations; returns files applied.
+
+    Cron entry points call this first, so a code update never runs against
+    an older schema. The path is resolved now, not at import, so it follows
+    the caller's TOWNLOOPS_DB_PATH / HERMES_HOME.
+    """
+    conn = connect(path or _db_path_from_env())
+    try:
+        return run_migrations(conn)
+    finally:
+        conn.close()
