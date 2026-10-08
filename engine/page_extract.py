@@ -6,7 +6,8 @@ copied from the page, and a sentence is kept only if it is on the page
 field's own relevance check. The kept sentences, in page order, are the
 value — page wording, never synthesized copy. Nothing survives → None.
 
-Used by entity enrichment (a community's `meeting_info`) and by the event
+Used by entity enrichment (a community's `meeting_info`, a venue's
+`accessibility_notes`) and by the event
 detail read (`accessibility_notes`, engine/event_detail).
 """
 

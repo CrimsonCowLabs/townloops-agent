@@ -12,9 +12,12 @@ LIVE_IMAGE_RETRY_DAYS. A lookup the budget cut short leaves the entity
 the page (no synthesized copy) and are validated against
 `entity_payload.schema.json` before they touch a row.
 
-Fields with no structured source (a community's `meeting_info`) are picked
-from the site's text by one LLM call (engine.page_extract): only sentences
-found on the page survive. A failed or throttled call defers the entity —
+Fields with no structured source (a community's `meeting_info`, a venue's
+`accessibility_notes`) are picked from the site's text by one LLM call
+(engine.page_extract): only sentences found on the page survive. Venue sites
+often keep access info off the homepage, so a venue's read also takes the
+site's own accessibility (else visit, else FAQ) page when the homepage links
+one and the budget allows. A failed or throttled call defers the entity —
 the site's other fields are filled, but its status stays as it was, so a
 later run reads it again (it was not looked at, so it is not `not-found`).
 """
@@ -83,9 +86,44 @@ MEETING_INFO = page_extract.FieldSpec(
     keep=lambda quote: bool(_MEETING_TERMS.search(quote)),
     max_chars=1000,
 )
+# When a quote is about physical access at a venue. Stricter than an event
+# page's check (engine/event_detail): a bare "ADA compliant", "people with
+# disabilities" or a website-accessibility statement — site-footer
+# boilerplate — names no access feature. No bare "lift" (ski lifts).
+_VENUE_ACCESS_TERMS = re.compile(
+    r"wheel\s?chair|step[- ]free|\bramps?\b|level[- ](?:entry|entrance|access)"
+    r"|\bno (?:stairs|steps)\b|elevator|hearing[- ]loop|induction[- ]loop"
+    r"|assist(?:ed|ive)[- ]listening|\bASL\b|sign[- ]language|caption|audio[- ]descri"
+    r"|braille|large[- ]print|sensory|quiet[- ](?:room|space|area)|service[- ](?:animal|dog)"
+    r"|companion[- ]seat|grab[- ]bars?"
+    r"|accessible[- ](?:seat|parking|entr|restroom|bathroom|toilet|route|viewing|space|stall"
+    r"|room|path)"
+    r"|(?:ADA|handicap(?:ped)?|disabled|disability)[- ](?:parking|seat|restroom|bathroom"
+    r"|toilet|stall|entr|space|ramp)",
+    re.IGNORECASE,
+)
+_WEB_ACCESS = re.compile(
+    r"\bweb\s?sites?\b|digital accessib|\bWCAG\b|screen[- ]readers?|\bthis site\b",
+    re.IGNORECASE,
+)
+
+
+def _venue_access(quote: str) -> bool:
+    return bool(_VENUE_ACCESS_TERMS.search(quote)) and not _WEB_ACCESS.search(quote)
+
+
+VENUE_ACCESSIBILITY = page_extract.FieldSpec(
+    hint=("physical accessibility at this venue (step-free or ramped entry, accessible "
+          "restrooms, elevators, accessible seating or parking, hearing loops or assisted "
+          "listening, service animals) — not a website accessibility statement or a bare "
+          "\"ADA compliant\" line"),
+    keep=_venue_access,
+    max_chars=2000,
+)
 # Per kind: fields read from the site's text by the LLM (fill-blanks only).
 PAGE_FIELDS: dict[str, dict[str, page_extract.FieldSpec]] = {
     "community": {"meeting_info": MEETING_INFO},
+    "venue": {"accessibility_notes": VENUE_ACCESSIBILITY},
 }
 
 # Kinds resolve_entity() can resolve by name from an event.
@@ -156,6 +194,44 @@ def fetch_plan(url: str) -> list[str]:
     return [url]
 
 
+# On-site pages that may hold a venue's access info, best first.
+_ACCESS_LINKS = (
+    re.compile(r"accessib|\bada\b|disabilit", re.IGNORECASE),
+    re.compile(r"\bvisit(?:ing|ors?)?\b|getting here|directions", re.IGNORECASE),
+    re.compile(r"\bfaqs?\b|frequently asked", re.IGNORECASE),
+)
+_NOT_A_PAGE = re.compile(r"\.(?:pdf|docx?|jpe?g|png|gif|webp|mp4|zip)$", re.IGNORECASE)
+
+
+def _bare_host(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    return host[4:] if host.startswith("www.") else host
+
+
+def access_page(links: list[tuple[str, str]], site_url: str) -> Optional[str]:
+    """The site's own accessibility page among `links` ((url, anchor text)
+    from the page at `site_url`), else its visit page, else its FAQ; None
+    when it links none. Other sites, the page itself and files are skipped.
+    A venue whose site is a page on a larger one (a city's /lakeview) only
+    follows links under that page — the city's own FAQ is not the venue's."""
+    root = urlparse(site_url).path.rstrip("/")
+    candidates = []
+    for url, text in links:
+        p = urlparse(url.split("#")[0])
+        path = p.path.rstrip("/")
+        if (_bare_host(url) != _bare_host(site_url) or path == root
+                or (root and not path.startswith(root + "/"))
+                or _NOT_A_PAGE.search(p.path)):
+            continue
+        url = p.geturl()
+        words = f"{text} {re.sub(r'[-_/.]+', ' ', p.path)}"
+        for rank, pattern in enumerate(_ACCESS_LINKS):
+            if pattern.search(words):
+                candidates.append((rank, url))
+                break
+    return min(candidates, key=lambda c: c[0])[1] if candidates else None
+
+
 @dataclass
 class Lookup:
     payload: dict = field(default_factory=dict)
@@ -171,7 +247,10 @@ class Lookup:
 
 
 def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
-            kind: Optional[str]) -> Lookup:
+            kind: Optional[str], read_access_page: bool = False) -> Lookup:
+    """Find and read the entity's site. With `read_access_page`, the text of
+    the site's own accessibility/visit/FAQ page (access_page) is added too,
+    if the budget has a call left — it only feeds PAGE_FIELDS."""
     from engine import discovery, research
     if not url:
         if not budget.take():
@@ -186,6 +265,7 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
     raw: dict = {}
     fetched: list[str] = []
     texts: list[str] = []
+    links: list[tuple[str, str]] = []
     for page in fetch_plan(url):
         if not budget.take():
             if not fetched:
@@ -195,6 +275,8 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
         fetched.extend(res.fetched_from)
         if getattr(res, "text", ""):
             texts.append(res.text)
+        if not links:
+            links = getattr(res, "links", [])
         for k, v in res.payload.items():
             if v:
                 raw.setdefault(k, v)
@@ -202,12 +284,23 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
         # The site is known but couldn't be read (down, blocked, rate
         # limited) — that's not "not found"; leave it for a retry.
         return Lookup(errors=[f"could not read {url}"], exhausted=True)
+    unread: list[str] = []
+    if read_access_page and not _is_facebook(fetched[0]):
+        extra = access_page(links, fetched[0])
+        if extra and budget.take():
+            text = research.fetch_text(extra, use_firecrawl=True)
+            if text:
+                texts.append(text)
+            else:
+                # Not deferred: a dead link would re-read the site forever.
+                unread.append(f"could not read access page {extra}")
     raw.setdefault("website", url)
     if _is_facebook(raw["website"]):
         # A Facebook page is the entity's facebook, not its website.
         raw.setdefault("facebook", url)
         del raw["website"]
     payload, errors = validate_payload(kind or "venue", raw)
+    errors += unread
     text = "\n\n".join(texts)
     if kind is None:
         return Lookup({k: v for k, v in payload.items() if k in ENRICH_FIELDS}, errors, text=text)
@@ -225,8 +318,9 @@ def _research(row: dict, kind: str, town: str, budget: Budget,
     still blank on `row` from the site's text. An LLM call that failed or
     was throttled marks the lookup `page_deferred`. With no `llm`,
     PAGE_FIELDS are not read."""
-    found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind)
     wanted = {k: h for k, h in PAGE_FIELDS.get(kind, {}).items() if not row.get(k)}
+    found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind,
+                    read_access_page="accessibility_notes" in wanted and llm is not None)
     if found.exhausted or not wanted or not found.text or llm is None:
         return found
     values = page_extract.extract(found.text, wanted, llm, subject=row["name"])

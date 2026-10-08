@@ -58,6 +58,7 @@ class ResearchResult:
     fetched_from: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     text: str = ""                             # the page's visible text
+    links: list[tuple[str, str]] = field(default_factory=list)  # (absolute url, anchor text)
 
 
 # -------- fetch layer --------
@@ -163,6 +164,33 @@ def page_text(html: str) -> str:
         tag.decompose()
     lines = (re.sub(r"\s+", " ", ln).strip() for ln in soup.get_text("\n").splitlines())
     return "\n".join(ln for ln in lines if ln)
+
+
+def page_links(html: str, base_url: str) -> list[tuple[str, str]]:
+    """The page's http(s) links as (absolute url, anchor text), in page order."""
+    soup = BeautifulSoup(html, "lxml")
+    links = []
+    for a in soup.find_all("a", href=True):
+        url = urljoin(base_url, a["href"].strip())
+        if urlparse(url).scheme in ("http", "https"):
+            links.append((url, re.sub(r"\s+", " ", a.get_text(" ")).strip()))
+    return links
+
+
+def _fetch(url: str, use_firecrawl: bool) -> tuple[Optional[str], Optional[str], bool]:
+    """(html, final_url, used_firecrawl); html None when both fetches failed."""
+    html, final_url = fetch_html(url)
+    if not html and use_firecrawl:
+        html, final_url = firecrawl_fetch(url)
+        return html, final_url, bool(html)
+    return html, final_url, False
+
+
+def fetch_text(url: str, *, use_firecrawl: bool = False) -> Optional[str]:
+    """A page's visible text alone (no payload, no image checks), or None
+    when it couldn't be fetched."""
+    html, _, _ = _fetch(url, use_firecrawl)
+    return page_text(html) if html else None
 
 
 def og_tags(html: str) -> dict[str, str]:
@@ -338,16 +366,15 @@ def research_url(url: str, *, use_firecrawl: bool = False) -> ResearchResult:
     row rather than overwrite.
     """
     result = ResearchResult(url=url)
-    html, final_url = fetch_html(url)
-    if not html and use_firecrawl:
-        html, final_url = firecrawl_fetch(url)
-        if html:
-            result.notes.append("used firecrawl fallback")
+    html, final_url, used_firecrawl = _fetch(url, use_firecrawl)
+    if used_firecrawl:
+        result.notes.append("used firecrawl fallback")
     if not html:
         result.notes.append("fetch failed")
         return result
     result.fetched_from.append(final_url or url)
     result.text = page_text(html)
+    result.links = page_links(html, final_url or url)
 
     og = og_tags(html)
     meta = meta_tags(html)

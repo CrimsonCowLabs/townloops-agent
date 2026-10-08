@@ -70,7 +70,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     event-enrich-entities use it — new enrichment work builds on it, not on a skill script),
     `page_extract.py` (quote-checked LLM extraction from a page's text: per-field `FieldHint`, the LLM copies
     sentences, only ones on the page that pass the field's check survive, in page order; a failed call is
-    `None` = not looked at. `entity_enrich.PAGE_FIELDS` uses it for a community's `meeting_info` — a failed
+    `None` = not looked at. `entity_enrich.PAGE_FIELDS` uses it for a community's `meeting_info` and a venue's
+    `accessibility_notes` (venues also read the site's own accessibility/visit/FAQ page when the homepage links
+    one — `entity_enrich.access_page`; a bare "ADA compliant"/web-accessibility footer doesn't count) — a failed
     or throttled call defers the entity: its other site fields fill, its status stays `pending` for a re-read;
     `event_detail`'s accessibility quotes share its checks),
     `entity_classify.py` (blank `category_slug` on venues/businesses/communities ← town vocabulary:

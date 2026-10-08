@@ -26,10 +26,11 @@ _WORKER = "event-enrich-entities"
 # Firecrawl searches + page reads per event; an event has ~1-4 entities and
 # each costs 1-3 lookups.
 _DEFAULT_MAX_LOOKUPS = 8
-# Codex calls — a community's site read for its meeting info, and categorizing
-# entities the keyword map can't place — capped, and none started that could
-# end past _LLM_DEADLINE_S into the run, so the skill stays inside the
-# orchestrator's 120s subprocess timeout.
+# Codex calls — a community's or venue's site read for its meeting info or
+# accessibility notes, and categorizing entities the keyword map can't
+# place — capped, and none started that could end past _LLM_DEADLINE_S into
+# the run, so the skill stays inside the orchestrator's 120s subprocess
+# timeout.
 _MAX_LLM_CALLS = 3
 _LLM_TIMEOUT_S = 30
 _LLM_DEADLINE_S = 100

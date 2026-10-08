@@ -49,9 +49,10 @@ EXTRA_FIELDS = (
     '  "image_url":   absolute URL of an image for this specific event, if the page shows one, else null\n'
 )
 
-# Codex reads of a new community's site for its meeting info, per run. The run
-# is detached from Hermes' cron timeout, so there is no deadline; a skipped or
-# throttled read leaves the shell `pending` for event-enrich-entities.
+# Codex reads of a new community's or venue's site for its meeting info or
+# accessibility notes, per run. The run is detached from Hermes' cron
+# timeout, so there is no deadline; a skipped or throttled read leaves the
+# shell `pending` for event-enrich-entities.
 _MAX_PAGE_READS = 10
 _PAGE_READ_TIMEOUT_S = 40
 

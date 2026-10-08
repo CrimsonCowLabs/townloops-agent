@@ -34,7 +34,7 @@ def slug_for(kind: str, entity_uid: str) -> str:
 def _venue_payload(row) -> dict:
     payload = {"name": row["name"]}
     for col in ("description", "address", "website", "phone",
-                "image_alt", "category_slug"):
+                "accessibility_notes", "image_alt", "category_slug"):
         if row[col]:
             payload[col] = row[col]
     return payload

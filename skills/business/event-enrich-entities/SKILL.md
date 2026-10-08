@@ -34,6 +34,15 @@ evidence ladder.
    A failed, throttled or skipped call **defers** the community: its other
    site fields are filled but its status stays `pending`, so a later run
    reads the site again — it was not looked at, so it is not not-found.
+   **Accessibility notes** (venues with a blank `accessibility_notes`): the
+   same quote-checked read, over the homepage plus the site's own
+   accessibility page it links (else its visit page, else its FAQ; one more
+   lookup, skipped when the budget is spent). A sentence is kept only if it is
+   on a page read and names a physical access feature (step-free/ramp entry,
+   accessible restrooms/seating/parking, elevator, hearing loop, …); a bare
+   "ADA compliant" or website-accessibility footer doesn't count. None → null.
+   It ships on venue create and reaches a live venue's blank through
+   `entity_sync`. A failed call defers the venue the same way.
 5. **Validate** each value against `engine/entity_payload.schema.json`
    (strings; http(s) URLs for links; https for `image_path`). Invalid values
    are dropped — null beats wrong.
@@ -45,7 +54,8 @@ evidence ladder.
    (`state/categories.json`): a whole-word keyword map over name +
    description decides clear cases; when it finds no hint or conflicting
    hints, Codex picks from the town's slugs (any other answer is discarded).
-   At most 3 Codex calls (30s each, shared with meeting info) per event,
+   At most 3 Codex calls (30s each, shared with meeting info and venue
+   accessibility) per event,
    none started that could end past 100s into the run; a failed, throttled or skipped call leaves the
    category blank, and it is retried the next time an event links the
    entity (already-researched rows skip research but still get categorized).

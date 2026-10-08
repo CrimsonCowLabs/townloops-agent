@@ -271,6 +271,9 @@ SITES = {
     "https://janemuir.example/": "creator.html",
     "https://www.facebook.com/sierrastrings": "facebook-page.html",
     "https://www.facebook.com/sierrastrings/about/": "facebook-about.html",
+    "https://valhalla.example/": "theater.html",
+    "https://valhalla.example/accessibility": "theater-access.html",
+    "https://artscenter.example/": "boilerplate.html",
 }
 
 
@@ -511,6 +514,130 @@ class TestEnrichEntity:
         out = ee.enrich_entity(conn, "business", uid, "Tahoe", ee.Budget(1))
         assert out.status == "deferred" and web["fetched"] == []
         assert _row(conn, "business", uid)["enrichment_status"] == "pending"
+
+
+class TestVenueAccessibility:
+    QUOTES = ["The main entrance on the lake side is step-free, with a ramp from the parking lot.",
+              "A hearing loop covers the main hall; ask at the box office."]
+
+    def test_reads_the_linked_accessibility_page_and_keeps_its_quotes(self, conn, web):
+        llm = _reply({"accessibility_notes": self.QUOTES})
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/")
+        out = ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched" and "accessibility_notes" in out.filled
+        # the on-site accessibility link, not Plan Your Visit/FAQ or the
+        # ticketing site's page
+        assert web["fetched"] == ["https://valhalla.example/",
+                                  "https://valhalla.example/accessibility"]
+        row = _row(conn, "venue", uid)
+        assert row["accessibility_notes"] == " ".join(self.QUOTES)
+        assert "Accessible restrooms are on the ground floor" in llm.prompts[0]
+        # the access page's own og:description doesn't become the venue's
+        assert row["description"] == "A lakeside hall for concerts and theater."
+
+    def test_quotes_not_on_either_page_are_dropped(self, conn, web):
+        llm = _reply({"accessibility_notes": ["Wheelchair seating is in row A."]})
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/")
+        ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5), llm)
+        assert _row(conn, "venue", uid)["accessibility_notes"] is None
+
+    def test_no_accessibility_info_is_null_and_reads_only_the_homepage(self, conn, web):
+        llm = _reply({"accessibility_notes": []})
+        uid = _entity(conn, "venue", "Lakeview Commons", website="https://city.example/lakeview")
+        out = ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched"
+        assert web["fetched"] == ["https://city.example/lakeview"]
+        assert _row(conn, "venue", uid)["accessibility_notes"] is None
+        assert "accessibility_notes" in llm.prompts[0]
+
+    def test_ada_compliant_footer_boilerplate_does_not_count(self, conn, web):
+        llm = _reply({"accessibility_notes": [
+            "Tahoe Arts Center is ADA compliant.",
+            "We are committed to ensuring digital accessibility for people with disabilities."]})
+        uid = _entity(conn, "venue", "Tahoe Arts Center", website="https://artscenter.example/")
+        out = ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched"
+        assert _row(conn, "venue", uid)["accessibility_notes"] is None
+
+    def test_unreadable_access_page_is_noted_and_the_homepage_still_read(
+            self, conn, web, monkeypatch):
+        monkeypatch.delitem(SITES, "https://valhalla.example/accessibility")
+        llm = _reply({"accessibility_notes": []})
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/")
+        out = ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5), llm)
+        assert out.status == "enriched"
+        assert any("access page" in e for e in out.errors)
+        assert "The Grand Hall hosts concerts" in llm.prompts[0]
+
+    def test_keep_check_takes_features_and_skips_web_statements(self):
+        keep = ee.VENUE_ACCESSIBILITY.keep
+        assert keep("Wheelchair seating can be booked online.")
+        assert keep("ADA parking spaces are next to the box office.")
+        assert not keep("Our building is ADA compliant.")
+        assert not keep("Our website meets WCAG 2.1 for wheelchair users.")
+        assert not keep("Take the ski lift to the summit lodge.")
+
+    def test_access_page_is_skipped_when_the_budget_has_run_out(self, conn, web):
+        llm = _reply({"accessibility_notes": []})
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/")
+        out = ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(1), llm)
+        assert out.status == "enriched"
+        assert web["fetched"] == ["https://valhalla.example/"]
+
+    def test_set_notes_are_untouched_and_no_access_page_is_read(self, conn, web):
+        llm = _reply({"accessibility_notes": self.QUOTES})
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/",
+                      accessibility_notes="Operator: ramp at the side door.")
+        ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5), llm)
+        assert _row(conn, "venue", uid)["accessibility_notes"] == "Operator: ramp at the side door."
+        assert web["fetched"] == ["https://valhalla.example/"] and llm.prompts == []
+
+    def test_without_an_llm_no_access_page_is_read(self, conn, web):
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/")
+        ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5))
+        assert web["fetched"] == ["https://valhalla.example/"]
+
+    def test_notes_ship_on_venue_create_and_reach_live_via_hash(self, conn, web):
+        from engine import entity_ship, entity_sync
+        uid = _entity(conn, "venue", "Valhalla Grand Hall", website="https://valhalla.example/")
+        before = entity_sync.content_hash("venue", _row(conn, "venue", uid))
+        ee.enrich_entity(conn, "venue", uid, "Tahoe", ee.Budget(5),
+                         _reply({"accessibility_notes": self.QUOTES}))
+        row = _row(conn, "venue", uid)
+        assert entity_ship._venue_payload(row)["accessibility_notes"] == " ".join(self.QUOTES)
+        assert row["content_hash"] == entity_sync.content_hash("venue", row) != before
+
+
+class TestAccessPage:
+    SITE = "https://hall.example/"
+
+    def test_accessibility_link_beats_visit_and_faq(self):
+        links = [("https://hall.example/faq", "FAQ"), ("https://hall.example/visit", "Plan Your Visit"),
+                 ("https://hall.example/ada", "ADA Information")]
+        assert ee.access_page(links, self.SITE) == "https://hall.example/ada"
+
+    def test_visit_page_then_faq(self):
+        links = [("https://hall.example/faq", "FAQ"),
+                 ("https://www.hall.example/getting-here", "Getting Here")]
+        assert ee.access_page(links, self.SITE) == "https://www.hall.example/getting-here"
+        assert ee.access_page(links[:1], self.SITE) == "https://hall.example/faq"
+
+    def test_off_site_and_self_links_are_ignored(self):
+        links = [("https://tickets.example/accessibility", "Accessibility"),
+                 ("https://hall.example/#accessibility", "Accessibility"),
+                 ("https://hall.example/visit/accessible-parking.pdf", "Accessible parking (PDF)")]
+        assert ee.access_page(links, self.SITE) is None
+
+    def test_venue_on_a_larger_site_follows_only_links_under_its_page(self):
+        site = "https://city.example/parks/lakeview"
+        links = [("https://city.example/accessibility", "Accessibility"),
+                 ("https://city.example/faq", "FAQ"),
+                 ("https://city.example/parks/lakeview/visit", "Plan your visit")]
+        assert ee.access_page(links, site) == "https://city.example/parks/lakeview/visit"
+        assert ee.access_page(links[:2], site) is None
+
+    def test_visitor_word_in_unrelated_link_is_not_a_visit_page(self):
+        assert ee.access_page([("https://hall.example/events", "Events")], self.SITE) is None
 
 
 class TestFetchPlan:
