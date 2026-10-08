@@ -43,7 +43,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     migration in `BEGIN IMMEDIATE`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
-    new wrappers call it too, `tests/test_cron_migrate.py` enforces it). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 023).
+    new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 023).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;

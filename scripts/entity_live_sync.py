@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Cron wrapper: daily entity live sync (≤15 per run) for Hermes-profile towns.
+"""Cron wrapper: daily entity live sync (≤15 per run).
 
-Docker towns run sync.py straight from cron/jobs.json's `prompt`; a native
-profile's no_agent job can only name a script in its own scripts/ dir, and
-Hermes passes it no arguments, so the nightly limit lives here. Fifteen
+A native profile's no_agent job can only name a script in its own scripts/
+dir, and Hermes passes it no arguments, so the nightly limit lives here;
+docker towns run it from cron/jobs.json too, for the migrate. Fifteen
 entities at GET + PATCH + GET each can outlast Hermes' cron script timeout
 (default 120s), so the run is detached and this wrapper returns at once.
 Output goes to state/logs/entity-live-sync-<date>.log; per-entity outcomes

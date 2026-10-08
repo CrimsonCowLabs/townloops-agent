@@ -110,7 +110,7 @@ them when `SPONSORS_ENABLED=true`.
 |---|---|---|
 | `workqueue-heartbeat` | `*/10 * * * *` | `orchestrator.drain_workqueue()` — the per-event derive/enrich/ship transitions. |
 | `event-find-am` / `event-find-pm` | `0 6,18 * * *` | `scripts/event_find.py` → `event-find/find.py` over every approved seed, detached (outlasts Hermes' 120s script timeout; flock-guarded, log in `state/logs/event-find-<date>.log`). |
-| `event-seed-discovery-weekly` | `0 4 * * 0` | `event-seed-discovery/discover.py discover --limit 15`. |
+| `event-seed-discovery-weekly` | `0 4 * * 0` | `scripts/event_seed_discovery.py` → `discover.py discover --limit 15`. |
 | `api-check` | `15 4 * * *` | `townloops-api/api.py check`. |
 | `nightly-digest` | `0 21 * * *` | `orchestrator.summary(hours=24)` → report + Telegram. |
 | `newsletter-compose` | `0 8 * * 0` | LLM job (Telegram): compose next week's draft. |

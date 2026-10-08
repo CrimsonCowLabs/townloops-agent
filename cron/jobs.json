@@ -35,7 +35,7 @@
       "skills": ["event-cancellations"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-cancellations/cancellations.py apply"
+      "prompt": "python /home/agent/.hermes/scripts/event_cancellations.py"
     },
     {
       "id": "event-reconcile-weekly",
@@ -53,7 +53,7 @@
       "skills": ["event-seed-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-seed-discovery/discover.py discover --limit 15"
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py"
     },
     {
       "id": "event-seed-probe",
@@ -62,7 +62,7 @@
       "skills": ["event-seed-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/event-seed-discovery/discover.py probe --limit 4"
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py probe --limit 4"
     },
     {
       "id": "performer-research",
@@ -89,7 +89,7 @@
       "skills": ["entity-live-sync"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/entity-live-sync/sync.py run --limit 15"
+      "prompt": "python /home/agent/.hermes/scripts/entity_live_sync.py"
     },
     {
       "id": "api-check",

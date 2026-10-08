@@ -75,3 +75,41 @@ def test_wrapper_migrates_before_launching_the_skill(script, tmp_state_dir, tmp_
 
     n_files = len(list((ROOT / "engine" / "migrations").glob("*.sql")))
     assert seen_at_launch == [n_files]
+
+
+# Docker jobs that may call a skill directly: they never touch the town DB.
+DIRECT_OK = {"api-check": "TownLoops OpenAPI snapshot, no DB"}
+
+
+def test_every_docker_script_job_runs_a_wrapper():
+    """A job that calls a skill directly skips the wrapper's migrate()."""
+    import json
+    jobs = json.loads((ROOT / "cron" / "jobs.json").read_text())["jobs"]
+    for job in jobs:
+        if not job.get("no_agent") or job["id"] in DIRECT_OK:
+            continue
+        cmd = job["prompt"].split()
+        assert cmd[0] == "python", job["id"]
+        assert cmd[1].startswith("/home/agent/.hermes/scripts/"), job["id"]
+        assert (ROOT / "scripts" / Path(cmd[1]).name).exists(), job["id"]
+
+
+@pytest.mark.parametrize("script,argv,expected", [
+    ("event_seed_discovery.py", [], ["discover", "--limit", "15"]),
+    ("event_seed_discovery.py", ["probe", "--limit", "4"], ["probe", "--limit", "4"]),
+    ("event_cancellations.py", [], ["apply"]),
+    ("event_cancellations.py", ["apply", "--limit", "5"], ["apply", "--limit", "5"]),
+])
+def test_exec_wrappers_default_or_pass_args_through(script, argv, expected, tmp_state_dir, tmp_path,
+                                                    monkeypatch):
+    wrapper = _load(ROOT / "scripts" / script)
+    skill = tmp_path / "skill.py"
+    skill.write_text("")
+    monkeypatch.setattr(wrapper, "SKILL", skill)
+    monkeypatch.setattr("sys.argv", [script, *argv])
+    execd: list[list[str]] = []
+    monkeypatch.setattr(os, "execv", lambda python, args: execd.append(args))
+
+    wrapper.main()
+
+    assert execd[0][1:] == [str(skill), *expected]
