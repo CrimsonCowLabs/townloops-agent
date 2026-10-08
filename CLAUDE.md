@@ -41,7 +41,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 021).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 022).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -80,7 +80,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `event_dedup.py` (cross-seed dedup: `canonical_event_uid` on every new event via `upsert_event`;
     one copy stays pending, the rest are declined `status='duplicate'`; primary beats syndicator seeds),
     `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`; operator-confirmed only,
-    marked live as `Cancelled: ` title + `cancelled` tag by the `event-cancellations` skill).
+    marked live as `Cancelled: ` title + `cancelled` tag by the `event-cancellations` skill),
+    `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
+    Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
+    recorded on `event_seeds.feed_*` by `event-seed-discovery discover`/`probe`; no extra fetches),
+    `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
+    or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
+    alert, held until it recovers or the operator accepts the new level).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -153,6 +159,12 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   a copy whose sibling is already live. An event missing from all its sources is only *flagged*
   (`events.cancel_status`); it's marked cancelled on TownLoops only after the operator confirms
   (`confirm_cancellations` widget → `event-cancellations apply`). Never wire auto-cancel.
+- **Source-health alerts fire on transitions only.** `engine/source_health.record_run` is the one
+  place event-find records a seed run (dry runs aren't recorded); failed runs and unparseable
+  extractions are never judged — only an explicit empty list is a zero — and a standing
+  alert is held against the average it dropped from (`health_baseline`) so a lasting drop neither
+  re-alerts nor clears itself. A recorded `feed_url` is evidence for the source-automation review,
+  not a switch — event-find still scrapes the seed URL.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
   `--yes-really-send`. Sunday cron only *composes* a draft. Never wire auto-push.
 - **`SPONSORS_ENABLED=false` is the safe default** — never flip it in a template. Money placements are

@@ -62,3 +62,13 @@ discovery:
 # post_caps:
 #   businesses: 20
 #   communities: 10
+
+# Optional source-health alert tuning (engine/source_health.py). An approved
+# seed whose latest successful event-find lists 0 events, or under
+# (100 - drop_pct)% of its trailing average, alerts the operator once
+# (Telegram + dashboard). Omit for defaults.
+# source_health:
+#   window: 6          # trailing successful runs averaged
+#   min_runs: 3        # runs needed before a seed is judged
+#   drop_pct: 50       # % drop vs the average that alerts
+#   min_baseline: 4    # seeds averaging fewer events only alert on zero

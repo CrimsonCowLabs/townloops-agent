@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -14,7 +15,7 @@ from typing import Optional
 
 import yaml
 
-from engine import event_cancel, event_dedup, inspection
+from engine import event_cancel, event_dedup, inspection, source_health
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
     build_extraction_prompt as _build_extraction_prompt,
     codex_exec as _codex_exec,
@@ -66,18 +67,16 @@ def _seed_selection(conn: sqlite3.Connection, seed_id: Optional[int],
     return [dict(r) for r in conn.execute(q, params).fetchall()]
 
 
-def _record_source_run(conn: sqlite3.Connection, seed_name: str,
-                       started: str, ended: str, ok: bool,
-                       fetched: int, inserted: int, updated: int,
-                       error: Optional[str]) -> None:
-    conn.execute(
-        """
-        INSERT INTO source_runs (source, started_at, ended_at, ok, fetched, inserted, updated, error)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (f"seed:{seed_name}", started, ended, 1 if ok else 0,
-         fetched, inserted, updated, error),
-    )
+# Codex answered with an empty JSON array (as opposed to unparseable output).
+_EMPTY_LIST_RE = re.compile(r"\[\s*\]\s*$")
+
+
+def _telegram(text: str) -> None:
+    try:
+        from engine.orchestrator import _telegram_notify
+    except Exception:  # noqa: BLE001 — alerts are best-effort
+        return
+    _telegram_notify(text)
 
 
 def cmd_find(args) -> int:
@@ -93,6 +92,19 @@ def cmd_find(args) -> int:
     total_updated = 0
     total_seeds = 0
     total_events_seen = 0
+    health = source_health.settings_from(profile)
+    health_changes: list[dict] = []
+
+    def record_run(seed: dict, started: str, ok: bool, fetched: int = 0, inserted: int = 0,
+                   updated: int = 0, error: Optional[str] = None, judge: bool = True) -> None:
+        if args.dry_run:   # neither history nor judged
+            return
+        change = source_health.record_run(
+            conn, seed, started=started, ended=_iso_utc_now(), ok=ok, fetched=fetched,
+            inserted=inserted, updated=updated, error=error, settings=health, judge=judge)
+        if change:
+            health_changes.append(change)
+
     if not args.dry_run:
         # Rows from before dedup get their canonical uid (no-op once done).
         event_dedup.backfill(conn)
@@ -110,8 +122,7 @@ def cmd_find(args) -> int:
         )
         ok, md, err = _firecrawl_markdown(seed["url"])
         if not ok:
-            _record_source_run(conn, seed_name, started, _iso_utc_now(),
-                               False, 0, 0, 0, err[:400])
+            record_run(seed, started, False, error=err[:400])
             conn.commit()
             inspection.record(
                 worker="event-find", action="firecrawl",
@@ -128,18 +139,22 @@ def cmd_find(args) -> int:
         )
         codex_ok, out, err = _codex_exec(prompt)
         if not codex_ok:
-            _record_source_run(conn, seed_name, started, _iso_utc_now(),
-                               False, 0, 0, 0, err[:400])
+            record_run(seed, started, False, error=err[:400])
             conn.commit()
             print(json.dumps({"seed": seed_name, "error": f"codex: {err[:200]}"}))
             continue
 
         events = _parse_json_array(out)
         if not events:
-            _record_source_run(conn, seed_name, started, _iso_utc_now(),
-                               True, 0, 0, 0, "codex returned no parseable JSON")
+            if _EMPTY_LIST_RE.search(out or ""):   # the page really lists nothing
+                record_run(seed, started, True)
+                note = "no events listed"
+            else:   # extraction failed: says nothing about the source's health
+                record_run(seed, started, True, error="codex returned no parseable JSON",
+                           judge=False)
+                note = "no events extracted"
             conn.commit()
-            print(json.dumps({"seed": seed_name, "events_seen": 0, "note": "no events extracted"}))
+            print(json.dumps({"seed": seed_name, "events_seen": 0, "note": note}))
             continue
 
         inserted = 0
@@ -172,9 +187,8 @@ def cmd_find(args) -> int:
             # Upcoming rows this run should have listed but didn't gain a miss.
             event_cancel.record_seed_run(conn, seed_name, seen_uids, listed_dates)
 
+        record_run(seed, started, True, len(events), inserted, updated)
         ended = _iso_utc_now()
-        _record_source_run(conn, seed_name, started, ended,
-                           True, len(events), inserted, updated, None)
         conn.execute(
             "UPDATE event_seeds SET last_scraped_at = ?, last_event_count = ?, "
             "consecutive_empty_scrapes = CASE WHEN ? = 0 THEN consecutive_empty_scrapes + 1 ELSE 0 END "
@@ -198,6 +212,14 @@ def cmd_find(args) -> int:
             inspection.record(worker="event-find", action="possibly-cancelled", target=uid,
                               detail="live event missing from all its sources — operator review")
 
+    for change in health_changes:
+        inspection.record(worker="event-find", action="source-health", target=change["seed"],
+                          detail=f"{change['status']}: {change['note']}",
+                          ok=change["status"] == "recovered")
+    if health_changes:
+        _telegram(source_health.alert_text(
+            os.environ.get("TOWNLOOPS_TOWN_SLUG", "?"), health_changes))
+
     summary = {
         "seeds_scraped": total_seeds,
         "events_seen": total_events_seen,
@@ -205,6 +227,7 @@ def cmd_find(args) -> int:
         "updated": total_updated,
         "possibly_cancelled": len(vanished["flagged"]),
         "cancel_flags_cleared": len(vanished["cleared"]),
+        "source_health": [f"{c['seed']}: {c['status']}" for c in health_changes],
         "dry_run": args.dry_run,
     }
     print(json.dumps({"summary": summary}))

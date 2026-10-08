@@ -453,6 +453,7 @@ details[open] > .v2-band-summary::before { transform: rotate(90deg); }
 .v2-tags { list-style: none; padding: 0; margin: .3rem 0 0; display: flex; flex-wrap: wrap; gap: .3rem; }
 .v2-tag { display: inline-flex; align-items: center; gap: .3rem; padding: .1rem .5rem; border-radius: 999px; background: color-mix(in srgb, var(--bg), var(--fg) 6%); font-size: .75em; color: var(--muted); }
 .v2-tag b { color: var(--fg); font-variant-numeric: tabular-nums; }
+.v2-tag-warn { background: var(--err-bg); color: var(--err-fg); }
 
 /* Live activity */
 .v2-current { display: flex; align-items: flex-start; gap: .6rem; padding: .5rem .7rem; border-radius: 6px; background: color-mix(in srgb, var(--bg), var(--fg) 3%); margin-bottom: .5rem; }

@@ -2,7 +2,7 @@
   <table class="v2-tbl">
     <thead>
       <tr>
-        <th>Name</th><th>Kind</th><th>URL</th>
+        <th>Name</th><th>Kind</th><th>URL</th><th>Feed</th>
         <th class="num">Last events</th><th>Last scraped</th><th></th>
       </tr>
     </thead>
@@ -12,11 +12,26 @@
         <td>{{ s.name }}</td>
         <td><span class="v2-tag">{{ s.kind }}</span></td>
         <td class="v2-url"><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url|truncate(60) }}</a></td>
-        <td class="num">{{ s.last_event_count if s.last_event_count is not none else '—' }}</td>
+        <td class="small">
+          {% if s.feed_url %}<a class="v2-tag" href="{{ s.feed_url }}" target="_blank" rel="noopener">{{ s.feed_type }}</a>
+          {% elif s.feed_type %}<span class="v2-tag" title="feed hidden — find the calendar URL">{{ s.feed_type }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}
+        </td>
+        <td class="num">
+          {{ s.last_event_count if s.last_event_count is not none else '—' }}
+          {% if s.health_status %}
+            <span class="v2-tag v2-tag-warn" title="{{ s.health_note }}">{{ s.health_label }}</span>
+          {% endif %}
+        </td>
         <td class="muted small">
           {% if s.last_scraped_at %}<time datetime="{{ s.last_scraped_at }}">{{ s.last_scraped_at }}</time>{% else %}never{% endif %}
         </td>
         <td>
+          {% if s.health_status %}
+          <form method="post" action="/v2/seeds/{{ s.seed_id }}/ack-health" style="display:inline">
+            <button class="v2-btn v2-btn-small" type="submit" title="{{ s.health_note }}">Accept new level</button>
+          </form>
+          {% endif %}
           <form method="post" action="/v2/seeds/{{ s.seed_id }}/reject" style="display:inline">
             <button class="v2-btn v2-btn-small v2-btn-danger" type="submit">Reject</button>
           </form>

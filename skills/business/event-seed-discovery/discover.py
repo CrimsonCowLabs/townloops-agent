@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from engine import event_dedup, inspection
+from engine import event_dedup, feed_probe, inspection, source_health
 
 
 VALID_KINDS = {"chamber", "government", "tourism", "library",
@@ -132,10 +132,11 @@ def _parse_json_array(stdout: str) -> list[dict]:
     return []
 
 
-def _head_verify(url: str) -> tuple[bool, int]:
-    """Send a Firecrawl scrape and inspect the returned status code.
-    Firecrawl bypasses squid; using it here means the HEAD-check works
-    on any hostname, not just allowlisted ones."""
+def _scrape_page(url: str) -> tuple[bool, int, str, str]:
+    """Fetch the seed page through Firecrawl (rawHtml) → (ok, status code,
+    html, final URL after redirects). Firecrawl bypasses squid, so this
+    works on any hostname, not just allowlisted ones. A 2xx/3xx verifies the
+    seed; the html is what feed probing reads."""
     from engine.discovery import _firecrawl_base, _firecrawl_headers, FIRECRAWL_TIMEOUT_S
     from engine.policy import firecrawl_bucket
     import requests
@@ -143,7 +144,7 @@ def _head_verify(url: str) -> tuple[bool, int]:
     with inspection.timed(worker="event-seed-discovery",
                           action="firecrawl-head",
                           target=url,
-                          detail=f"verifying LLM-proposed seed URL") as ctx:
+                          detail="verifying seed URL") as ctx:
         try:
             r = requests.post(
                 f"{_firecrawl_base()}/v1/scrape",
@@ -154,17 +155,32 @@ def _head_verify(url: str) -> tuple[bool, int]:
         except requests.RequestException as e:
             ctx["ok"] = False
             ctx["error"] = str(e)
-            return (False, 0)
+            return (False, 0, "", url)
         if not r.ok:
-            return (False, r.status_code)
+            return (False, r.status_code, "", url)
         try:
             body = r.json()
         except ValueError:
-            return (False, r.status_code)
-        meta = (body.get("data") or {}).get("metadata") or {}
+            return (False, r.status_code, "", url)
+        data = body.get("data") or {}
+        meta = data.get("metadata") or {}
         code = int(meta.get("statusCode") or 200)
         ctx["detail"] = f"verified status={code}"
-        return (200 <= code < 400, code)
+        final = meta.get("url") or meta.get("sourceURL") or url
+        return (200 <= code < 400, code, data.get("rawHtml") or "", final)
+
+
+def _record_feed(conn: sqlite3.Connection, seed_url: str, html: str, final_url: str) -> dict:
+    """Probe the seed's page for a machine-readable feed and record it."""
+    found = feed_probe.detect(html, final_url)
+    detail = {"feeds": found["feeds"]}
+    if final_url != seed_url:   # short link / redirect: feeds resolve against the target
+        detail["resolved_url"] = final_url
+    conn.execute(
+        "UPDATE event_seeds SET feed_type = ?, feed_url = ?, feed_detail = ?, feed_probed_at = ? "
+        "WHERE url = ?",
+        (found["type"], found["url"], json.dumps(detail), _iso_utc_now(), seed_url))
+    return found
 
 
 def _valid_url(url: str) -> bool:
@@ -222,6 +238,7 @@ def cmd_discover(args) -> int:
     verified_fails = 0
     duplicates = 0
     bad_shape = 0
+    with_feed = 0
     for p in proposals[:args.limit]:
         if not isinstance(p, dict):
             bad_shape += 1
@@ -237,7 +254,7 @@ def cmd_discover(args) -> int:
         if url in already:
             duplicates += 1
             continue
-        ok, code = _head_verify(url)
+        ok, code, html, final_url = _scrape_page(url)
         if not ok:
             verified_fails += 1
             continue
@@ -250,6 +267,8 @@ def cmd_discover(args) -> int:
             """,
             (name[:200], url, kind, now, now),
         )
+        if _record_feed(conn, url, html, final_url)["url"]:
+            with_feed += 1
         already.add(url)
         inserted += 1
     conn.commit()
@@ -261,6 +280,7 @@ def cmd_discover(args) -> int:
         "duplicates_skipped": duplicates,
         "url_verification_failed": verified_fails,
         "malformed_llm_output": bad_shape,
+        "with_feed": with_feed,
     }
     inspection.record(
         worker="event-seed-discovery", action="skill-invoke",
@@ -270,11 +290,55 @@ def cmd_discover(args) -> int:
     return 0
 
 
+def cmd_probe(args) -> int:
+    """Probe seeds' pages for a feed: those never probed (else `--all`, or
+    one `--seed-id`), rejected seeds excepted. Seeds never attempted go
+    before ones that were unreachable last time; `--limit` caps the run."""
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    q = "SELECT seed_id, name, url FROM event_seeds WHERE status != 'rejected'"
+    params: list = []
+    if args.seed_id is not None:
+        q += " AND seed_id = ?"
+        params.append(args.seed_id)
+    elif not args.all:
+        q += " AND feed_probed_at IS NULL"
+    q += " ORDER BY feed_detail IS NOT NULL, seed_id"
+    if args.limit:
+        q += " LIMIT ?"
+        params.append(args.limit)
+    seeds = [dict(r) for r in conn.execute(q, params)]
+    counts = {"probed": 0, "with_feed": 0, "unreachable": 0}
+    for seed in seeds:
+        ok, code, html, final_url = _scrape_page(seed["url"])
+        if not ok:   # stays unprobed; the next probe retries it
+            conn.execute("UPDATE event_seeds SET feed_detail = ? "
+                         "WHERE seed_id = ? AND feed_probed_at IS NULL",
+                         (json.dumps({"error": f"unreachable (status {code})",
+                                      "at": _iso_utc_now()}), seed["seed_id"]))
+            conn.commit()
+            counts["unreachable"] += 1
+            print(json.dumps({"seed": seed["name"], "error": f"unreachable (status {code})"}))
+            continue
+        found = _record_feed(conn, seed["url"], html, final_url)
+        conn.commit()
+        counts["probed"] += 1
+        counts["with_feed"] += bool(found["url"])
+        print(json.dumps({"seed": seed["name"], "feed_type": found["type"],
+                          "feed_url": found["url"]}))
+    conn.close()
+    inspection.record(worker="event-seed-discovery", action="skill-invoke",
+                      target="probe", detail=json.dumps(counts), ok=True)
+    print(json.dumps(counts))
+    return 0
+
+
 def cmd_show(args) -> int:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     for r in conn.execute(
-        "SELECT seed_id, name, url, kind, status, source_role, last_scraped_at "
+        "SELECT seed_id, name, url, kind, status, source_role, last_scraped_at, "
+        "  feed_type, feed_url, health_status, health_note "
         "FROM event_seeds ORDER BY status, kind, name"
     ):
         row = dict(r)
@@ -300,6 +364,25 @@ def cmd_set_role(args) -> int:
     return 0
 
 
+def cmd_health(args) -> int:
+    """List seeds with a source-health alert, or `--ack` one: accept its
+    current level as normal (earlier runs stop counting)."""
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    if args.ack is not None:
+        if not source_health.ack(conn, args.ack):
+            print(json.dumps({"error": f"no seed {args.ack}"}))
+            conn.close()
+            return 1
+        print(json.dumps({"seed_id": args.ack, "health": "acknowledged"}))
+    else:
+        for r in source_health.flagged(conn):
+            print(json.dumps({k: r[k] for k in ("seed_id", "name", "url", "health_status",
+                                                "health_note", "health_flagged_at")}))
+    conn.close()
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="event-seed-discovery")
     sub = p.add_subparsers(dest="cmd")
@@ -307,12 +390,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     d.add_argument("--limit", type=int, default=15)
     d.add_argument("--dry-run", action="store_true")
     d.set_defaults(func=cmd_discover)
+    pr = sub.add_parser("probe", help="detect machine-readable feeds on seed pages")
+    pr.add_argument("--seed-id", type=int, help="probe one seed (even if probed before)")
+    pr.add_argument("--all", action="store_true", help="re-probe every non-rejected seed")
+    pr.add_argument("--limit", type=int, help="cap seeds this run")
+    pr.set_defaults(func=cmd_probe)
     s = sub.add_parser("show", help="print current event_seeds rows as JSON")
     s.set_defaults(func=cmd_show)
     r = sub.add_parser("set-role", help="mark a seed primary / syndicator (or auto)")
     r.add_argument("--seed-id", type=int, required=True)
     r.add_argument("--role", required=True, choices=("primary", "syndicator", "auto"))
     r.set_defaults(func=cmd_set_role)
+    h = sub.add_parser("health", help="list source-health alerts, or --ack one")
+    h.add_argument("--ack", type=int, metavar="SEED_ID",
+                   help="accept the seed's current event count as its new normal")
+    h.set_defaults(func=cmd_health)
     # Default subcommand is `discover` when none given
     args = p.parse_args(argv)
     if not args.cmd:

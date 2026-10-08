@@ -1141,6 +1141,17 @@ def v2_seed_reject(seed_id: int, request: Request):
     return resp
 
 
+@app.post("/v2/seeds/{seed_id}/ack-health",
+          dependencies=[Depends(auth.require_session)])
+def v2_seed_ack_health(seed_id: int, request: Request):
+    resp = RedirectResponse(url="/v2#seeds", status_code=303)
+    if db_v2.ack_seed_health(seed_id):
+        _flash(resp, "ok", f"Seed {seed_id}: current event count accepted as normal.")
+    else:
+        _flash(resp, "error", f"No seed {seed_id}.")
+    return resp
+
+
 # ----- /v2 background actions --------------------------------------------
 
 @app.post("/v2/actions/event-find",

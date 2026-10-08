@@ -22,10 +22,15 @@ python skills/business/event-seed-discovery/discover.py discover --limit N
 python skills/business/event-seed-discovery/discover.py discover --dry-run
 python skills/business/event-seed-discovery/discover.py show
 python skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
+python skills/business/event-seed-discovery/discover.py probe [--limit N] # seeds never probed
+python skills/business/event-seed-discovery/discover.py probe --all       # re-probe every seed
+python skills/business/event-seed-discovery/discover.py probe --seed-id N
+python skills/business/event-seed-discovery/discover.py health            # seeds with a source-health alert
+python skills/business/event-seed-discovery/discover.py health --ack N    # accept seed N's new event count
 ```
 
 `discover` runs LLM discovery, HEAD-verifies each URL, and inserts survivors
-as proposed seeds. It is idempotent and skips URLs already in `event_seeds`.
+as proposed seeds, recording each one's feed. It is idempotent and skips URLs already in `event_seeds`.
 `show` prints current seed rows as JSON lines.
 
 ## Source role (dedup)
@@ -37,6 +42,39 @@ one (`set-role`); otherwise known aggregator hosts (allevents, Eventbrite,
 Patch, Bandsintown, …) and `newspaper`/`tourism` seeds are syndicators and
 everything else is primary. `show` prints the effective `role`. `--role
 auto` clears an operator choice.
+
+## Feed probing
+
+Every seed's page is checked for a machine-readable event feed (engine/feed_probe.py) from the
+HTML Firecrawl already fetched to verify it — no extra requests. `discover` probes new seeds;
+`probe` (daily cron, ≤4 seeds a run to stay inside Hermes' 120s cron script timeout; a no-op
+once every seed is probed) catches seeds never probed — untried ones before ones that were
+unreachable last time — and `--all` re-probes.
+The best find lands in `event_seeds.feed_type` / `feed_url`, everything found in `feed_detail`
+(with `resolved_url` when the seed URL is a short link or redirect — feeds resolve against the
+target). `show` prints them. Best first:
+
+| feed_type | detected from | feed_url |
+|---|---|---|
+| `ical` | `<link rel=alternate type=text/calendar>` | the .ics |
+| `google-calendar` | `calendar.google.com/calendar/embed?src=…` iframe | `…/calendar/ical/<src>/public/basic.ics` |
+| `tribe` | The Events Calendar (WordPress) markup | `/wp-json/tribe/events/v1/events` — paginate by the response's `total_pages`, not `per_page` |
+| `eventcalendarapp` | widget URL with `id` + `widgetUuid` | `api.eventcalendarapp.com/events?id=…&widgetUuid=…` (paginated) |
+| `point` | POINT iframe with a `token` | the shared `frames/events?token=…` JSON feed (paginated) |
+| `jsonld` | schema.org `Event` (or subtype) JSON-LD on the page | the page |
+| `rss` | an RSS/Atom alternate whose title or URL says event/calendar (blog feeds don't count) | the feed |
+| `html-calendar` | structured event-list markup | the page |
+| `wix-calendar-wrapper` | Wix `filesusr.com/html/` component | none — the Google Calendar src is hidden behind postMessage; don't extract dated events from the widget, find the calendar URL first |
+
+A recorded feed is evidence for the manual source-automation review (event-find SKILL.md), not
+a switch: event-find still scrapes the seed URL. Basin- or county-wide feeds (POINT orgs, county
+libraries, destination calendars) need filtering to the town before any adapter uses them.
+
+## Source health
+
+event-find alerts the operator when an established seed suddenly lists nothing or sharply fewer
+events (engine/source_health.py; details in event-find SKILL.md). `health` lists the seeds with
+an alert; `health --ack N` accepts a seed's new level (also the dashboard's **Accept new level**).
 
 ## Prompt design
 

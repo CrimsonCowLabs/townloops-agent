@@ -56,6 +56,15 @@
       "prompt": "python /home/agent/.hermes/skills/business/event-seed-discovery/discover.py discover --limit 15"
     },
     {
+      "id": "event-seed-probe",
+      "name": "Daily feed probe (detect iCal/RSS/JSON-LD/vendor feeds on ≤4 seeds never probed; no-op once caught up)",
+      "schedule": "30 4 * * *",
+      "skills": ["event-seed-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-seed-discovery/discover.py probe --limit 4"
+    },
+    {
       "id": "performer-research",
       "name": "Performer/creator research (evidence ladder; ≤3 per run, ambiguous identities → operator review)",
       "schedule": "*/20 * * * *",

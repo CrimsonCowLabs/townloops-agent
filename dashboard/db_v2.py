@@ -257,12 +257,14 @@ def event_seeds_by_status(status: str, limit: int = 200) -> list[dict]:
         rows = c.execute(
             "SELECT seed_id, name, url, kind, status, discovered_by, "
             "  trust_auto_approve, last_scraped_at, last_event_count, "
-            "  consecutive_empty_scrapes, notes, first_seen_at "
+            "  consecutive_empty_scrapes, notes, first_seen_at, "
+            "  feed_type, feed_url, health_status, health_note "
             "FROM event_seeds WHERE status = ? "
             "ORDER BY name COLLATE NOCASE",
             (status,),
         ).fetchall()
-    return [dict(r) for r in rows]
+    from engine.source_health import LABELS
+    return [{**dict(r), "health_label": LABELS.get(r["health_status"])} for r in rows]
 
 
 def set_seed_status(seed_id: int, status: str) -> int:
@@ -275,6 +277,13 @@ def set_seed_status(seed_id: int, status: str) -> int:
             (status, _iso_utc_now(), seed_id),
         )
         return cur.rowcount
+
+
+def ack_seed_health(seed_id: int) -> bool:
+    """Operator accepts a seed's new event count (engine/source_health.ack)."""
+    from engine import source_health
+    with connect() as c:
+        return source_health.ack(c, seed_id)
 
 
 def seed_counts() -> dict:
