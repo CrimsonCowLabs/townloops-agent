@@ -14,7 +14,7 @@ from typing import Optional
 
 import yaml
 
-from engine import inspection
+from engine import event_cancel, event_dedup, inspection
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
     build_extraction_prompt as _build_extraction_prompt,
     codex_exec as _codex_exec,
@@ -93,6 +93,10 @@ def cmd_find(args) -> int:
     total_updated = 0
     total_seeds = 0
     total_events_seen = 0
+    if not args.dry_run:
+        # Rows from before dedup get their canonical uid (no-op once done).
+        event_dedup.backfill(conn)
+        conn.commit()
 
     for seed in seeds:
         total_seeds += 1
@@ -141,6 +145,8 @@ def cmd_find(args) -> int:
         inserted = 0
         updated = 0
         skipped = 0
+        seen_uids: list[str] = []
+        listed_dates: list[str] = []
         for evt in events:
             if not isinstance(evt, dict):
                 skipped += 1
@@ -151,6 +157,8 @@ def cmd_find(args) -> int:
             if args.dry_run:
                 continue
             action = _upsert_event(conn, seed_name, evt)
+            seen_uids.append(_event_uid(seed_name, evt["title"], evt["date"]))
+            listed_dates.append(evt["date"])
             if action == "inserted":
                 inserted += 1
             elif action == "updated":
@@ -159,6 +167,10 @@ def cmd_find(args) -> int:
         total_inserted += inserted
         total_updated += updated
         total_events_seen += len(events)
+
+        if not args.dry_run:
+            # Upcoming rows this run should have listed but didn't gain a miss.
+            event_cancel.record_seed_run(conn, seed_name, seen_uids, listed_dates)
 
         ended = _iso_utc_now()
         _record_source_run(conn, seed_name, started, ended,
@@ -176,11 +188,23 @@ def cmd_find(args) -> int:
             "inserted": inserted, "updated": updated, "skipped_malformed": skipped,
         }))
 
+    vanished = {"flagged": [], "cleared": []}
+    if not args.dry_run:
+        threshold = int(profile.get("cancellation_miss_threshold")
+                        or event_cancel.DEFAULT_MISS_THRESHOLD)
+        vanished = event_cancel.flag_vanished(conn, threshold)
+        conn.commit()
+        for uid in vanished["flagged"]:
+            inspection.record(worker="event-find", action="possibly-cancelled", target=uid,
+                              detail="live event missing from all its sources — operator review")
+
     summary = {
         "seeds_scraped": total_seeds,
         "events_seen": total_events_seen,
         "inserted": total_inserted,
         "updated": total_updated,
+        "possibly_cancelled": len(vanished["flagged"]),
+        "cancel_flags_cleared": len(vanished["cleared"]),
         "dry_run": args.dry_run,
     }
     print(json.dumps({"summary": summary}))

@@ -14,6 +14,7 @@ import sys
 from typing import Any, Optional
 
 from engine import categories as cats
+from engine import event_dedup
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, record_activity,
 )
@@ -381,6 +382,17 @@ def main() -> int:
         record_activity(conn, _WORKER, "ship-event", event_uid, ok=False, error=msg)
         print(f"event {event_uid[:12]}: {msg}", file=sys.stderr)
         return 1
+
+    sibling = None if _reconcile_change(event) else event_dedup.shipped_sibling(conn, event)
+    if sibling:
+        # Another copy of this event (another seed) is already live: never
+        # create a second one. Retire this copy onto the live event.
+        conn.execute("UPDATE events SET status = 'duplicate' WHERE event_uid = ?", (event_uid,))
+        _mark_shipped(conn, event_uid, sibling["townloops_slug"])
+        record_activity(conn, _WORKER, "duplicate-of", event_uid,
+                        detail=f"{sibling['event_uid'][:12]} already live as {sibling['townloops_slug']}")
+        print(f"event {event_uid[:12]}: duplicate of {sibling['event_uid'][:12]} — not shipped")
+        return 0
 
     if not _tl_configured():
         _mark_shipped(conn, event_uid, _slug_for("event", event_uid), disabled=True)

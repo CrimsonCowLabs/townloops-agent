@@ -23,6 +23,7 @@ from dateutil import tz as _tz
 from dateutil.parser import isoparse as _isoparse
 
 from engine import categories as _cats
+from engine import event_dedup
 from engine.discovery import (
     FIRECRAWL_TIMEOUT_S,
     _firecrawl_base,
@@ -223,6 +224,8 @@ def _legacy_content_hash(evt: dict, category: str | None) -> str:
 
 def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
     """Insert or update an event. Returns 'inserted' | 'updated' | 'unchanged'.
+    A new row is linked to its canonical event (engine/event_dedup), which may
+    mark it a duplicate of a copy found via another seed.
 
     Categories and tags are the extractor's classification, not source
     content: they don't count as a change, and an existing row only gains
@@ -268,6 +271,9 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
                 now, f"seed:{seed_name}",
             ),
         )
+        # Copies of this event from other seeds share one canonical uid, and
+        # only one copy goes on to the operator and ship.
+        event_dedup.link(conn, uid)
         return "inserted"
     fill_classification = (
         "category_slug = CASE WHEN category_slugs IS NULL AND ? IS NOT NULL THEN ? "

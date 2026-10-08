@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from engine import inspection
+from engine import event_dedup, inspection
 
 
 VALID_KINDS = {"chamber", "government", "tourism", "library",
@@ -274,11 +274,29 @@ def cmd_show(args) -> int:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     for r in conn.execute(
-        "SELECT seed_id, name, url, kind, status, last_scraped_at "
+        "SELECT seed_id, name, url, kind, status, source_role, last_scraped_at "
         "FROM event_seeds ORDER BY status, kind, name"
     ):
-        print(json.dumps(dict(r)))
+        row = dict(r)
+        row["role"] = event_dedup.seed_role(row)  # effective: source_role, else inferred
+        print(json.dumps(row))
     conn.close()
+    return 0
+
+
+def cmd_set_role(args) -> int:
+    """Mark a seed as a primary source or a syndicator (copies of an event
+    from a primary source win dedup), or `auto` to infer it again."""
+    conn = sqlite3.connect(_DB_PATH)
+    role = None if args.role == "auto" else args.role
+    cur = conn.execute("UPDATE event_seeds SET source_role = ? WHERE seed_id = ?",
+                       (role, args.seed_id))
+    conn.commit()
+    conn.close()
+    if not cur.rowcount:
+        print(json.dumps({"error": f"no seed {args.seed_id}"}))
+        return 1
+    print(json.dumps({"seed_id": args.seed_id, "source_role": role}))
     return 0
 
 
@@ -291,6 +309,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     d.set_defaults(func=cmd_discover)
     s = sub.add_parser("show", help="print current event_seeds rows as JSON")
     s.set_defaults(func=cmd_show)
+    r = sub.add_parser("set-role", help="mark a seed primary / syndicator (or auto)")
+    r.add_argument("--seed-id", type=int, required=True)
+    r.add_argument("--role", required=True, choices=("primary", "syndicator", "auto"))
+    r.set_defaults(func=cmd_set_role)
     # Default subcommand is `discover` when none given
     args = p.parse_args(argv)
     if not args.cmd:

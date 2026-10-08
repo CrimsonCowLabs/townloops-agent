@@ -29,6 +29,15 @@
       "prompt": "python /home/agent/.hermes/skills/business/event-find/find.py"
     },
     {
+      "id": "event-cancellations-apply",
+      "name": "Mark operator-confirmed cancellations on TownLoops (title prefix + cancelled tag; nothing without operator confirmation)",
+      "schedule": "*/30 * * * *",
+      "skills": ["event-cancellations"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/skills/business/event-cancellations/cancellations.py apply"
+    },
+    {
       "id": "event-reconcile-weekly",
       "name": "Weekly reconcile (re-pull seeds, cross-reference live TownLoops for date/venue changes + missing events, stage locally, enrich venues/hosts/images)",
       "schedule": "0 2 * * 0",

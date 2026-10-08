@@ -1412,6 +1412,15 @@ def v2_chat_confirm(request: Request,
         body = f"Declined {result['declined']} business candidates; they won't be proposed again."
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (already decided)."
+    elif kind == "confirm_cancellations":
+        body = (f"Confirmed {result['confirmed']} cancellations — the next event-cancellations "
+                "apply run marks them cancelled on TownLoops.")
+        if result.get("skipped"):
+            body += f" Skipped {result['skipped']} (no longer flagged)."
+    elif kind == "dismiss_cancellations":
+        body = f"Dismissed {result['dismissed']} cancellation flags; they won't be flagged again."
+        if result.get("skipped"):
+            body += f" Skipped {result['skipped']} (no longer flagged)."
     else:
         body = f"Executed intent {kind}: {result}"
     chat_db.insert_message("agent", body, thread_id=thread_id)

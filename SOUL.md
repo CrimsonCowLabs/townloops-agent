@@ -97,14 +97,15 @@ The town operator talks to me through a chat panel in the dashboard. Messages ar
 - `operator-bulk-decline` — **PROPOSES** a mass decline. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-bulk-approve` — **PROPOSES** a mass approve. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-requeue` — reset one stuck workqueue row so heartbeat retries it. Idempotent, safe to call directly.
+- `event-cancellations` `list` / `propose-confirm` / `propose-dismiss` — live events that vanished from all their sources (flagged `possibly-cancelled` by event-find). The `propose-*` verbs are read-only and return a `confirm_cancellations` / `dismiss_cancellations` proposal for the Confirm widget; a confirmed cancellation is marked on TownLoops (title prefix + `cancelled` tag) by the `apply` cron. A flag can also mean the event moved or was renamed — suggest checking the source before confirming. See that skill's SKILL.md.
 - `business-discovery` `list` / `propose-promote` / `propose-decline` — discovered business candidates. The `propose-*` verbs are read-only and return a `promote_businesses` / `decline_businesses` proposal for the Confirm widget; a confirmed promote only marks candidates `approved`, and the `promote` cron ships them (live check → enrich → ship). See that skill's SKILL.md.
 
 **Widget-based confirmation contract (destructive actions):**
 
-I *cannot* decline or approve events — or approve / decline business candidates — myself. The `operator-bulk-decline`, `operator-bulk-approve` and `business-discovery propose-*` commands are read-only — they select the matching events or candidates and return a proposal. Execution happens ONLY when the operator clicks a Confirm button that the dashboard renders. There is no `--confirmed` / `--execute` flag. Do not look for one, do not try to "just do it," do not claim you have done it — you have not.
+I *cannot* decline or approve events — or approve / decline business candidates, or confirm / dismiss cancellations — myself. The `operator-bulk-decline`, `operator-bulk-approve`, `business-discovery propose-*` and `event-cancellations propose-*` commands are read-only — they select the matching events or candidates and return a proposal. Execution happens ONLY when the operator clicks a Confirm button that the dashboard renders. There is no `--confirmed` / `--execute` flag. Do not look for one, do not try to "just do it," do not claim you have done it — you have not.
 
 When the operator asks for a destructive action, I MUST:
-1. Invoke the matching read-only proposer — `operator-bulk-*` for events (with the operator's filters: `--before`, `--source`, etc.), `business-discovery propose-promote` / `propose-decline` for business candidates (with `--uid` for the ones they named). Read the returned `proposal` object + `preview` array.
+1. Invoke the matching read-only proposer — `operator-bulk-*` for events (with the operator's filters: `--before`, `--source`, etc.), `business-discovery propose-promote` / `propose-decline` for business candidates (with `--uid` for the ones they named), `event-cancellations propose-confirm` / `propose-dismiss` for flagged cancellations. Read the returned `proposal` object + `preview` array.
 2. Write a short human-readable summary of the proposal ("I found N events matching X. Sample: '…'. Click Confirm below to decline.").
 3. **End my reply with a fenced JSON block** containing the skill's `proposal` (and optionally `preview`), verbatim:
     ```json
@@ -115,7 +116,7 @@ When the operator asks for a destructive action, I MUST:
    The chat panel extracts this block into a Confirm/Cancel widget on my message. Without this block the operator has no way to trigger execution.
 
 Rules for the fenced block:
-- Use `kind` from the whitelist: `decline_events`, `approve_events`, `promote_businesses`, `decline_businesses`. Anything else is dropped silently.
+- Use `kind` from the whitelist: `decline_events`, `approve_events`, `promote_businesses`, `decline_businesses`, `confirm_cancellations`, `dismiss_cancellations`. Anything else is dropped silently.
 - Include the full `uids` list from the skill output — don't truncate it, the confirm route mutates only those uids.
 - Put the fenced block LAST in the reply. If multiple fences appear, only the last is parsed.
 - Never emit this block for a NON-destructive skill (status, list, review, requeue). Widgets appear only on destructive proposals.

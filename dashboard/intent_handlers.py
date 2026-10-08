@@ -18,13 +18,15 @@ from typing import Any, Optional
 
 from dashboard import db_v2
 from engine import business_promote
+from engine import event_cancel
 from engine import workqueue as _wq
 
 
 # Whitelist of intent kinds. Anything Hermes proposes that isn't in this
 # set is refused by /v2/chat/confirm.
 ALLOWED_KINDS = frozenset({"decline_events", "approve_events",
-                           "promote_businesses", "decline_businesses"})
+                           "promote_businesses", "decline_businesses",
+                           "confirm_cancellations", "dismiss_cancellations"})
 
 
 def _iso_utc_now() -> str:
@@ -64,6 +66,10 @@ def execute(proposal: dict, *, note: Optional[str] = None) -> dict:
         return _promote_businesses(uids)
     if kind == "decline_businesses":
         return _decline_businesses(uids, note=note)
+    if kind == "confirm_cancellations":
+        return _confirm_cancellations(uids)
+    if kind == "dismiss_cancellations":
+        return _dismiss_cancellations(uids)
     # Unreachable if validate_proposal was called first.
     return {"error": f"no handler for kind: {kind}"}
 
@@ -152,3 +158,16 @@ def _decline_businesses(uids: list[str], *, note: Optional[str] = None) -> dict:
     """Decline business candidates for good (and their same-name twins)."""
     with db_v2.connect() as c:
         return {"kind": "decline_businesses", **business_promote.decline(c, uids, note=note)}
+
+
+def _confirm_cancellations(uids: list[str]) -> dict:
+    """Confirm flagged events as cancelled — the next `event-cancellations
+    apply` run marks them cancelled on TownLoops."""
+    with db_v2.connect() as c:
+        return {"kind": "confirm_cancellations", **event_cancel.confirm(c, uids)}
+
+
+def _dismiss_cancellations(uids: list[str]) -> dict:
+    """The events are still on: clear the flags for good."""
+    with db_v2.connect() as c:
+        return {"kind": "dismiss_cancellations", **event_cancel.dismiss(c, uids)}

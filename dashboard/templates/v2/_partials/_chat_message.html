@@ -33,6 +33,10 @@
           Proposed action: <b>promote and ship {{ proposal.count }} businesses</b>
         {% elif proposal.kind == 'decline_businesses' %}
           Proposed action: <b>decline {{ proposal.count }} business candidates</b>
+        {% elif proposal.kind == 'confirm_cancellations' %}
+          Proposed action: <b>mark {{ proposal.count }} events cancelled on TownLoops</b>
+        {% elif proposal.kind == 'dismiss_cancellations' %}
+          Proposed action: <b>dismiss {{ proposal.count }} cancellation flags</b>
         {% else %}
           Proposed action: <b>{{ proposal.kind }}</b>
         {% endif %}

@@ -73,6 +73,13 @@ def open_db() -> sqlite3.Connection:
     return conn
 
 
+def dict_rows(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> list[dict]:
+    """Query rows as dicts, whatever the connection's row_factory."""
+    cur = conn.cursor()
+    cur.row_factory = sqlite3.Row
+    return [dict(r) for r in cur.execute(sql, args).fetchall()]
+
+
 def parse_event_uid_arg(argv: Optional[list[str]] = None) -> str:
     p = argparse.ArgumentParser()
     p.add_argument("--event-uid", required=True)

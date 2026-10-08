@@ -21,11 +21,22 @@ python skills/business/event-seed-discovery/discover.py discover
 python skills/business/event-seed-discovery/discover.py discover --limit N
 python skills/business/event-seed-discovery/discover.py discover --dry-run
 python skills/business/event-seed-discovery/discover.py show
+python skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
 ```
 
 `discover` runs LLM discovery, HEAD-verifies each URL, and inserts survivors
 as proposed seeds. It is idempotent and skips URLs already in `event_seeds`.
 `show` prints current seed rows as JSON lines.
+
+## Source role (dedup)
+
+When several seeds list the same event, `event-find` keeps one copy
+(engine/event_dedup.py) and a **primary** source's copy beats a
+**syndicator**'s. A seed's role is its `source_role` when the operator set
+one (`set-role`); otherwise known aggregator hosts (allevents, Eventbrite,
+Patch, Bandsintown, …) and `newspaper`/`tourism` seeds are syndicators and
+everything else is primary. `show` prints the effective `role`. `--role
+auto` clears an operator choice.
 
 ## Prompt design
 

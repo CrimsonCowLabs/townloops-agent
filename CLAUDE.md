@@ -41,7 +41,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 020).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 021).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -76,7 +76,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
     `entity-live-sync`), `live_patch.py` (full-body PATCH + GET verify for events and entities),
     `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote),
-    `live_lookup.py` (find a live record before creating one).
+    `live_lookup.py` (find a live record before creating one),
+    `event_dedup.py` (cross-seed dedup: `canonical_event_uid` on every new event via `upsert_event`;
+    one copy stays pending, the rest are declined `status='duplicate'`; primary beats syndicator seeds),
+    `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`; operator-confirmed only,
+    marked live as `Cancelled: ` title + `cancelled` tag by the `event-cancellations` skill).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -144,6 +148,11 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   `performer-research` batch (event-enrich-entities skips them); a profile is attached only when a venue page
   links it or its metadata names the town/a linked venue *and* the role. Bios are the profile's own text or
   null — never template copy. Don't route performers back through `entity_enrich`'s name search.
+- **One canonical event per real event; cancellations are operator-gated.** `event_uid` is per seed;
+  `canonical_event_uid` (engine/event_dedup) groups copies across seeds, and event-ship never creates
+  a copy whose sibling is already live. An event missing from all its sources is only *flagged*
+  (`events.cancel_status`); it's marked cancelled on TownLoops only after the operator confirms
+  (`confirm_cancellations` widget → `event-cancellations apply`). Never wire auto-cancel.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
   `--yes-really-send`. Sunday cron only *composes* a draft. Never wire auto-push.
 - **`SPONSORS_ENABLED=false` is the safe default** — never flip it in a template. Money placements are

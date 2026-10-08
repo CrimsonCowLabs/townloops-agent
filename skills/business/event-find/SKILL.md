@@ -28,8 +28,19 @@ find.py --dry-run             # scrape + extract, print without insert
 2. Ask the LLM for a JSON array of upcoming events for the configured town.
 3. Upsert each record with `event_uid = sha1(seed_name + normalized_title + start_iso)`.
 4. Set `state=metadata-extracted`, `approval_status=pending`, and `discovered_via=seed:<name>`.
-5. Record fetched and inserted counts in `source_runs`.
-6. Update `event_seeds.last_scraped_at` and `last_event_count`.
+5. Link each new row to its `canonical_event_uid` (engine/event_dedup.py): copies of one event
+   from other seeds — same local day, matching title, no conflicting venue or start time — share
+   it, and only one copy stays pending. The others are `status=duplicate`, declined with a
+   `[dedup]` note. A primary source's copy beats a syndicator's (`event-seed-discovery set-role`),
+   and a copy the operator already decided or that is live is never displaced.
+6. Count the run against the seed's upcoming rows for cancellation detection
+   (engine/event_cancel.py — see the `event-cancellations` skill).
+7. Record fetched and inserted counts in `source_runs`.
+8. Update `event_seeds.last_scraped_at` and `last_event_count`.
+
+After all seeds: rows from before dedup get canonical uids (start of run), and live events
+missing from all their sources for `cancellation_miss_threshold` finds are flagged
+`possibly-cancelled` for the operator.
 
 ## Reviewing manual-only sources for automation
 
