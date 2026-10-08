@@ -1101,7 +1101,7 @@ def v2_frag_seeds_proposed(request: Request):
           dependencies=[Depends(auth.require_session)])
 def v2_event_approve(event_uid: str, request: Request,
                      note: Optional[str] = Form(None)):
-    # set_event_approval flips state→approved AND enqueues extract-venue
+    # set_event_approval flips state→approved AND enqueues the first action
     # atomically (kick-on-approve, no 10-min heartbeat wait).
     db_v2.set_event_approval(event_uid, "approved", note)
     row = db_v2.event_by_uid_v2(event_uid)
@@ -1411,7 +1411,7 @@ def v2_chat_confirm(request: Request,
             body += f" Skipped {result['skipped']} (already in a terminal state)."
     elif kind == "approve_events":
         body = (f"Approved {result['approved']} events; "
-                f"enqueued {result['enqueued_extract_venue']} for venue extraction.")
+                f"queued {result['enqueued']} for the pipeline.")
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (already in a terminal state)."
     elif kind == "promote_businesses":

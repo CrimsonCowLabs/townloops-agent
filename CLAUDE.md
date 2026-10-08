@@ -41,9 +41,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 - **`engine/`** — shared library, the single source of truth. No skill logic here; skills import from it.
   - `db.py` — SQLite connect + `run_migrations` (atomic: splits SQL on top-level `;`, runs each
     migration in `BEGIN`/`COMMIT`, records `schema_version`; broken migration → `ROLLBACK` → retried
-    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 022).
+    next boot). Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 023).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
-    venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
+    detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
     rowcount 0 means another worker/operator already moved it and the loser skips silently. This is
     the entire concurrency-safety story.
@@ -87,6 +87,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
     alert, held until it recovers or the operator accepts the new level).
+    `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
+    `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
+    only as quote-checked sentences that name an access feature, else null; skipped with no fetch
+    when `source_url` is missing or the seed's listing page; a failed read gives up on the last
+    workqueue attempt instead of parking the event. Ticket/price fields belong in this pass),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
     skill: days with no live event, local events not live yet, sparse live metadata, venues of
     upcoming events with no image; LIST/GET only).

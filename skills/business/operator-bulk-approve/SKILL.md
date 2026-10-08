@@ -2,7 +2,7 @@
 
 **When to use:** the operator asks to approve multiple pending events at once — "approve everything from the North Tahoe Chamber", "approve the four community meetings I just reviewed".
 
-**READ-ONLY.** This skill *proposes* a bulk approval; it does not execute one. Execution happens via the dashboard's Confirm widget — see [operator-bulk-decline](../operator-bulk-decline/SKILL.md) for the full "why Hermes can't mutate" story. Confirmed approvals also enqueue `extract-venue` for each uid, mirroring the dashboard's per-row approve button.
+**READ-ONLY.** This skill *proposes* a bulk approval; it does not execute one. Execution happens via the dashboard's Confirm widget — see [operator-bulk-decline](../operator-bulk-decline/SKILL.md) for the full "why Hermes can't mutate" story. Confirmed approvals also enqueue the first pipeline action (`read-detail`) for each uid, mirroring the dashboard's per-row approve button.
 
 ## CLI
 

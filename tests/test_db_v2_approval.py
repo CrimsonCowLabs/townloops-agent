@@ -1,6 +1,6 @@
 """dashboard/db_v2.py — atomic approval+enqueue and the pending predicate.
 
-set_event_approval must flip state→approved AND enqueue extract-venue in a
+set_event_approval must flip state→approved AND enqueue read-detail in a
 single transaction (connect() is autocommit, so it uses explicit BEGIN/COMMIT):
 a failed enqueue must roll the approval back, never leaving an event `approved`
 with no queue row. The "pending" surfaces must all gate on
@@ -40,7 +40,7 @@ def _insert_event(conn, uid, *, state, approval_status):
 
 
 class TestAtomicApproval:
-    def test_approve_enqueues_extract_venue(self, dash_db):
+    def test_approve_enqueues_read_detail(self, dash_db):
         _insert_event(dash_db, "a1", state="metadata-extracted",
                       approval_status="pending")
 
@@ -55,7 +55,7 @@ class TestAtomicApproval:
 
         q = dash_db.execute(
             "SELECT COUNT(*) FROM event_workqueue "
-            "WHERE event_uid='a1' AND next_action='extract-venue' "
+            "WHERE event_uid='a1' AND next_action='read-detail' "
             "AND resolved_at IS NULL"
         ).fetchone()[0]
         assert q == 1

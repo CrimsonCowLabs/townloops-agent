@@ -9,8 +9,9 @@ Legal states + next-actions:
 
     found                       → (legacy event-ingest default; not serviced here)
     metadata-extracted          → (operator decides)
-    approved                    → extract-venue
+    approved                    → read-detail
     declined                    → (terminal)
+    detail-read                 → extract-venue
     venue-derived               → extract-hosts
     hosts-derived               → extract-people
     people-derived              → enrich-entities
@@ -35,7 +36,8 @@ from typing import Iterable
 # state=metadata-extracted. `found` remains only as the schema default for legacy
 # event-ingest rows (which ship via their own path, outside this workqueue).
 _TRANSITIONS: dict[str, tuple[str, str]] = {
-    "approved":           ("extract-venue",    "venue-derived"),
+    "approved":           ("read-detail",      "detail-read"),
+    "detail-read":        ("extract-venue",    "venue-derived"),
     "venue-derived":      ("extract-hosts",    "hosts-derived"),
     "hosts-derived":      ("extract-people",   "people-derived"),
     "people-derived":     ("enrich-entities",  "entities-enriched"),
@@ -43,6 +45,8 @@ _TRANSITIONS: dict[str, tuple[str, str]] = {
 }
 
 TERMINAL_STATES = {"declined", "shipped"}
+# Approved and on its way to ship (each has a workqueue action).
+IN_FLIGHT_STATES = tuple(_TRANSITIONS)
 AWAITING_OPERATOR_STATES = {"metadata-extracted"}
 
 

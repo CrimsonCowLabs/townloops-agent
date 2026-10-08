@@ -53,6 +53,15 @@ Nothing is POSTed until a lookup says it isn't live yet
 - **409 `slug_taken` is not success**: ship looks the row up again and
   continues as "found"; if it still isn't there, rc 1.
 
+## Accessibility notes
+
+`events.accessibility_notes` (quote-checked by `event-read-detail`) goes out as
+`accessibility_notes` in the create body. A live event that has its own value
+keeps it: an already-live row (lookup or reconcile `changed` PATCH) gets ours
+only when its field is blank, and the full-body PATCH resends the live value
+otherwise. A NULL is never sent. A create that drops the notes is repaired
+like dropped tags (full-body PATCH + GET verify, else flagged).
+
 ## Venue by id
 
 The event payload carries `venue_id` — the derived venue's recorded live id,

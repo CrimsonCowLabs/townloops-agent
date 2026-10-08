@@ -3,9 +3,9 @@
   "jobs": [
     {
       "id": "workqueue-heartbeat",
-      "name": "Event-first workqueue drain (every 10 min; per-event derive/enrich/ship)",
+      "name": "Event-first workqueue drain (every 10 min; per-event detail-read/derive/enrich/ship)",
       "schedule": "*/10 * * * *",
-      "skills": ["event-derive-venue", "event-derive-hosts", "event-derive-people", "event-enrich-entities", "event-ship"],
+      "skills": ["event-read-detail", "event-derive-venue", "event-derive-hosts", "event-derive-people", "event-enrich-entities", "event-ship"],
       "deliver": "local",
       "no_agent": true,
       "prompt": "python /home/agent/.hermes/scripts/workqueue_heartbeat.py"

@@ -495,6 +495,35 @@ class TestDownstream:
         live = client.events["jazz"]
         assert live["title"] == "Jazz Night" and live["venue_slug"] == "tipsy-putt"
 
+    def test_ship_patch_fills_blank_live_accessibility_notes(self, skill):
+        conn, uid = self._staged_change(skill)
+        conn.execute("UPDATE events SET accessibility_notes = 'Wheelchair seating up front.' "
+                     "WHERE event_uid = ?", (uid,))
+        client = self._api()
+        payload = self._patch(conn, uid, client=client)
+        assert payload["accessibility_notes"] == "Wheelchair seating up front."
+        assert client.events["jazz"]["accessibility_notes"] == "Wheelchair seating up front."
+
+    def test_ship_patch_keeps_live_accessibility_notes(self, skill):
+        conn, uid = self._staged_change(skill)
+        conn.execute("UPDATE events SET accessibility_notes = 'Wheelchair seating up front.' "
+                     "WHERE event_uid = ?", (uid,))
+        client = self._api()
+        client.events["jazz"]["accessibility_notes"] = "Ramp at side door."
+        payload = self._patch(conn, uid, client=client)
+        assert payload["accessibility_notes"] == "Ramp at side door."
+        assert client.events["jazz"]["accessibility_notes"] == "Ramp at side door."
+
+    def test_ship_patch_with_only_notes_to_fill_still_patches(self, skill):
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
+        meta_sql = ("UPDATE events SET accessibility_notes = 'Wheelchair seating up front.', "
+                    "extra_json = json_set(extra_json, '$.reconcile.changes', json('{}')) "
+                    "WHERE event_uid = ?")
+        conn.execute(meta_sql, (uid,))
+        client = self._api()
+        payload = self._patch(conn, uid, client=client)
+        assert payload["accessibility_notes"] == "Wheelchair seating up front."
+
     def test_venue_change_unresolved_fails_for_retry(self, skill):
         conn, uid = self._staged_change(skill, venue="Brand New Hall")
         client = self._api()

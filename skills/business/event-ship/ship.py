@@ -68,6 +68,8 @@ def _event_payload(row) -> dict:
         payload["tags"] = tags
     if row["source_url"]:
         payload["source_url"] = row["source_url"]
+    if row.get("accessibility_notes"):
+        payload["accessibility_notes"] = row["accessibility_notes"]
     return payload
 
 
@@ -127,7 +129,7 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         print(f"ship event {event_uid[:12]} failed: {msg[:200]}", file=sys.stderr)
         return None
     slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
-    if isinstance(result, dict) and not _repair_dropped_sets(client, conn, event, slug, payload, result):
+    if isinstance(result, dict) and not _repair_dropped_fields(client, conn, event, slug, payload, result):
         return None
     return slug
 
@@ -140,6 +142,13 @@ def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Op
     parks the event for the operator. Returns the live slug."""
     from engine.live_patch import apply_event_patch
     slug = live["slug"]
+    if payload.get("accessibility_notes") and "accessibility_notes" not in live:
+        # A source_url match is a list row; decide "blank" on the full row.
+        try:
+            live = client.get("events", slug) or live
+        except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+            print(f"read live event {slug} failed: {str(e)[:200]}", file=sys.stderr)
+            return None
     overrides = _fill_overrides(live, payload)
     if not overrides:
         return slug
@@ -158,7 +167,7 @@ def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Op
 
 def _fill_overrides(live: dict, payload: dict) -> dict:
     out: dict[str, Any] = {}
-    for k in ("title", "description", "start_at", "source_url"):
+    for k in ("title", "description", "start_at", "source_url", "accessibility_notes"):
         if payload.get(k) and not live.get(k):
             out[k] = payload[k]
     # A source_url match may start at another time; our end only fits ours.
@@ -175,15 +184,18 @@ def _fill_overrides(live: dict, payload: dict) -> dict:
     return out
 
 
-def _repair_dropped_sets(client, conn, event: dict, slug: str, payload: dict,
-                         created: dict) -> bool:
+def _repair_dropped_fields(client, conn, event: dict, slug: str, payload: dict,
+                           created: dict) -> bool:
     """A create path has been seen to drop `tags` (CMO, bulk create). When the
-    created row lacks a category/tag set that was sent, PATCH it in as a full
-    body and GET-verify. False when it still doesn't stick — the event is then
-    flagged for the operator, its live slug kept so nothing re-creates it."""
+    created row lacks a category/tag set or the accessibility notes that were
+    sent, PATCH them in as a full body and GET-verify. False when it still
+    doesn't stick — the event is then flagged for the operator, its live slug
+    kept so nothing re-creates it."""
     from engine.live_patch import apply_event_patch
     dropped = {k: payload[k] for k in ("category_slugs", "tags")
                if payload.get(k) and sorted(payload[k]) != sorted(created.get(k) or [])}
+    if payload.get("accessibility_notes") and not created.get("accessibility_notes"):
+        dropped["accessibility_notes"] = payload["accessibility_notes"]
     if not dropped:
         return True
     try:
@@ -305,12 +317,14 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
                       venue_slug: Optional[str] = None) -> Optional[str]:
     """Apply a source-side date/venue change to the existing live event as a
     full-body PATCH built from the current live row, then GET-verify it.
-    Returns the live slug, or None (→ rc 1) when the change can't be applied
-    correctly or didn't land as sent (then the event is flagged stuck)."""
+    Accessibility notes fill the live row only when it has none. Returns the
+    live slug, or None (→ rc 1) when the change can't be applied correctly or
+    didn't land as sent (then the event is flagged stuck)."""
     from engine.live_patch import apply_event_patch
     changes = meta.get("changes") or {}
     live_slug = meta["live_slug"]
-    if not ({"start_at", "venue"} & changes.keys()):
+    notes = event.get("accessibility_notes")
+    if not ({"start_at", "venue"} & changes.keys()) and not notes:
         return live_slug
     try:
         current = client.get("events", live_slug) or {}
@@ -318,6 +332,8 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
         print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
         return None
     overrides: dict[str, Any] = {}
+    if notes and not current.get("accessibility_notes"):
+        overrides["accessibility_notes"] = notes
     if "start_at" in changes:
         overrides["start_at"] = event["date_utc"]
         overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),
@@ -328,6 +344,8 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
             print(f"patch event {live_slug}: new venue not resolved/shipped yet", file=sys.stderr)
             return None
         overrides["venue_id"] = venue_id
+    if not overrides:
+        return live_slug
     try:
         result = apply_event_patch(client, live_slug, overrides, current=current)
     except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry

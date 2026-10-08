@@ -51,10 +51,10 @@ class TestActionTables:
 class TestDrainWorkqueue:
     def test_success_cascades_the_full_pipeline_in_one_tick(self, fresh_db, monkeypatch):
         # A ready event whose skills all succeed cascades through every action
-        # in one drain: _ACTION_SKILLS is ordered venue→hosts→people→enrich→ship,
+        # in one drain: _ACTION_SKILLS is ordered detail→venue→hosts→people→enrich→ship,
         # and each success enqueues the next action, which the same pass claims.
         _insert_event(fresh_db, "e1", state="approved")
-        workqueue.enqueue(fresh_db, "e1", "extract-venue")
+        workqueue.enqueue(fresh_db, "e1", event_state.next_action_for("approved"))
         fresh_db.commit()
 
         monkeypatch.setattr(orchestrator, "_invoke_skill",

@@ -1,7 +1,7 @@
 # event-derive-venue
 
 Workqueue action: **extract-venue**. Runs for events in
-`state=approved`.
+`state=detail-read` (after `event-read-detail`).
 
 Reads `venue_raw` (falling back to `venue_name`, then `hosting_group`)
 and binds the event to a venue, in this order:

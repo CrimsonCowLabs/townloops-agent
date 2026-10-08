@@ -11,7 +11,7 @@ The current implementation is a generic Firecrawl + LLM path. It is useful for s
 
 ## Why one skill does find+extract in v1
 
-The specification has separate `event-find` and `event-extract-metadata` stages. In v1, the find-time LLM prompt already returns title, date, venue, and description, so events skip the separate metadata pass and enter `metadata-extracted`. A future per-event extraction stage can add images, RSVP URLs, prices, or detail-page metadata without changing source discovery.
+The specification has separate `event-find` and `event-extract-metadata` stages. In v1, the find-time LLM prompt already returns title, date, venue, and description, so events skip the separate metadata pass and enter `metadata-extracted`. Detail-page metadata comes later, after approval: `event-read-detail` reads each event's own `source_url` once (accessibility notes today; RSVP URLs and prices belong in the same pass — `engine/event_detail.py`). That is why `source_url` should be the event's own page, not the listing.
 
 ## CLI
 

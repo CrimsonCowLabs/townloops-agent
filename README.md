@@ -89,7 +89,7 @@ You must also `pip install jinja2 requests pyyaml firecrawl-py` into the interpr
 ## Skills
 
 The event pipeline is **event-first**: a per-event state machine
-(`found → metadata-extracted → approved → venue-derived → hosts-derived →
+(`found → metadata-extracted → approved → detail-read → venue-derived → hosts-derived →
 people-derived → entities-enriched → shipped`) drained by a workqueue
 heartbeat. Each state transition is one skill invoked with `--event-uid`.
 See `engine/event_state.py` for the machine and `docs/skill-inventory.md`

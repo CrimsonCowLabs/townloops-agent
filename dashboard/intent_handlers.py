@@ -19,6 +19,7 @@ from typing import Any, Optional
 from dashboard import db_v2
 from engine import business_promote
 from engine import event_cancel
+from engine import event_state as _event_state
 from engine import workqueue as _wq
 
 
@@ -107,7 +108,7 @@ def _decline_events(uids: list[str], *, note: Optional[str] = None) -> dict:
 
 
 def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
-    """Flip approval_status → approved AND enqueue extract-venue for each
+    """Flip approval_status → approved AND enqueue the first pipeline action for each
     successful approval. Mirrors the dashboard's per-row approve button."""
     now = _iso_utc_now()
     approved = 0
@@ -115,7 +116,7 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
     skipped: list[str] = []
     with db_v2.connect() as c:
         # connect() is autocommit; wrap the batch in one explicit transaction so
-        # each approval and its extract-venue enqueue commit together (or the
+        # each approval and its first-action enqueue commit together (or the
         # whole batch rolls back) — no event left approved with no queue row.
         c.execute("BEGIN")
         try:
@@ -129,7 +130,7 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
                 )
                 if cur.rowcount:
                     approved += 1
-                    _wq.enqueue(c, uid, "extract-venue")
+                    _wq.enqueue(c, uid, _event_state.next_action_for("approved"))
                     enqueued += 1
                 else:
                     skipped.append(uid)
@@ -140,7 +141,7 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
     return {
         "kind": "approve_events",
         "approved": approved,
-        "enqueued_extract_venue": enqueued,
+        "enqueued": enqueued,
         "skipped": len(skipped),
         "skipped_uids": skipped,
     }

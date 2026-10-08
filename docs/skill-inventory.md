@@ -15,7 +15,8 @@ own `SKILL.md`.
 
 ```
 found ──extract-metadata──► metadata-extracted ──(operator approves)──► approved
-approved ──extract-venue──► venue-derived ──extract-hosts──► hosts-derived
+approved ──read-detail──► detail-read ──extract-venue──► venue-derived
+venue-derived ──extract-hosts──► hosts-derived
 hosts-derived ──extract-people──► people-derived ──enrich-entities──► entities-enriched
 entities-enriched ──ship──► shipped                      declined = terminal
                                                           stuck-<state> = operator override
@@ -38,7 +39,8 @@ step is not built yet — the orchestrator skips its `extract-metadata` action).
 
 | Skill | Action | From state → to state | Notes |
 |---|---|---|---|
-| `event-derive-venue` | `extract-venue` | `approved` → `venue-derived` | Match/create shell `venues` row. Exit 2 if no venue signal. |
+| `event-read-detail` | `read-detail` | `approved` → `detail-read` | One read of the event's own page; quote-checked `accessibility_notes`, else NULL. Gives up (exit 0) on the last attempt. |
+| `event-derive-venue` | `extract-venue` | `detail-read` → `venue-derived` | Match/create shell `venues` row. Exit 2 if no venue signal. |
 | `event-derive-hosts` | `extract-hosts` | `venue-derived` → `hosts-derived` | Rule-based host detection; NULL host is legit success. |
 | `event-derive-people` | `extract-people` | `hosts-derived` → `people-derived` | Extract performers/creators; NULL is legit success. |
 | `event-enrich-entities` | `enrich-entities` | `people-derived` → `entities-enriched` | Researches each linked entity from its own site; fills blanks only (`engine/entity_enrich.py`). |

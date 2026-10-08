@@ -31,6 +31,7 @@ MAX_ATTEMPTS = 3
 # Default per-action-per-hour limits. Overridden by town-profile.yaml
 # workqueue_rate_limits.<action>.
 _DEFAULT_RATE_LIMITS = {
+    "read-detail":         30,
     "extract-venue":       50,
     "extract-hosts":       50,
     "extract-people":      50,
@@ -200,6 +201,16 @@ def fail(conn: sqlite3.Connection, queue_id: int, error: str) -> None:
             (now, queue_id),
         )
     conn.commit()
+
+
+def is_last_attempt(conn: sqlite3.Connection, event_uid: str, action: str) -> bool:
+    """True when a failure now would be the event's last attempt at `action`
+    (fail() then marks it stuck) — or there is no queue row (a by-hand run)."""
+    row = conn.execute(
+        "SELECT attempts FROM event_workqueue WHERE event_uid = ? AND next_action = ?",
+        (event_uid, action),
+    ).fetchone()
+    return row is None or row[0] >= MAX_ATTEMPTS - 1
 
 
 def park(conn: sqlite3.Connection, event_uid: str) -> None:

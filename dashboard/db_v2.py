@@ -7,7 +7,7 @@ can keep working during the /v2 rollout window.
 
 All writes on the operator's behalf go through `set_*` helpers here rather
 than skill CLIs — approving flips state→approved AND enqueues the first
-workqueue action (`extract-venue`) in the SAME transaction, so the state and
+workqueue action (`read-detail`) in the SAME transaction, so the state and
 the queue row commit or roll back together (no stranded events).
 """
 
@@ -17,6 +17,7 @@ import json
 from typing import Any, Optional
 
 from dashboard.db import connect, _iso_utc_now
+from engine import event_state as _event_state
 from engine import workqueue as _workqueue
 
 
@@ -147,14 +148,14 @@ def event_by_uid_v2(uid: str) -> Optional[dict]:
 
 def set_event_approval(uid: str, status: str, note: Optional[str] = None) -> int:
     """Flip an event's approval_status AND advance state so the pipeline view is
-    coherent. On approval, enqueue the first workqueue action (`extract-venue`)
+    coherent. On approval, enqueue the first workqueue action (`read-detail`)
     in the SAME transaction, so an event can never end up `approved` with no
     queue row (there is no state-driven backfill to rescue it). Uses optimistic
     locking on approval_status so two concurrent approvals don't double-enqueue."""
     if status not in ("approved", "declined"):
         raise ValueError(f"invalid target status: {status}")
     now = _iso_utc_now()
-    # `approved` state feeds extract-venue; `declined` is terminal.
+    # `approved` state feeds the first workqueue action; `declined` is terminal.
     new_state = "approved" if status == "approved" else "declined"
     with connect() as c:
         # connect() is autocommit (isolation_level=None), so wrap the flip + the
@@ -170,7 +171,7 @@ def set_event_approval(uid: str, status: str, note: Optional[str] = None) -> int
                 (status, note, now, new_state, now, uid),
             )
             if cur.rowcount and status == "approved":
-                _workqueue.enqueue(c, uid, "extract-venue")
+                _workqueue.enqueue(c, uid, _event_state.next_action_for("approved"))
             c.execute("COMMIT")
         except Exception:
             c.execute("ROLLBACK")
@@ -182,10 +183,7 @@ def set_event_approval(uid: str, status: str, note: Optional[str] = None) -> int
 # Band 3 — in-flight & recently shipped
 # --------------------------------------------------------------------------
 
-_IN_FLIGHT_STATES = (
-    "approved", "venue-derived", "hosts-derived",
-    "people-derived", "entities-enriched",
-)
+_IN_FLIGHT_STATES = _event_state.IN_FLIGHT_STATES
 
 
 def events_in_flight(limit: int = 50) -> list[dict]:
@@ -378,8 +376,8 @@ def headline_chips() -> dict:
             "WHERE approval_status = 'pending' AND state = 'metadata-extracted'"
         ).fetchone()[0]
         in_flight = c.execute(
-            "SELECT COUNT(*) FROM events WHERE state IN "
-            "('approved','venue-derived','hosts-derived','people-derived','entities-enriched')"
+            f"SELECT COUNT(*) FROM events WHERE state IN "
+            f"({','.join('?' for _ in _IN_FLIGHT_STATES)})", _IN_FLIGHT_STATES,
         ).fetchone()[0]
         shipped = c.execute(
             "SELECT COUNT(*) FROM events WHERE state = 'shipped'"

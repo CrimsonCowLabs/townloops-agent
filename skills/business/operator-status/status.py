@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 
 def main() -> int:
     from engine import db as _engine_db  # imported lazily for clean --help behavior
+    from engine import event_state
 
     with _engine_db.connect() as c:
         pending  = c.execute("SELECT COUNT(*) FROM events WHERE approval_status='pending'").fetchone()[0]
@@ -24,8 +25,9 @@ def main() -> int:
         declined = c.execute("SELECT COUNT(*) FROM events WHERE approval_status='declined'").fetchone()[0]
         shipped  = c.execute("SELECT COUNT(*) FROM events WHERE state='shipped'").fetchone()[0]
         in_flight = c.execute(
-            "SELECT COUNT(*) FROM events WHERE state IN "
-            "('approved','venue-derived','hosts-derived','people-derived','entities-enriched')"
+            f"SELECT COUNT(*) FROM events WHERE state IN "
+            f"({','.join('?' for _ in event_state.IN_FLIGHT_STATES)})",
+            event_state.IN_FLIGHT_STATES,
         ).fetchone()[0]
 
         seed_rows = c.execute(

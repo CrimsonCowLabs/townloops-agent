@@ -41,6 +41,7 @@ _PYTHON = os.environ.get("PYTHON", sys.executable)
 # Note: there is no `extract-metadata` action — event-find lands events directly
 # at state=metadata-extracted, so the `found → extract-metadata` step is skipped.
 _ACTION_SKILLS: dict[str, tuple[str, str]] = {
+    "read-detail":       ("event-read-detail",      "read.py"),
     "extract-venue":     ("event-derive-venue",     "derive.py"),
     "extract-hosts":     ("event-derive-hosts",     "derive.py"),
     "extract-people":    ("event-derive-people",    "derive.py"),
@@ -50,6 +51,9 @@ _ACTION_SKILLS: dict[str, tuple[str, str]] = {
 
 # How many items to claim per action per heartbeat tick
 _BATCH_SIZE = 5
+# A detail read is a Firecrawl scrape + a Codex call (up to ~100s); one per
+# tick keeps it from eating Hermes' 120s cron script budget for the rest.
+_BATCH_SIZES = {"read-detail": 1}
 
 
 def _iso_utc_now() -> str:
@@ -113,7 +117,7 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
             reaped = workqueue.reap_stale_claims(conn)
             per_action: dict[str, dict] = {}
             for action, (skill, entry) in _ACTION_SKILLS.items():
-                claims = workqueue.claim(conn, action, limit=_BATCH_SIZE)
+                claims = workqueue.claim(conn, action, limit=_BATCH_SIZES.get(action, _BATCH_SIZE))
                 if not claims:
                     continue
                 completed = 0
