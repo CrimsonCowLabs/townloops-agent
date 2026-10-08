@@ -39,7 +39,7 @@ step is not built yet — the orchestrator skips its `extract-metadata` action).
 
 | Skill | Action | From state → to state | Notes |
 |---|---|---|---|
-| `event-read-detail` | `read-detail` | `approved` → `detail-read` | One read of the event's own page; quote-checked `accessibility_notes`, else NULL. Gives up (exit 0) on the last attempt. |
+| `event-read-detail` | `read-detail` | `approved` → `detail-read` | One read of the event's own page; quote-checked `accessibility_notes`, `price` and `rsvp_url`, else NULL. Gives up (exit 0) on the last attempt. |
 | `event-derive-venue` | `extract-venue` | `detail-read` → `venue-derived` | Match/create shell `venues` row. Exit 2 if no venue signal. |
 | `event-derive-hosts` | `extract-hosts` | `venue-derived` → `hosts-derived` | Rule-based host detection; NULL host is legit success. |
 | `event-derive-people` | `extract-people` | `hosts-derived` → `people-derived` | Extract performers/creators; NULL is legit success. |

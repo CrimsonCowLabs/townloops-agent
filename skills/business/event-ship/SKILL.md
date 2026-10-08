@@ -62,6 +62,23 @@ only when its field is blank, and the full-body PATCH resends the live value
 otherwise. A NULL is never sent. A create that drops the notes is repaired
 like dropped tags (full-body PATCH + GET verify, else flagged).
 
+## Ticket / price info
+
+TownLoops has no ticket fields, so `events.price` / `events.rsvp_url` (from
+`event-read-detail`) ship as (`engine/event_tickets.py`):
+
+- **Tags** — a stated-free event (free, $0) gets `free`; a stated price, sold
+  out notice or suggested donation drops `free` from the create body. No price
+  stated → tags as extracted.
+- **Description** — a paid, donation or RSVP event gets one line on top:
+  `Tickets: $25–$40 — <link>`, `Tickets: $30 (sold out; waitlist) — <link>`,
+  `Tickets: by donation, $10 suggested`, `RSVP: <link>`. The body is cut to fit
+  the 5000-char limit, never the line. On an already-live row (lookup fill or
+  reconcile PATCH) the line goes on top of the live description, replacing an
+  earlier ticket line, so re-ships are no-ops; a free event adds `free` to the
+  live tags. Built at ship time: the local description and content hash
+  never change.
+
 ## Venue by id
 
 The event payload carries `venue_id` — the derived venue's recorded live id,

@@ -91,7 +91,10 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
     only as quote-checked sentences that name an access feature, else null; skipped with no fetch
     when `source_url` is missing or the seed's listing page; a failed read gives up on the last
-    workqueue attempt instead of parking the event. Ticket/price fields belong in this pass),
+    workqueue attempt instead of parking the event. The same pass keeps the stated `price` (quote-checked,
+    must state a cost) and ticket/RSVP link `rsvp_url` (on the page, never a homepage); `event_tickets.py`
+    turns them into the `free` tag or one `Tickets: …`/`RSVP: …` line atop the shipped description —
+    built at ship time, so the local description and content hash never change),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
     skill: days with no live event, local events not live yet, sparse live metadata, venues of
     upcoming events with no image; LIST/GET only).

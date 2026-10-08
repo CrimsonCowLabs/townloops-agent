@@ -1,6 +1,6 @@
 ---
 name: event-read-detail
-description: Read an approved event's own detail page once (Firecrawl + Codex) and store what it states — today its accessibility notes, quote-checked against the page.
+description: Read an approved event's own detail page once (Firecrawl + Codex) and store what it states — its accessibility notes, price and ticket/RSVP link, each checked against the page.
 ---
 
 # event-read-detail
@@ -21,6 +21,13 @@ event-reconcile only see the seed's listing page; this reads the event's own
   NULL. Never inferred from the venue type. event-ship sends it as the live
   event's `accessibility_notes` (create, and filling a blank on a live row; a
   live value is never overwritten).
+- `events.price` — the page's own words for what it costs to attend (a price
+  or range, free, sold out / waitlist, donation / pay-what-you-can), kept only
+  if on the page and it states a cost ("Doors at 7:30" or "free parking" never
+  do). `events.rsvp_url` — the ticket/RSVP/registration link, kept only if it
+  is an http(s) link on the page and not a homepage or the seed's listing
+  page. event-ship turns these into the `free` tag or one ticket line atop the
+  description (`engine/event_tickets.py`, see event-ship).
 - `detail_read_status` / `detail_read_url` / `detail_read_at` — the pass is
   recorded, so a page is read once per `source_url`, not every tick.
 
@@ -45,6 +52,7 @@ stored value.
 ## References
 
 - `references/accessibility-notes.md` — what counts as access info, what never does.
+- `references/ticket-info.md` — what counts as a price, free, a donation or a ticket link.
 
 ## Contract
 

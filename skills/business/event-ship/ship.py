@@ -14,7 +14,7 @@ import sys
 from typing import Any, Optional
 
 from engine import categories as cats
-from engine import event_dedup
+from engine import event_dedup, event_tickets
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, record_activity,
 )
@@ -39,13 +39,19 @@ def _tl_configured() -> bool:
 def _event_classification(row) -> tuple[list[str], list[str]]:
     """(category_slugs, tags) to send: the row's categories mapped onto the
     town's live slugs (rows from before migration 017 or the old extraction
-    vocabulary still carry e.g. `music`), and its tags as slugs."""
+    vocabulary still carry e.g. `music`), and its tags as slugs — `free`
+    added for a stated-free event, dropped for one with a stated price."""
     stored = row.get("category_slugs") or row.get("category_slug")
     if stored and not cats.town_category_slugs():
         print(f"event {row['event_uid'][:12]}: no town categories snapshot "
               f"({cats.categories_snapshot_path()}) — shipping without categories; "
               "run `town-init setup`", file=sys.stderr)
-    return cats.classify(stored, row.get("tags"))
+    category_slugs, tags = cats.classify(stored, row.get("tags"))
+    return category_slugs, event_tickets.ticket_tags(tags, row.get("price"))
+
+
+def _ticket_line(row) -> Optional[str]:
+    return event_tickets.ticket_line(row.get("price"), row.get("rsvp_url"))
 
 
 def _event_payload(row) -> dict:
@@ -55,8 +61,9 @@ def _event_payload(row) -> dict:
         "title": row["title"] or row["name"],
         "start_at": row["date_utc"],
     }
-    if row["description"]:
-        payload["description"] = row["description"]
+    description = event_tickets.with_ticket_line(row["description"], _ticket_line(row))
+    if description:
+        payload["description"] = description
     if row["end_at_utc"]:
         payload["end_at"] = row["end_at_utc"]
     if row["venue_name"] or row["venue_raw"]:
@@ -142,14 +149,16 @@ def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Op
     parks the event for the operator. Returns the live slug."""
     from engine.live_patch import apply_event_patch
     slug = live["slug"]
-    if payload.get("accessibility_notes") and "accessibility_notes" not in live:
+    line = _ticket_line(event)
+    if ((payload.get("accessibility_notes") and "accessibility_notes" not in live)
+            or (line and "description" not in live)):
         # A source_url match is a list row; decide "blank" on the full row.
         try:
             live = client.get("events", slug) or live
         except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
             print(f"read live event {slug} failed: {str(e)[:200]}", file=sys.stderr)
             return None
-    overrides = _fill_overrides(live, payload)
+    overrides = _fill_overrides(live, payload, event)
     if not overrides:
         return slug
     try:
@@ -165,11 +174,17 @@ def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Op
     return slug
 
 
-def _fill_overrides(live: dict, payload: dict) -> dict:
+def _fill_overrides(live: dict, payload: dict, event: Optional[dict] = None) -> dict:
+    event = event or {}
     out: dict[str, Any] = {}
     for k in ("title", "description", "start_at", "source_url", "accessibility_notes"):
         if payload.get(k) and not live.get(k):
             out[k] = payload[k]
+    if live.get("description"):
+        # The ticket line goes on top of the live words, replacing an earlier one.
+        described = event_tickets.with_ticket_line(live["description"], _ticket_line(event))
+        if described != live["description"]:
+            out["description"] = described
     # A source_url match may start at another time; our end only fits ours.
     if (payload.get("end_at") and not live.get("end_at")
             and _to_dt(payload["start_at"]) == _to_dt(live.get("start_at"))):
@@ -177,6 +192,8 @@ def _fill_overrides(live: dict, payload: dict) -> dict:
     for k, cap in (("category_slugs", cats.MAX_CATEGORIES), ("tags", cats.MAX_TAGS)):
         have = list(live.get(k) or [])
         merged = (have + [v for v in payload.get(k) or [] if v not in have])[:max(cap, len(have))]
+        if k == "tags":
+            merged = event_tickets.live_tags(merged, event.get("price"))
         if merged != have:
             out[k] = merged
     if payload.get("venue_id") and not live.get("venue_id"):
@@ -317,14 +334,16 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
                       venue_slug: Optional[str] = None) -> Optional[str]:
     """Apply a source-side date/venue change to the existing live event as a
     full-body PATCH built from the current live row, then GET-verify it.
-    Accessibility notes fill the live row only when it has none. Returns the
+    Accessibility notes fill the live row only when it has none; the ticket
+    line tops the live description and a free event gains `free`. Returns the
     live slug, or None (→ rc 1) when the change can't be applied correctly or
     didn't land as sent (then the event is flagged stuck)."""
     from engine.live_patch import apply_event_patch
     changes = meta.get("changes") or {}
     live_slug = meta["live_slug"]
     notes = event.get("accessibility_notes")
-    if not ({"start_at", "venue"} & changes.keys()) and not notes:
+    line = _ticket_line(event)
+    if not ({"start_at", "venue"} & changes.keys()) and not (notes or line or event.get("price")):
         return live_slug
     try:
         current = client.get("events", live_slug) or {}
@@ -334,6 +353,13 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     overrides: dict[str, Any] = {}
     if notes and not current.get("accessibility_notes"):
         overrides["accessibility_notes"] = notes
+    described = event_tickets.with_ticket_line(
+        current.get("description") or event.get("description"), line)
+    if line and described != current.get("description"):
+        overrides["description"] = described
+    tags = event_tickets.live_tags(list(current.get("tags") or []), event.get("price"))
+    if tags != list(current.get("tags") or []):
+        overrides["tags"] = tags
     if "start_at" in changes:
         overrides["start_at"] = event["date_utc"]
         overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),

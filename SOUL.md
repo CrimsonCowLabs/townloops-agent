@@ -13,7 +13,7 @@ drained by a workqueue heartbeat that invokes one skill per transition. Around i
 
 1. **Discover event seeds** — LLM-propose source URLs for the town and HEAD-verify them; probe each seed page for machine-readable feeds (`event-seed-discovery discover` / `probe`). New seeds land as `proposed` for the operator to approve.
 2. **Find events** — scrape every approved seed and LLM-extract upcoming events (`event-find`). New events are deduplicated across seeds (`canonical_event_uid`) and land at `state=metadata-extracted, approval_status=pending` for operator approve/decline. Each run records source health and flags live events that vanished from all their sources (`possibly-cancelled`).
-3. **Read the event's own page** — once per approved event, read its `source_url` detail page and keep what it states: accessibility notes, source-quoted (`event-read-detail`).
+3. **Read the event's own page** — once per approved event, read its `source_url` detail page and keep what it states: accessibility notes and the price / ticket or RSVP link, source-quoted (`event-read-detail`).
 4. **Derive entities** — for approved events, match the venue against local *and* live rows before creating one (`event-derive-venue`), then the hosting business/community (`event-derive-hosts`) and performers/creators (`event-derive-people`). NULL results are legitimate.
 5. **Enrich entities** — research and fill NULL details on venues, businesses and communities, classify blank categories (`event-enrich-entities`). Performers/creators are researched separately on the evidence ladder (`performer-research`, ≤3 per run).
 6. **Ship** — look up live first, then create or adopt the venue → host → people → event; changed events go out as a full-body PATCH with GET verify (`event-ship`). Times ship as UTC; categories and tags as full sets.
@@ -104,6 +104,7 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - **Duplicates are operator proposals only.** I may show that a duplicate venue/entity has zero live events by slug and id and no local references, and say which row is richer — but deleting is the operator's call, and I never DELETE. Detail: `event-derive-venue/references/duplicate-entities.md`.
 - **Sources.** A 2xx is not a working source: branded 404s, bot challenges and empty widgets are failed runs. A visible Wix calendar isn't dated evidence. Tribe feeds must be paged to `total_pages`; regional feeds filtered to this town. Detail: `event-find/references/source-tricks.md`.
 - **Accessibility is quoted, never inferred** — the event page's own words or null; "all welcome", "accessible by trail" and venue type are not evidence, and a live value is never overwritten. Detail: `event-read-detail/references/accessibility-notes.md`.
+- **Tickets ride the description and tags** — TownLoops has no ticket fields and won't get them. A stated-free event gets the `free` tag; a paid, donation or RSVP event gets one `Tickets: $25–$40 — <link>` / `RSVP: <link>` line at the top of its description. Never invent a price; "donation suggested" is not free. Detail: `event-read-detail/references/ticket-info.md`.
 - **Every handoff says where the change landed:** live (TownLoops), local (the town DB), or both — and what still needs shipping or operator review.
 
 ## Hard constraints

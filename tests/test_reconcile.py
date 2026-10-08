@@ -524,6 +524,28 @@ class TestDownstream:
         payload = self._patch(conn, uid, client=client)
         assert payload["accessibility_notes"] == "Wheelchair seating up front."
 
+    def test_ship_patch_tops_the_live_description_with_one_ticket_line(self, skill):
+        conn, uid = self._staged_change(skill)
+        conn.execute("UPDATE events SET price = 'Tickets $20.', "
+                     "rsvp_url = 'https://tickets.example/e/jazz' WHERE event_uid = ?", (uid,))
+        client = self._api()
+        line = "Tickets: $20 — https://tickets.example/e/jazz"
+        assert self._patch(conn, uid, client=client)["description"] == f"{line}\n\nWeekly jazz."
+        self._patch(conn, uid, client=client)          # a second PATCH doesn't stack it
+        assert client.events["jazz"]["description"] == f"{line}\n\nWeekly jazz."
+
+    def test_ship_patch_with_only_ticket_info_is_idempotent(self, skill):
+        conn, uid = self._staged_change(skill, venue="Gunbarrel Tavern")
+        conn.execute("UPDATE events SET price = 'Free admission.', "
+                     "extra_json = json_set(extra_json, '$.reconcile.changes', json('{}')) "
+                     "WHERE event_uid = ?", (uid,))
+        client = self._api()
+        assert "free" in self._patch(conn, uid, client=client)["tags"]
+        n = len(client.patches())
+        self._patch(conn, uid, client=client)
+        assert len(client.patches()) == n
+        assert client.events["jazz"]["description"] == "Weekly jazz."
+
     def test_venue_change_unresolved_fails_for_retry(self, skill):
         conn, uid = self._staged_change(skill, venue="Brand New Hall")
         client = self._api()

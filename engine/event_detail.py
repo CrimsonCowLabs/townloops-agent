@@ -3,15 +3,17 @@
 event-find and event-reconcile only see the seed's listing page. After the
 operator approves an event, the `read-detail` workqueue action (skill
 `event-read-detail`) reads the event's own page once — Firecrawl markdown +
-one Codex call — and stores what it states. Today that is accessibility
-notes; ticket/price info rides the same pass (add a key to DETAIL_FIELDS and
-a column to `_extract`).
+one Codex call — and stores what it states: accessibility notes, and the
+price and ticket/RSVP link (shipped via engine/event_tickets.py). A new
+field is a key in DETAIL_FIELDS and a column in `_extract`.
 
 Accessibility is a differentiator, but a wrong claim does harm. The LLM only
 picks sentences; a sentence is kept only if it is on the page (quote check)
 and is about access (wheelchair, ASL, sensory-friendly, …) — "accessible by
 trail", "all welcome" or a site's "digital accessibility" footer never are.
-Nothing is inferred: no quote → NULL.
+Nothing is inferred: no quote → NULL. The same goes for a price: it is kept
+only if the quote is on the page and states a cost; a ticket link only if
+it is on the page and is not a homepage or the seed's listing page.
 
 The read is recorded on the event (`detail_read_*`), so it happens once per
 source_url, not every tick; a page that is just the seed's listing (or no
@@ -25,10 +27,12 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Callable, Optional
+from urllib.parse import urlsplit
 
 from engine.derive_helpers import iso_utc_now
 from engine.discovery import canonicalize_url
 from engine.event_extract import codex_exec, firecrawl_markdown
+from engine.event_tickets import price_kind
 
 
 # EventPayload / EventPatch limit.
@@ -39,6 +43,7 @@ ACCESSIBILITY_MAX = 2000
 FETCH_TIMEOUT_S = 25
 CODEX_TIMEOUT_S = 40
 PAGE_CHARS = 12000
+PRICE_MAX = 300
 
 # Keys asked of the LLM, one prompt line each.
 DETAIL_FIELDS = {
@@ -50,6 +55,19 @@ DETAIL_FIELDS = {
         "Copy the page's exact words. Do not paraphrase, summarize or infer "
         "(\"all welcome\", \"accessible by trail\" and a site-wide accessibility "
         "statement are not accessibility info). [] if the page says nothing"
+    ),
+    "price_quote": (
+        "the sentence or phrase copied word for word from the page that states "
+        "what it costs to attend this event: a price or price range, free, sold "
+        "out / waitlist, or a donation / pay-what-you-can. null if the page does "
+        "not say. Never guess a price; free parking or free snacks do not make "
+        "the event free"
+    ),
+    "ticket_url": (
+        "the full http(s) URL, exactly as it appears on the page, of the link to "
+        "buy tickets, RSVP or register for this event (a ticketing or "
+        "registration page, or this event's own page). Never a site or venue "
+        "homepage. null if there is none"
     ),
 }
 
@@ -128,6 +146,41 @@ def accessibility_notes(quotes, page: str) -> Optional[str]:
     return notes or None
 
 
+def ticket_price(quote, page: str) -> Optional[str]:
+    """The page's own price wording, or None unless it is on `page` and
+    states a cost (engine/event_tickets.price_kind)."""
+    if not isinstance(quote, str):
+        return None
+    text = re.sub(r"\s+", " ", _MD_EMPHASIS.sub("", quote)).strip().strip("\"'")
+    key = _norm(text).rstrip(".,;:!? ")
+    kind = price_kind(text)
+    if not key or len(text) > PRICE_MAX or kind is None:
+        return None
+    norm_page = _norm(page)
+    pos = norm_page.find(key)
+    if pos < 0:
+        return None
+    # Read a fragment ("Free") to the end of its sentence on the page
+    # ("free parking in lot"): it must still say the same thing.
+    end = _SENTENCE_END.search(norm_page, pos + len(key))
+    return text if price_kind(norm_page[pos:end.start() if end else None]) == kind else None
+
+
+_SENTENCE_END = re.compile(r"[!?;]|\.(?!\d)")
+_HOMEPAGE_PATH = re.compile(r"/?(?:(?:home|index|default)(?:\.\w+)?/?)?", re.IGNORECASE)
+_PAGE_URL = re.compile(r"https?://[^\s)\]>\"'<]+")
+
+
+def ticket_url(url, page: str, exclude: set[str]) -> Optional[str]:
+    """`url` if it is an http(s) link on `page` that is not a site's
+    homepage or one of `exclude` (canonical seed listing URLs), else None."""
+    canon = _canon(url)
+    if not canon or canon in exclude or _HOMEPAGE_PATH.fullmatch(urlsplit(canon).path):
+        return None
+    on_page = {_canon(u.rstrip(".,;:")) for u in _PAGE_URL.findall(page)}
+    return url.strip() if canon in on_page else None
+
+
 # --------------------------------------------------------------------------
 # The read
 # --------------------------------------------------------------------------
@@ -176,9 +229,13 @@ def _parse_object(stdout: str) -> Optional[dict]:
     return obj if isinstance(obj, dict) else None
 
 
-def _extract(parsed: dict, page: str) -> dict:
+def _extract(parsed: dict, page: str, seeds: set[str]) -> dict:
     """Event columns from the LLM's answer, each checked against the page."""
-    return {"accessibility_notes": accessibility_notes(parsed.get("accessibility_quotes"), page)}
+    return {
+        "accessibility_notes": accessibility_notes(parsed.get("accessibility_quotes"), page),
+        "price": ticket_price(parsed.get("price_quote"), page),
+        "rsvp_url": ticket_url(parsed.get("ticket_url"), page, seeds),
+    }
 
 
 def _record(conn, event: dict, status: str, url: Optional[str], fields: dict) -> None:
@@ -200,7 +257,8 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     llm = llm or codex_exec
     url = event.get("source_url")
     canon = _canon(url)
-    if not canon or canon in seed_urls(conn, event):
+    seeds = seed_urls(conn, event)
+    if not canon or canon in seeds:
         _record(conn, event, "no-detail-page", url, {})
         return DetailResult("no-detail-page")
     if event.get("detail_read_status") == "read" and event.get("detail_read_url") == url:
@@ -220,6 +278,6 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
             _record(conn, event, "failed", url, {})
             return DetailResult("failed", error=err)
         return DetailResult("retry", error=err)
-    fields = _extract(parsed, markdown)
+    fields = _extract(parsed, markdown, seeds)
     _record(conn, event, "read", url, fields)
     return DetailResult("read", fields=fields)
