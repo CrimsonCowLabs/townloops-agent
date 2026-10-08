@@ -46,10 +46,13 @@ everything lands in the local DB for the operator.
      live TownLoops match (mirrored locally as `source_kind='live'` with
      `townloops_slug`, `extra_json.live_id`) → new local shell, website found via
      Firecrawl search, then address/phone/socials/description/`image_path`
-     filled (fill blanks only);
-   - a live entity with no image gets a locally staged `image_path`
-     (`enrichment_status='image-proposed'`), listed in the report. Nothing
-     pushes these yet.
+     filled (fill blanks only). A lookup the budget cut short leaves the shell
+     `pending` (researched next run, "research deferred" in the report); only a
+     search that ran and found nothing records `not-found`;
+   - a live entity with no image gets a locally staged `image_path` and
+     nothing else (`enrichment_status='image-proposed'`), listed in the
+     report. One whose site shows no image is `image-not-found` and is looked
+     at again only after 90 days (`entity_enrich.LIVE_IMAGE_RETRY_DAYS`).
    Sets `events.derived_venue_uid` / `derived_host_uid`; event-derive-venue
    and event-derive-hosts keep those instead of re-deriving.
 6. **Report**: `state/reports/reconcile-<date>.md`, a Telegram line if configured.
@@ -86,5 +89,8 @@ Flags: `--horizon-days N` (180), `--max-lookups N` (80); `run` also takes
 
 The cron wrapper (`scripts/event_reconcile.py`) detaches the run because a full
 pass is much longer than Hermes' 120s cron script timeout. Log:
-`state/logs/event-reconcile-<date>.log`. A flock (`event-reconcile`) keeps runs
-from overlapping.
+`state/logs/event-reconcile-<date>.log`. A detached supervisor waits on the run
+and reports a nonzero exit (token expiry, API/pagination or migration error,
+crash, kill) as a `run-failed` row on the dashboard ticker plus a Telegram line.
+A flock (`event-reconcile`) keeps runs from overlapping; an overlapping run is
+recorded as `skipped-overlap` and exits 0.

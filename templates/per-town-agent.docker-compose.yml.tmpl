@@ -1,7 +1,12 @@
 # Per-town townloops-agent — HARDENED for autonomous / YOLO mode.
 # =============================================================
 # Rendered per-town by `bin/townloops-agent-add {slug}` into
-# ~/townloops-agents/{slug}/docker-compose.yml.
+# ~/townloops-agents/{slug}/docker-compose.yml. Re-render an existing town
+# with `bin/townloops-agent-add {slug} --rerender` (never by hand) — it checks
+# hermes-home and the logins first. Host-specific changes go in that town's
+# docker-compose.override.yml, not in this file — e.g. a LAN dashboard port
+# (`!override` replaces the list instead of adding a second binding):
+#   services: {dashboard: {ports: !override ["0.0.0.0:8090:8090"]}}
 #
 # Prerequisites (both from templates/_shared/):
 #   - firecrawl stack up (creates external network `firecrawl-shared-net`)
@@ -201,6 +206,9 @@ services:
       - ./cron:/home/agent/.hermes/cron:ro
       # Read-only view of squid access.log for the /blocked page.
       - squid-egress-log:/squid-log:ro
+      # Codex CLI ChatGPT session — dashboard-spawned skills (event-find,
+      # category classify) call the LLM too; same auth as the agent.
+      - /home/aaron/.codex:/home/agent/.codex:rw
 
     # Bypass the base image entrypoint (which swaps to a venv that lacks
     # our pip-installed deps). Use system python3 directly — that's the

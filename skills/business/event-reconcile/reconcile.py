@@ -271,12 +271,13 @@ def _resolve_and_tally(conn, kind: str, name: str, event: dict, live: Live,
                    town: str, budget: Budget, report: dict) -> str:
     """Resolve via engine.entity_enrich and tally the outcome into `report`."""
     r = entity_enrich.resolve_entity(conn, kind, name, event, live.entities[kind], town, budget)
+    if r.image_proposal:
+        # A live mirror's image proposal, whether just mirrored or matched locally.
+        report["live_image_proposals"].append(r.image_proposal)
     if r.outcome == "live":
         report["live_matched"][kind] += 1
-        if r.image_proposal:
-            report["live_image_proposals"].append(r.image_proposal)
     elif r.outcome == "created":
-        report["created"][kind].append({"name": name, "filled": r.filled})
+        report["created"][kind].append({"name": name, "filled": r.filled, "status": r.status})
     return r.entity_uid
 
 
@@ -368,7 +369,10 @@ def _write_report(run_id: str, pulled: Optional[dict], enriched: Optional[dict])
                   f"- Matched to live entities: {enriched['live_matched']}"]
         for kind, items in enriched["created"].items():
             for it in items:
-                lines.append(f"- New {kind}: {it['name']} (filled: {', '.join(it['filled']) or 'nothing found'})")
+                if it.get("status") == "pending":
+                    lines.append(f"- New {kind}: {it['name']} (research deferred to next run — lookup budget ran out or site unreadable)")
+                else:
+                    lines.append(f"- New {kind}: {it['name']} (filled: {', '.join(it['filled']) or 'nothing found'})")
         for p in enriched["live_image_proposals"]:
             lines.append(f"- Image proposed for live {p['kind']} `{p['slug']}`: {p['image_path']}")
     path.write_text("\n".join(lines) + "\n")
@@ -395,8 +399,12 @@ def cmd_run(args) -> int:
             elif not args.dry_run and not args.skip_enrich:
                 enriched = enrich(conn, live, profile, pulled["staged_uids"], args.max_lookups)
     except _lock.LockHeld as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
+        # Not a failure — a slow run is still going; the supervisor in
+        # scripts/event_reconcile.py would report a nonzero exit as one.
+        print(json.dumps({"skipped": f"previous run still active: {e}"}))
+        inspection.record(worker=_WORKER, action="skipped-overlap", target=args.cmd,
+                          detail=f"previous run still active ({e.holder})")
+        return 0
 
     summary = {"run": run_id, "dry_run": getattr(args, "dry_run", False)}
     if pulled:
@@ -413,7 +421,10 @@ def cmd_run(args) -> int:
         if pulled:
             _telegram(f"[{os.environ.get('TOWNLOOPS_TOWN_SLUG', '?')}] weekly reconcile: "
                       f"{pulled['new']} new, {pulled['changed']} changed, {pulled['unchanged']} already live "
-                      f"→ pending review. Report: {path.name}")
+                      f"→ pending review."
+                      + (f" {pulled['seed_errors']} of {pulled['seeds']} seeds failed to pull."
+                         if pulled["seed_errors"] else "")
+                      + f" Report: {path.name}")
     inspection.record(worker=_WORKER, action="skill-invoke", target=args.cmd,
                       detail=json.dumps(summary)[:200])
     print(json.dumps({"summary": summary}, ensure_ascii=False))

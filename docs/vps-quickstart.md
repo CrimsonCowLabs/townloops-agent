@@ -255,6 +255,13 @@ Replace `YOUR-TOWN-SLUG` with your actual town's slug (like `slt` or
 - Create a folder at `~/townloops-agents/YOUR-TOWN-SLUG/`
 - Copy in the docker-compose file, `.env`, `town-profile.yaml`, and cron schedule
 
+Later, to pick up a newer compose template for an existing town, run
+`./bin/townloops-agent-add YOUR-TOWN-SLUG --rerender`. Don't re-render by hand.
+The command first checks that the town's `hermes-home` folder and its logins are
+in place, and it refuses to re-render if they aren't. It keeps the old file as a
+backup and shows you the diff. Put host-specific edits in the town's
+`docker-compose.override.yml`.
+
 ### Fill in the `.env` file
 
 ```

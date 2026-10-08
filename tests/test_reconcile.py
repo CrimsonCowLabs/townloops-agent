@@ -398,6 +398,26 @@ class TestStageAndEnrich:
         report = mod.enrich(conn, live, {}, uids, max_lookups=3)
         assert len(mod.research_calls) <= 3 and report["lookups_left"] == 0
 
+    def test_venue_cut_off_by_budget_is_researched_next_week(self, skill, tmp_path, monkeypatch):
+        mod, conn = skill
+        live = FakeLive()
+        [c] = _classified(live, [{"title": "Pumpkin Carving", "date": "2026-10-20T15:00:00",
+                                  "venue": "Pumpkin Patch Co"}])
+        uid, _ = mod._stage(conn, "Seed", c, "run-1")
+        report = mod.enrich(conn, live, {}, [uid], max_lookups=0)
+        vuid = conn.execute("SELECT derived_venue_uid FROM events").fetchone()[0]
+        status = lambda: conn.execute("SELECT enrichment_status FROM venues WHERE entity_uid = ?",
+                                      (vuid,)).fetchone()[0]
+        assert status() == "pending"
+        monkeypatch.setattr(mod, "_REPORT_DIR", tmp_path)
+        text = mod._write_report("2026-10-11T02:00:00", None, report).read_text()
+        assert "New venue: Pumpkin Patch Co (research deferred to next run — lookup budget ran out or site unreadable)" in text
+
+        conn.execute("UPDATE events SET derived_venue_uid = NULL")
+        mod.enrich(conn, live, {}, [uid], max_lookups=5)
+        assert conn.execute("SELECT derived_venue_uid FROM events").fetchone()[0] == vuid
+        assert status() == "enriched"
+
 
 # --------------------------------------------------------------------------
 # Downstream: event-ship PATCHes changed live events; derive honors presets.

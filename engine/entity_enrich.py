@@ -5,7 +5,10 @@ budget.
 
 Never writes to TownLoops. Live rows are mirrored locally; an image found for
 a live row without one is staged as a proposal (`image-proposed`) for the
-operator, never filled into other fields. Researched values are verbatim from
+operator, never filled into other fields; a live row whose site shows no
+image (`image-not-found`) is looked at again only after
+LIVE_IMAGE_RETRY_DAYS. A lookup the budget cut short leaves the entity
+`pending` for the next run. Researched values are verbatim from
 the page (no synthesized copy) and are validated against
 `entity_payload.schema.json` before they touch a row.
 """
@@ -15,6 +18,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
@@ -62,7 +66,10 @@ TABLES = {k: SPECS[k].table for k in ("venue", "business", "community")}
 ENRICH_FIELDS = ("description", "address", "website", "phone", "image_path",
                  "image_alt", *_SOCIALS)
 # enrichment_status values that mean "already researched — don't repeat".
-DONE_STATUSES = ("enriched", "not-found", "image-proposed", "live", "needs-review")
+DONE_STATUSES = ("enriched", "not-found", "image-proposed", "image-not-found", "live",
+                 "needs-review")
+# A live mirror whose site showed no image is researched again after this.
+LIVE_IMAGE_RETRY_DAYS = 90
 
 
 class Budget:
@@ -85,6 +92,9 @@ class Resolution:
     filled: list[str] = field(default_factory=list)
     # Set when a live row without an image got one staged locally.
     image_proposal: Optional[dict] = None
+    # A created shell's enrichment_status (`pending` when the budget cut its
+    # lookup short).
+    status: Optional[str] = None
 
 
 def _pick_site(name: str, results: list[dict]) -> Optional[str]:
@@ -323,12 +333,56 @@ def borrow_property_image(conn: sqlite3.Connection, venue_uid: str,
     return None
 
 
+def _retry_due(enriched_at: Optional[str]) -> bool:
+    try:
+        last = datetime.fromisoformat(enriched_at or "")
+    except ValueError:
+        return True
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - last >= timedelta(days=LIVE_IMAGE_RETRY_DAYS)
+
+
+def _propose_live_image(conn: sqlite3.Connection, kind: str, mirror: dict, town: str,
+                        budget: Budget) -> tuple[list[str], Optional[dict]]:
+    """Look for an image for a live mirror that has none. Only the image is
+    staged (ship never sends a mirror's other fields). Returns (filled,
+    proposal). A lookup the budget cut short leaves the mirror as it was; a
+    site with no image backs off for LIVE_IMAGE_RETRY_DAYS."""
+    status = mirror.get("enrichment_status")
+    if mirror.get("image_path") or status == "image-proposed":
+        return [], None
+    if status == "image-not-found" and not _retry_due(mirror.get("enriched_at")):
+        return [], None
+    found = _lookup(mirror["name"], mirror.get("website"), town, budget, kind)
+    if found.exhausted:
+        return [], None
+    image = {k: found.payload[k] for k in ("image_path", "image_alt") if found.payload.get(k)}
+    if not image.get("image_path"):
+        fill_blanks(conn, kind, mirror["entity_uid"], {}, "image-not-found")
+        return [], None
+    filled = fill_blanks(conn, kind, mirror["entity_uid"], image, "image-proposed")
+    return filled, {"kind": kind, "slug": mirror["townloops_slug"], "image_path": image["image_path"]}
+
+
+def _research_local(conn: sqlite3.Connection, kind: str, entity_uid: str, name: str,
+                    website: Optional[str], town: str, budget: Budget) -> list[str]:
+    """Research a local (non-mirror) entity and fill its blanks. Only a
+    lookup that actually ran records `enriched`/`not-found`; one the budget
+    cut short leaves the status (`pending`) for the next run."""
+    found = _lookup(name, website, town, budget, kind)
+    if found.exhausted:
+        return []
+    return fill_blanks(conn, kind, entity_uid, found.payload,
+                       "enriched" if found.payload else "not-found")
+
+
 def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
                    live_rows: list[dict], town: str, budget: Budget) -> Resolution:
     """Resolve `name` (a `kind` named on `event`) to a local entity_uid:
 
-    - local match → enriched once if it has no image (live mirrors only get
-      an image proposal);
+    - local match → researched once if it has no image (a live mirror only
+      gets an image proposal);
     - live match (from `live_rows`) → mirrored locally; if the live row has
       no image, one found on its site is staged as a proposal;
     - otherwise → a new derived shell, enriched from a site search.
@@ -337,27 +391,22 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     local_rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
     hit = best_name_match(name, local_rows)
     if hit:
-        filled: list[str] = []
-        if not hit.get("image_path") and hit.get("enrichment_status") not in ("enriched", "not-found", "image-proposed"):
-            payload = research_entity(hit["name"], hit.get("website"), town, budget, kind)
-            if payload:
-                status = "image-proposed" if hit.get("source_kind") == "live" else "enriched"
-                filled = fill_blanks(conn, kind, hit["entity_uid"], payload, status)
+        if hit.get("source_kind") == "live":
+            filled, proposal = _propose_live_image(conn, kind, hit, town, budget)
+            return Resolution(hit["entity_uid"], "local", filled, proposal)
+        filled = []
+        if not hit.get("image_path") and hit.get("enrichment_status") not in DONE_STATUSES:
+            filled = _research_local(conn, kind, hit["entity_uid"], hit["name"],
+                                     hit.get("website"), town, budget)
         return Resolution(hit["entity_uid"], "local", filled)
 
     live_hit = best_name_match(name, live_rows)
     if live_hit:
         entity_uid = mirror_live_entity(conn, kind, live_hit)
-        if live_hit.get("image_path"):
-            return Resolution(entity_uid, "live")
-        payload = research_entity(live_hit["name"], live_hit.get("website"), town, budget, kind)
-        if not payload.get("image_path"):
-            return Resolution(entity_uid, "live")
-        filled = fill_blanks(conn, kind, entity_uid,
-                             {k: payload[k] for k in ("image_path", "image_alt") if payload.get(k)},
-                             "image-proposed")
-        return Resolution(entity_uid, "live", filled,
-                          {"kind": kind, "slug": live_hit["slug"], "image_path": payload["image_path"]})
+        mirror = dict(conn.execute(f"SELECT * FROM {table} WHERE entity_uid = ?",
+                                   (entity_uid,)).fetchone())
+        filled, proposal = _propose_live_image(conn, kind, mirror, town, budget)
+        return Resolution(entity_uid, "live", filled, proposal)
 
     entity_uid = mint_entity_uid(kind, name, event["event_uid"])
     fields = {
@@ -371,6 +420,7 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     if kind == "community":
         fields["kind"] = "group"
     insert_entity(conn, table, entity_uid, fields)
-    payload = research_entity(name, None, town, budget, kind)
-    filled = fill_blanks(conn, kind, entity_uid, payload, "enriched" if payload else "not-found")
-    return Resolution(entity_uid, "created", filled)
+    filled = _research_local(conn, kind, entity_uid, name, None, town, budget)
+    status = conn.execute(f"SELECT enrichment_status FROM {table} WHERE entity_uid = ?",
+                          (entity_uid,)).fetchone()[0]
+    return Resolution(entity_uid, "created", filled, status=status)

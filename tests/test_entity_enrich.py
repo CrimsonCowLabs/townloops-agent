@@ -154,11 +154,105 @@ class TestResolveEntity:
         assert row["source_kind"] == "derived" and row["address"] == "1 Main St"
         assert row["category_slug"] == "family" and row["enrichment_status"] == "enriched"
 
-    def test_unknown_entity_out_of_budget_is_not_found(self, conn, net):
+    def test_unknown_entity_out_of_budget_stays_pending(self, conn, net):
         r = ee.resolve_entity(conn, "community", "Rotary Club", EVENT, [], "Tahoe", ee.Budget(0))
         assert r.outcome == "created" and r.filled == []
         row = conn.execute("SELECT * FROM communities WHERE entity_uid = ?", (r.entity_uid,)).fetchone()
-        assert row["enrichment_status"] == "not-found" and row["kind"] == "group"
+        assert row["enrichment_status"] == "pending" and row["kind"] == "group"
+
+    def test_budget_running_out_between_search_and_scrape_stays_pending(self, conn, net):
+        r = ee.resolve_entity(conn, "venue", "Pumpkin Patch Co", EVENT, [], "Tahoe", ee.Budget(1))
+        row = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (r.entity_uid,)).fetchone()
+        assert row["enrichment_status"] == "pending" and row["enriched_at"] is None
+
+    def test_search_that_ran_and_found_nothing_is_not_found(self, conn, net, monkeypatch):
+        import engine.discovery as discovery
+        monkeypatch.setattr(discovery, "firecrawl_search", lambda q, limit=5, **kw: [])
+        r = ee.resolve_entity(conn, "venue", "Pumpkin Patch Co", EVENT, [], "Tahoe", ee.Budget(5))
+        row = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (r.entity_uid,)).fetchone()
+        assert row["enrichment_status"] == "not-found"
+
+    def test_pending_shell_is_researched_next_run(self, conn, net):
+        first = ee.resolve_entity(conn, "venue", "Pumpkin Patch Co", EVENT, [], "Tahoe", ee.Budget(0))
+        again = ee.resolve_entity(conn, "venue", "Pumpkin Patch Co", EVENT, [], "Tahoe", ee.Budget(5))
+        assert (again.entity_uid, again.outcome) == (first.entity_uid, "local")
+        row = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (first.entity_uid,)).fetchone()
+        assert row["enrichment_status"] == "enriched" and row["phone"] == "555-0100"
+
+    def test_local_match_whose_search_finds_nothing_is_not_found(self, conn, net, monkeypatch):
+        import engine.discovery as discovery
+        monkeypatch.setattr(discovery, "firecrawl_search", lambda q, limit=5, **kw: [])
+        uid = _venue(conn)
+        ee.resolve_entity(conn, "venue", "Pumpkin Patch Co", EVENT, [], "Tahoe", ee.Budget(5))
+        row = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (uid,)).fetchone()
+        assert row["enrichment_status"] == "not-found"
+
+
+LIVE_NO_IMAGE = [{"id": 7, "slug": "pumpkin-patch", "name": "Pumpkin Patch Co",
+                  "website": "https://pp.example", "image_path": None}]
+
+
+class TestLiveMirrorResearch:
+    """A live mirror is researched only for an image proposal, and a search
+    that found no image backs off instead of repeating every week."""
+
+    def _resolve(self, conn, budget):
+        return ee.resolve_entity(conn, "venue", "Pumpkin Patch Co", EVENT, LIVE_NO_IMAGE,
+                                 "Tahoe", ee.Budget(budget))
+
+    def _row(self, conn, uid):
+        return conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (uid,)).fetchone()
+
+    def test_out_of_budget_mirror_is_retried_next_run(self, conn, net):
+        uid = self._resolve(conn, 0).entity_uid
+        assert self._row(conn, uid)["enrichment_status"] == "live"
+        r = self._resolve(conn, 5)
+        assert r.image_proposal == {"kind": "venue", "slug": "pumpkin-patch",
+                                    "image_path": "https://pp.example/og.png"}
+        row = self._row(conn, uid)
+        assert row["enrichment_status"] == "image-proposed"
+        assert row["image_path"] == "https://pp.example/og.png"
+
+    def test_mirror_matched_locally_gets_only_an_image(self, conn, net):
+        uid = self._resolve(conn, 0).entity_uid
+        self._resolve(conn, 5)
+        row = self._row(conn, uid)
+        assert row["image_path"] and row["phone"] is None and row["description"] is None
+
+    def test_no_image_found_backs_off(self, conn, net, monkeypatch):
+        import engine.research as research
+
+        class NoImage:
+            def __init__(self, url):
+                self.payload, self.fetched_from = {"phone": "555-0100"}, [url]
+
+        monkeypatch.setattr(research, "research_url", lambda url, use_firecrawl=False: NoImage(url))
+        uid = self._resolve(conn, 5).entity_uid
+        row = self._row(conn, uid)
+        assert row["enrichment_status"] == "image-not-found" and row["enriched_at"]
+        assert row["phone"] is None
+
+        calls = []
+        monkeypatch.setattr(research, "research_url",
+                            lambda url, use_firecrawl=False: calls.append(url))
+        self._resolve(conn, 5)
+        assert calls == []
+
+    def test_backoff_expires(self, conn, net):
+        uid = self._resolve(conn, 0).entity_uid
+        conn.execute("UPDATE venues SET enrichment_status = 'image-not-found', enriched_at = ? "
+                     "WHERE entity_uid = ?", ("2026-01-01T00:00:00+00:00", uid))
+        self._resolve(conn, 5)
+        assert self._row(conn, uid)["enrichment_status"] == "image-proposed"
+        assert net["research"] == ["https://pp.example"]
+
+    def test_pending_proposal_is_not_researched_again(self, conn, net):
+        uid = self._resolve(conn, 5).entity_uid
+        assert self._row(conn, uid)["enrichment_status"] == "image-proposed"
+        conn.execute("UPDATE venues SET image_path = NULL WHERE entity_uid = ?", (uid,))
+        net["research"].clear()
+        self._resolve(conn, 5)
+        assert net["research"] == []
 
 
 # --------------------------------------------------------------------------

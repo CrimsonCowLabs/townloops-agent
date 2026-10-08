@@ -3,8 +3,8 @@
 
 A multi-seed run (Firecrawl + Codex per seed) outlasts Hermes' cron script
 timeout (cron.script_timeout_seconds, default 120s), so the run is detached
-into its own session and this wrapper returns immediately — same pattern as
-event_reconcile.py. Output goes to state/logs/event-find-<date>.log; the run
+into its own session and this wrapper returns immediately (event_reconcile.py
+adds a supervisor; event-find records its own crashes). Output goes to state/logs/event-find-<date>.log; the run
 summary (or a failure) lands in agent_activity for the dashboard ticker. The
 skill's own flock stops a second run from overlapping a slow one."""
 from __future__ import annotations

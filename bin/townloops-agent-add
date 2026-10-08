@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # townloops-agent-add — scaffold a per-town townloops-agent instance.
 #
-# Usage: bin/townloops-agent-add <slug> [--target-dir DIR]
+# Usage: bin/townloops-agent-add <slug> [--target-dir DIR] [--rerender]
 #
 # Creates ~/townloops-agents/{slug}/ (or --target-dir/{slug}) with:
 #   docker-compose.yml    — hardened per-town compose (references the shared repo)
@@ -14,6 +14,14 @@
 # Idempotent: refuses to overwrite existing files. Missing shared stacks
 # are reported as warnings — the docker compose up will fail with a clear
 # error until they're brought up.
+#
+# --rerender: re-render an EXISTING town's docker-compose.yml from the current
+# template (nothing else is touched). It refuses, leaving the compose as it
+# was, unless the re-rendered stack can boot: hermes-home exists (created if
+# missing) and is owned by the container user, Hermes' own ChatGPT login
+# (hermes-home/auth.json) is there, and the host's Codex CLI login is there.
+# The old compose is kept as docker-compose.yml.bak-<time> and the diff is
+# printed — move any host-specific edits into docker-compose.override.yml.
 
 set -euo pipefail
 
@@ -21,9 +29,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BASE_DIR="${TOWNLOOPS_AGENTS_ROOT:-$HOME/townloops-agents}"
 
 usage() {
-  echo "usage: $0 <slug> [--target-dir DIR]" >&2
+  echo "usage: $0 <slug> [--target-dir DIR] [--rerender]" >&2
   echo "  <slug>              lowercase alphanumeric + hyphens (matches TownLoops)" >&2
   echo "  --target-dir DIR    override BASE_DIR (default: \$HOME/townloops-agents)" >&2
+  echo "  --rerender          re-render an existing town's docker-compose.yml" >&2
   exit 2
 }
 
@@ -32,10 +41,13 @@ if [[ $# -lt 1 ]]; then
 fi
 
 SLUG=""
+RERENDER=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target-dir)
       BASE_DIR="$2"; shift 2 ;;
+    --rerender)
+      RERENDER=1; shift ;;
     -h|--help)
       usage ;;
     -*)
@@ -55,8 +67,67 @@ if [[ ! "$SLUG" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
 fi
 
 TARGET="$BASE_DIR/$SLUG"
+TEMPLATES="$REPO/templates"
+# The compose template runs the agent as this uid ("user:" line).
+CONTAINER_UID="${TOWNLOOPS_CONTAINER_UID:-1000}"
+
+if [[ "$RERENDER" == 1 ]]; then
+  COMPOSE="$TARGET/docker-compose.yml"
+  if [[ ! -f "$COMPOSE" ]]; then
+    echo "no town at $TARGET (no docker-compose.yml) — scaffold it without --rerender" >&2
+    exit 3
+  fi
+  # The template bind-mounts ./hermes-home as $HERMES_HOME. Missing, docker
+  # would create it root-owned and the non-root agent couldn't write to it.
+  if [[ ! -d "$TARGET/hermes-home" ]]; then
+    mkdir -m 700 "$TARGET/hermes-home"
+    echo "created $TARGET/hermes-home"
+  fi
+  owner="$(stat -c %u "$TARGET/hermes-home")"
+  if [[ "$owner" != "$CONTAINER_UID" ]]; then
+    echo "refusing to re-render: $TARGET/hermes-home is owned by uid $owner, the container runs as $CONTAINER_UID:" >&2
+    echo "  sudo chown -R $CONTAINER_UID:$CONTAINER_UID $TARGET/hermes-home" >&2
+    exit 5
+  fi
+  if [[ ! -f "$TARGET/hermes-home/auth.json" ]]; then
+    echo "refusing to re-render: the town has no Hermes ChatGPT login ($TARGET/hermes-home/auth.json)." >&2
+    echo "Log it in first (never copy ~/.hermes/auth.json — shared refresh tokens invalidate each other):" >&2
+    echo "  HERMES_HOME=$TARGET/hermes-home ~/workspace/hermes/.venv/bin/hermes \\" >&2
+    echo "    auth add openai-codex --type oauth --no-browser" >&2
+    exit 6
+  fi
+  new="$(mktemp "$TARGET/.docker-compose.yml.XXXXXX")"
+  trap 'rm -f "$new"' EXIT
+  sed "s|{{SLUG}}|$SLUG|g" "$TEMPLATES/per-town-agent.docker-compose.yml.tmpl" > "$new"
+  # The host Codex CLI login the rendered compose mounts into both containers.
+  codex_dir="$(sed -n 's|^ *- \(/[^:]*\):/home/agent/\.codex:rw$|\1|p' "$new" | head -1)"
+  if [[ -z "$codex_dir" || ! -f "$codex_dir/auth.json" ]]; then
+    echo "refusing to re-render: no Codex CLI login at ${codex_dir:-<unmounted>}/auth.json (mounted into both containers) — run \`codex login\` on the host" >&2
+    exit 7
+  fi
+  if cmp -s "$new" "$COMPOSE"; then
+    echo "$COMPOSE is up to date with the template"
+    exit 0
+  fi
+  if command -v docker >/dev/null 2>&1 \
+      && ! docker compose -f "$new" --project-directory "$TARGET" config -q; then
+    echo "refusing to re-render: the rendered compose doesn't validate (above); $COMPOSE unchanged" >&2
+    exit 8
+  fi
+  backup="$COMPOSE.bak-$(date +%Y%m%d-%H%M%S)"
+  cp -p "$COMPOSE" "$backup"
+  chmod --reference="$COMPOSE" "$new"
+  mv "$new" "$COMPOSE"
+  echo "re-rendered $COMPOSE (previous: $backup). Changes:"
+  diff -u "$backup" "$COMPOSE" || true
+  echo
+  echo "Move any host-specific edits shown as removed above into $TARGET/docker-compose.override.yml,"
+  echo "then: cd $TARGET && docker compose up -d"
+  exit 0
+fi
+
 if [[ -e "$TARGET" ]]; then
-  echo "refusing to overwrite existing $TARGET" >&2
+  echo "refusing to overwrite existing $TARGET (re-render its compose with --rerender)" >&2
   exit 3
 fi
 
@@ -64,8 +135,6 @@ mkdir -p "$TARGET/state" "$TARGET/cron"
 # Writable $HERMES_HOME bind mount (own ChatGPT login lives here). Pre-create
 # it so docker doesn't create it root-owned.
 mkdir -m 700 -p "$TARGET/hermes-home"
-
-TEMPLATES="$REPO/templates"
 
 render() {
   local src="$1" dest="$2"
