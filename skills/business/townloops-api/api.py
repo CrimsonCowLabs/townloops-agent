@@ -310,6 +310,61 @@ def _schema_name_to_resource(name: str) -> Optional[str]:
     return _SCHEMA_TO_RESOURCE.get(name.lower().replace("_", ""))
 
 
+# --------------------------------------------------------------------------
+# Series contract (ADR 0007) — what engine/series.py relies on
+# --------------------------------------------------------------------------
+#
+# Series arrived additively (new GET paths, `series_slug`/`series_id` on the
+# Event resource), which diff_specs already reads as non-breaking. What the
+# agent depends on is narrower than "nothing removed": Series membership
+# comes from auto-link or a curator, never a payload, and the Event resource
+# says which Series it is in. Either of those changing is drift worth a
+# loud failure, even when the generic diff calls it additive.
+
+_SERIES_FIELDS = ("series_slug", "series_id", "series")
+_WRITE_METHODS = ("post", "put", "patch", "delete")
+
+
+def _series_writes(spec: dict) -> set[str]:
+    """Series write operations and Series-setting request fields in `spec`."""
+    out = {f"{m.upper()} {path}" for path, ops in _spec_paths(spec).items()
+           if _resource_of_path(path) == "series" for m in _WRITE_METHODS if m in (ops or {})}
+    out |= {f"{name}.{f}" for name, schema in _spec_schemas(spec).items()
+            if name.lower().endswith(("payload", "patch", "entry"))
+            for f in _SERIES_FIELDS if f in (schema.get("properties") or {})}
+    return out
+
+
+def series_contract(old: dict, new: dict) -> list[str]:
+    """Ways `new` breaks the Series contract that `old` kept: a new write
+    operation on a Series path, a request schema (`*Payload` / `*Patch` /
+    `*Entry`) that can now set an Event's Series, or `series_slug` gone from
+    the Event resource. Judged against `old`, so a change alerts once (a
+    freeze it set stays until the operator clears it)."""
+    problems: list[str] = []
+    for w in sorted(_series_writes(new) - _series_writes(old)):
+        problems.append(f"Series became writable: {w}" if " " in w
+                        else f"Series membership became writable: {w}")
+    had = "series_slug" in ((_spec_schemas(old).get("EventResource") or {}).get("properties") or {})
+    has = "series_slug" in ((_spec_schemas(new).get("EventResource") or {}).get("properties") or {})
+    if had and not has:
+        problems.append("EventResource.series_slug disappeared — the agent can no longer "
+                        "tell which Series an event is in")
+    return problems
+
+
+def _refresh_series_snapshot() -> Optional[int]:
+    """Refresh state/series.json (engine/series.py) — best-effort; event-ship
+    refreshes it lazily too."""
+    try:
+        from engine import series
+        from engine.townloops_api import Client
+        return len(series.refresh_snapshot(Client()))
+    except Exception as e:  # noqa: BLE001 — the API check's verdict doesn't depend on it
+        print(json.dumps({"series_snapshot_error": str(e)[:200]}), file=sys.stderr)
+        return None
+
+
 def cmd_diff(args) -> int:
     if not OPENAPI_PATH.exists():
         print(json.dumps({"error": f"no snapshot at {OPENAPI_PATH}"}), file=sys.stderr)
@@ -384,17 +439,33 @@ def cmd_check(args) -> int:
 
     OPENAPI_PATH.write_text(json.dumps(new_spec, indent=2, ensure_ascii=False))
 
+    series_count = _refresh_series_snapshot()
+    series_problems = series_contract(previous_spec or {}, new_spec)
+    if series_problems:
+        # Writable membership or a vanished series_slug breaks what event-ship
+        # reads: freeze event writes. A Series write surface alone is drift
+        # to know about — the client refuses Series writes regardless.
+        if any(not p.startswith("Series became writable:") for p in series_problems):
+            _write_freeze(["events"], reason="Series contract: " + "; ".join(series_problems))
+        _telegram_notify(f"[{town}] TownLoops API Series contract broken: "
+                         + "; ".join(series_problems))
+        print(json.dumps({"town": town, "series_contract": series_problems}, ensure_ascii=False))
+    # The run still reports the generic diff below; a broken contract fails it.
+    exit_code = 1 if series_problems else 0
+
     if not previous_spec:
         print(json.dumps({
             "town": town, "first_snapshot": True,
             "spec_hash": new_hash,
             "paths": len(_spec_paths(new_spec)),
+            "series": series_count,
         }))
-        return 0
+        return exit_code
 
     if new_hash == prev_hash:
-        print(json.dumps({"town": town, "unchanged": True, "spec_hash": new_hash}))
-        return 0
+        print(json.dumps({"town": town, "unchanged": True, "spec_hash": new_hash,
+                          "series": series_count}))
+        return exit_code
 
     result = diff_specs(previous_spec, new_spec)
     breaking = result["breaking"]
@@ -426,7 +497,7 @@ def cmd_check(args) -> int:
         "frozen_resources": frozen_now,
         "swagger_url": _swagger_url(),
     }, ensure_ascii=False))
-    return 0
+    return exit_code
 
 
 # --------------------------------------------------------------------------

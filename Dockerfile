@@ -50,6 +50,7 @@ RUN uv pip install --system --no-cache --break-system-packages \
     python-multipart \
     itsdangerous \
     bcrypt \
+    text-unidecode \
     markdown
 
 # python-telegram-bot must be visible to the Hermes gateway, which runs

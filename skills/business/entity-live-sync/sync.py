@@ -2,9 +2,14 @@
 """entity-live-sync — bring local entity changes (enrichment) to the live
 TownLoops rows they belong to. Logic: engine/entity_sync.py.
 
+Then the Series pass (engine/series_sync.py): re-read which TownLoops Series
+each shipped event is in, and fill blank Series-shared fields on the upcoming
+occurrences this agent shipped from their siblings.
+
 Subcommands:
   run [--limit N] [--kind K ...]   sync entities whose content changed since
-                                   live was last verified (cron, daily)
+                                   live was last verified, then the Series
+                                   pass (cron, daily)
   list                             pending + operator-flagged entities (read-only)
   clear --kind K --entity-uid UID  operator: unflag after looking at it
 """
@@ -16,7 +21,7 @@ import json
 import os
 import sys
 
-from engine import entity_sync
+from engine import entity_sync, series_sync
 from engine import lock as _lock
 from engine.derive_helpers import open_db
 
@@ -32,13 +37,16 @@ def _run(args) -> int:
         # Same lock as the workqueue drain, so event-ship never syncs the
         # same entity at the same time.
         with _lock.acquire("workqueue-drain"):
-            counts = entity_sync.sweep(Client(), conn, limit=args.limit,
+            client = Client()
+            counts = entity_sync.sweep(client, conn, limit=args.limit,
                                        kinds=tuple(args.kind or entity_sync.RESOURCES))
+            conn.commit()
+            series_counts = series_sync.sweep(client, conn, limit=args.limit)
     except _lock.LockHeld:
         print("workqueue drain running — sync skipped this time")
         return 0
     conn.commit()
-    print(json.dumps(counts or {"synced": 0}))
+    print(json.dumps({**(counts or {"synced": 0}), "series": series_counts}))
     return 0
 
 

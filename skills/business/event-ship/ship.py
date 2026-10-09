@@ -5,6 +5,14 @@ Per plan adversarial pass #19: entities go first (venue, host, people),
 then the event. The event references its venue by live `venue_id`, so the
 venue must exist before the event references it. Nothing is created
 without first looking it up live (`engine/live_lookup.py`).
+
+TownLoops Series (ADR 0007, `engine/series.py`): an event joins a Series
+only by TownLoops auto-linking its title at create, so the title it ships
+under is decided here (`series.decide_title`, recorded as a `series-title`
+activity; the local title is never changed). The Series it will join makes
+the live lookup's strongest check — an occurrence of it on the same
+town-local date is this event. After shipping, the Series TownLoops reports
+is mirrored locally and blank Series-shared fields fill from siblings.
 """
 
 from __future__ import annotations
@@ -82,10 +90,108 @@ def _event_payload(row) -> dict:
 
 
 
+def _town_tz():
+    from dateutil import tz as _tz
+    return _tz.gettz(town_tz_name())
+
+
+def _linked_names(conn, event_uid: str, kinds=("performer", "creator")) -> list[str]:
+    marks = ",".join("?" for _ in kinds)
+    names = []
+    for lk in conn.execute(f"SELECT entity_kind, entity_uid FROM linked_events "
+                           f"WHERE event_uid = ? AND entity_kind IN ({marks})",
+                           (event_uid, *kinds)).fetchall():
+        table = {"performer": "performers", "creator": "creators"}[lk["entity_kind"]]
+        r = conn.execute(f"SELECT name FROM {table} WHERE entity_uid = ?",
+                         (lk["entity_uid"],)).fetchone()
+        if r and r["name"]:
+            names.append(r["name"])
+    return names
+
+
+def _local_cluster_venues(conn, event: dict, key: str) -> set[str]:
+    """Venue tokens of other local events whose title has this key."""
+    import json
+    from engine import series
+    out: set[str] = set()
+    for r in conn.execute(
+            "SELECT e.title, e.venue_name, e.venue_raw, v.extra_json AS v_extra "
+            "FROM events e LEFT JOIN venues v ON v.entity_uid = e.derived_venue_uid "
+            "WHERE e.event_uid != ? AND COALESCE(e.status, '') NOT IN ('duplicate', 'superseded') "
+            "  AND lower(substr(e.title, 1, 4)) = lower(substr(?, 1, 4))",
+            (event["event_uid"], event.get("title") or "")).fetchall():
+        if series.series_key(r["title"]) != key:
+            continue
+        try:
+            live_id = (json.loads(r["v_extra"] or "{}") or {}).get("live_id")
+        except (json.JSONDecodeError, AttributeError):
+            live_id = None
+        token = series.venue_token(live_id, r["venue_name"] or r["venue_raw"])
+        if token:
+            out.add(token)
+    return out
+
+
+# Live occurrences read either side of an event's start for source-branch
+# evidence and performer Clusters.
+_NEARBY_DAYS = 45
+# At most this many candidate Series' occurrences are read per event.
+_MAX_SERIES_READS = 5
+
+
+def _title_decision(client, conn, event: dict, payload: dict):
+    """The title to create the event under (`series.decide_title`), from the
+    Series snapshot, live occurrences near it, its derived performers and
+    other local events with its title. API errors raise — the caller treats
+    them like an unanswered lookup."""
+    from datetime import timedelta
+    from engine import series
+    from engine.derive_helpers import parse_instant
+    from engine.live_lookup import events_between
+    title = payload["title"]
+    key = series.series_key(title)
+    performers = _linked_names(conn, event["event_uid"])
+    snapshot = series.load_snapshot(client)
+    performer_only = any(series.series_key(p) == key for p in performers)
+    nearby: list[dict] = []
+    start = parse_instant(payload["start_at"])
+    if start and ((snapshot and payload.get("source_url")) or performer_only):
+        nearby = list(events_between(client, start - timedelta(days=_NEARBY_DAYS),
+                                     start + timedelta(days=_NEARBY_DAYS)))
+    seed_url = _seed_url(conn, event)
+    slugs = series.candidate_slugs(title, payload.get("source_url"), snapshot, nearby,
+                                   seed_url)[:_MAX_SERIES_READS]
+    occurrences = {s: list(client.paginate("events", series=s)) for s in slugs}
+    cluster: set[str] = set()
+    if performer_only:
+        cluster = _local_cluster_venues(conn, event, key) | {
+            t for r in nearby if series.series_key(r.get("title")) == key
+            for t in [series.venue_token(r.get("venue_id"), None)] if t}
+    venue_name = _derived_venue_name(conn, event) or payload.get("venue_name")
+    return series.decide_title(
+        title, venue_id=payload.get("venue_id"), venue_name=venue_name,
+        source_url=payload.get("source_url"), performers=performers, series=snapshot,
+        occurrences=occurrences, cluster_venues=cluster, seed_url=seed_url)
+
+
+def _derived_venue_name(conn, event: dict) -> Optional[str]:
+    vuid = event.get("derived_venue_uid")
+    r = conn.execute("SELECT name FROM venues WHERE entity_uid = ?", (vuid,)).fetchone() \
+        if vuid else None
+    return r["name"] if r and r["name"] else None
+
+
+def _seed_url(conn, event: dict) -> Optional[str]:
+    seed = (event.get("source") or "").removeprefix("seed:")
+    r = conn.execute("SELECT url FROM event_seeds WHERE name = ?", (seed,)).fetchone()
+    return r["url"] if r else None
+
+
 def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optional[str]:
-    """Create the event live — unless it is already there (by slug, or by
-    source_url at the same time), in which case the live row is filled in
-    instead. Several live rows for it park the event for the operator."""
+    """Create the event live — unless it is already there (by slug, as an
+    occurrence of its Series on the same town-local date, or by source_url
+    at the same time), in which case the live row is filled in instead.
+    Several live rows for it park the event for the operator."""
     from engine.live_lookup import find_live_event, is_conflict
     payload = _event_payload(event)
     venue_id = _resolve_venue_id(client, conn, event, venue_slug)
@@ -98,8 +204,14 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
     proposed_slug = event.get("townloops_slug") or _slug_for("event", event_uid)
     payload["slug"] = proposed_slug
     try:
+        source_title = payload["title"]
+        decision = _title_decision(client, conn, event, payload)
+        payload["title"] = decision.title
+        record_activity(conn, _WORKER, "series-title", event_uid,
+                        detail=decision.summary(source_title))
         found = find_live_event(client, slug=proposed_slug, source_url=payload.get("source_url"),
-                                start_at=payload["start_at"])
+                                start_at=payload["start_at"], series_slug=decision.series_slug,
+                                tz=_town_tz())
     except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry; never create blind
         msg = f"look up live event failed: {str(e)[:200]}"
         record_activity(conn, _WORKER, "find-live-event", event_uid, ok=False, error=msg)
@@ -107,9 +219,11 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         return None
     if found.ambiguous:
         slugs = ", ".join(sorted(r.get("slug") or "?" for r in found.ambiguous))
+        why = (f"Series {decision.series_slug} already has several occurrences on this date"
+               if found.matched_by == "series-day" else
+               f"several live events share source_url {payload.get('source_url')} at this time")
         _park_for_review(conn, event_uid, "find-live-event",
-                         f"several live events share source_url {payload.get('source_url')} "
-                         f"at this time: {slugs} — duplicate for the operator")
+                         f"{why}: {slugs} — duplicate for the operator")
         return None
     if found.row:
         return _fill_live_event(client, conn, event, found.row, payload)
@@ -396,6 +510,23 @@ def _supersede_older_copies(conn, event_uid: str, live_slug: str) -> None:
     )
 
 
+def _after_ship_series(client, conn, event_uid: str, slug: str) -> None:
+    """Re-read the shipped event: mirror the Series TownLoops put it in, and
+    fill its blank Series-shared fields from its siblings. Best-effort — the
+    event is live either way, and entity-live-sync's daily sweep retries."""
+    from engine import series_sync
+    try:
+        row = client.get("events", slug) or {}
+    except Exception as e:  # noqa: BLE001
+        print(f"read live event {slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return
+    if not row.get("slug"):
+        return
+    series_sync.mirror(conn, [row])   # keyed by townloops_slug, set by _mark_shipped
+    if row.get("series_slug"):
+        series_sync.fill_and_record(client, conn, row, _WORKER, event_uid)
+
+
 def _mark_shipped(conn, event_uid: str, slug: str, disabled: bool = False) -> None:
     now = iso_utc_now()
     conn.execute(
@@ -433,6 +564,9 @@ def main() -> int:
         # create a second one. Retire this copy onto the live event.
         conn.execute("UPDATE events SET status = 'duplicate' WHERE event_uid = ?", (event_uid,))
         _mark_shipped(conn, event_uid, sibling["townloops_slug"])
+        # Same live row, so the Series TownLoops last reported for it.
+        conn.execute("UPDATE events SET series_slug = ?, series_id = ? WHERE event_uid = ?",
+                     (sibling.get("series_slug"), sibling.get("series_id"), event_uid))
         record_activity(conn, _WORKER, "duplicate-of", event_uid,
                         detail=f"{sibling['event_uid'][:12]} already live as {sibling['townloops_slug']}")
         print(f"event {event_uid[:12]}: duplicate of {sibling['event_uid'][:12]} — not shipped")
@@ -490,6 +624,7 @@ def main() -> int:
         return 1
 
     _mark_shipped(conn, event_uid, event_slug, disabled=False)
+    _after_ship_series(client, conn, event_uid, event_slug)
     print(f"shipped event {event_uid[:12]} → {event_slug}")
     return 0
 

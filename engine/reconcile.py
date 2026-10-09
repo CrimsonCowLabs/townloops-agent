@@ -11,12 +11,15 @@ Matching order (first hit wins):
   1. `source_url` — canonicalized; the strongest key, most live rows have one.
   2. Title similarity (normalized SequenceMatcher ≥ TITLE_MATCH_RATIO).
 
-Recurring series ("Daily Live Music", weekly league nights) share a title and
-often a source_url across occurrences, so a key match on a *different* day is
-not automatically a date change. `classify_all` runs two passes: first every
+Recurring events share a title and often a source_url across occurrences, so
+a key match on a *different* day is not automatically a date change. Where
+TownLoops has put the live row in a Series (`series_slug`, ADR 0007 — archived
+Series included: it is a grouping key), that decides it: a new date in a
+Series is a new occurrence, never a reschedule. Live rows with no Series fall
+back to the rules below. `classify_all` runs two passes: first every
 extraction that lands on a live occurrence the same local day claims it; then
 a leftover extraction is a date change only if its key matches exactly one live
-occurrence in total (a one-off, not a series), that occurrence is unclaimed,
+occurrence in total (a one-off: no Series, no siblings), that occurrence is unclaimed,
 not already in the past, and inside DATE_CHANGE_WINDOW. Anything else is a new
 occurrence — the live window reaches back a couple of days, so past series
 occurrences are always unclaimed and must never be "rescheduled" forward.
@@ -224,6 +227,11 @@ def classify_all(extracted: list[dict], index: LiveIndex,
     for i, start, has_time, cands, how in pending:
         ev = extracted[i]
         live = cands[0] if len(cands) == 1 else None
+        if live is not None and live.get("series_slug"):
+            out[i] = Classification(
+                "new", ev, reason=f"a new date in Series {live['series_slug']} "
+                                  f"(live {live.get('slug')}) — a new occurrence, not a reschedule")
+            continue
         if (live is not None and id(live) not in claimed
                 and live["_start"].astimezone(tz).date() >= today
                 and abs(live["_start"] - start) <= DATE_CHANGE_WINDOW):

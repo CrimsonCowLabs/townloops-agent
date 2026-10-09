@@ -93,6 +93,16 @@ class TestPrompt:
         assert "America/New_York" in prompt
         assert "Los_Angeles" not in prompt
 
+    def test_explicit_recurrence_expands_within_the_horizon(self, new_york):
+        """A source's explicit rule ("every Thursday through December") becomes
+        dated occurrences, one title and venue for all, so they auto-link into
+        one TownLoops Series; vague recurrence never does."""
+        from engine.event_extract import RECURRENCE_HORIZON_DAYS
+        prompt = build_extraction_prompt({"name": "Saratoga"}, "Seed", "https://x.example", "md")
+        assert f"next {RECURRENCE_HORIZON_DAYS} days" in prompt
+        assert "identical title and venue" in prompt
+        assert "explicit" in prompt and "never invent" in prompt.lower()
+
 
 # --------------------------------------------------------------------------
 # event-ship
@@ -122,6 +132,9 @@ class FakeClient:
 
     def list(self, resource, **params):
         return []
+
+    def paginate(self, resource, **params):  # no Series, nothing live
+        return iter([])
 
 
 @pytest.fixture

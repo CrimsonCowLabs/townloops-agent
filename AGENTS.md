@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 023).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 024).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -105,6 +105,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     must state a cost) and ticket/RSVP link `rsvp_url` (on the page, never a homepage); `event_tickets.py`
     turns them into the `free` tag or one `Tickets: …`/`RSVP: …` line atop the shipped description —
     built at ship time, so the local description and content hash never change),
+    `series.py` (TownLoops Series, ADR 0007 — the agent never writes one, the client refuses: `series_key`
+    = TownLoops' title normalization, pinned to python-slugify; the `state/series.json` snapshot; `decide_title`
+    — the title event-ship creates an occurrence under so it auto-links into the right Series (Series title only
+    at the Series' one venue, "<Performer> at <Venue>" for a performer-only title that is a Series or recurs
+    elsewhere); `shared_fill` — blank Series-shared fields from siblings, never date/price/cancellation;
+    `candidates` — the weekly `series-candidates` report), `series_sync.py` (mirror `series_slug`/`series_id`
+    from TownLoops onto local rows; fill Series-shared blanks live — event-ship + entity-live-sync),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
     skill: days with no live event, local events not live yet, sparse live metadata, venues of
     upcoming events with no image; LIST/GET only).
@@ -124,7 +131,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 ### Runtime state (`state/`, a Docker volume — back this up)
 - `townloops.db` — events, workqueue, entities, enrichment, newsletter log, `agent_state`, `chat_messages`.
 - `discovery.db` — source-discovery candidates.
-- `sources.yaml`, `categories.json`, `openapi.json` (+ `.previous.json`), `newsletters/<iso-week>.html`,
+- `sources.yaml`, `categories.json`, `series.json` (Series snapshot), `openapi.json` (+ `.previous.json`), `newsletters/<iso-week>.html`,
   `reports/<date>.md`, `locks/`.
 
 ## Commands
@@ -175,6 +182,11 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   `performer-research` batch (event-enrich-entities skips them); a profile is attached only when a venue page
   links it or its metadata names the town/a linked venue *and* the role. Bios are the profile's own text or
   null — never template copy. Don't route performers back through `entity_enrich`'s name search.
+- **Series are read-only; `series_slug` is the recurrence key.** Membership comes only from TownLoops'
+  auto-link at create (title key vs active Series) or a curator, so the agent controls only the title it
+  ships (`series.decide_title`). Live lookup order is slug → same-town-local-date occurrence of the predicted
+  Series (`?series=`) → `source_url` ±12h. Reconcile treats a live row with a `series_slug` as recurring (a new
+  date is `new`, never a reschedule). `events.series_slug/series_id` are written only from TownLoops responses.
 - **One canonical event per real event; cancellations are operator-gated.** `event_uid` is per seed;
   `canonical_event_uid` (engine/event_dedup) groups copies across seeds, and event-ship never creates
   a copy whose sibling is already live. An event missing from all its sources is only *flagged*

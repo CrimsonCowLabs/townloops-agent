@@ -94,6 +94,24 @@ To clear a freeze after updating payload builders: delete
 `state/api_freeze.json` (or remove the offending resources from its `resources`
 array). The next `check` run will re-populate it if the breakage persists.
 
+## Series contract
+
+TownLoops Series (ADR 0007) arrived additively — `GET /series`,
+`GET /series/{slug}`, `series_slug`/`series_id` on the Event resource, the
+`?series=` filter — and the diff reads that as non-breaking. `check` also
+enforces what `engine/series.py` relies on (`series_contract`), and exits 1
+with a Telegram alert when:
+
+- a Series path gains a write operation (POST/PUT/PATCH/DELETE) — drift to
+  know about; the client refuses Series writes regardless
+  (`READ_ONLY_RESOURCES`);
+- a request schema (`*Payload`/`*Patch`/`*Entry`) can set an Event's Series
+  — **freezes `events`**;
+- `EventResource.series_slug` disappears — **freezes `events`**.
+
+`check` also refreshes the local Series snapshot `state/series.json` (active
+Series: slug, title, cadence, active flag), best-effort.
+
 ## Rhythm
 
 Daily cron entry `api-check` (04:15 UTC) calls `check`. On breakage:

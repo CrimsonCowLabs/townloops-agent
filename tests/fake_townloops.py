@@ -13,6 +13,15 @@ create drop `tags`). A `venue_name` naming several in-town venues fails the
 way the server's `scalar_one_or_none` does ("Multiple rows were found").
 A missing slug (or another town's) GETs as a 404; `list("events")` honours `from`/`to`.
 
+Series (ADR 0007, townloops `app/services/series.py` + the ingest API's
+`series` routes): every event carries `series_slug`/`series_id` (null for a
+singleton); `create` auto-links to an *active* Series in the town whose title
+has the event's `series_key`; `list("events", series=…)` is town-scoped and
+`is_active`-agnostic (an unknown slug lists nothing); `list("series")` is the
+town's active Series, `get("series", …)` any of them (404 cross-town); and a
+write to `series` is refused — there is no write surface. `status=` filters
+the event list.
+
 Entity PATCH (venues, businesses, ...) mirrors `update_venue` & co.: a
 per-field merge where `None` leaves a field alone, an empty `name` is
 ignored, any other value — `""` included — is written, a `category_slug`
@@ -26,6 +35,7 @@ import copy
 import re
 from datetime import datetime, timezone
 
+from engine.series import series_key
 from engine.townloops_api import TownloopsError
 
 
@@ -38,10 +48,13 @@ EVENT_PATCH_FIELDS = {
 
 class FakeAPI:
     def __init__(self, events=None, venues=None, ignore=(), create_drops=(),
-                 entities=None, categories=None):
-        self.events = {e["slug"]: copy.deepcopy(e) for e in (events or [])}
+                 entities=None, categories=None, series=None):
+        self.events = {e["slug"]: {"series_slug": None, "series_id": None, **copy.deepcopy(e)}
+                       for e in (events or [])}
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
-        self.tables = {"events": self.events, "venues": self.venues}
+        self.series = {s["slug"]: {"is_active": True, "cadence_text": None, "town": "slt",
+                                   "description": None, **s} for s in (series or [])}
+        self.tables = {"events": self.events, "venues": self.venues, "series": self.series}
         for resource, rows in (entities or {}).items():
             self.tables.setdefault(resource, {}).update({r["slug"]: dict(r) for r in rows})
         self.categories = set(categories) if categories is not None else None
@@ -63,6 +76,15 @@ class FakeAPI:
     def list(self, resource, **params):
         self.calls.append(("LIST", resource, dict(params)))
         rows = list(self.tables.setdefault(resource, {}).values())
+        if resource == "series":
+            rows = sorted((r for r in rows if r["is_active"] and r["town"] == "slt"),
+                          key=lambda r: r["title"])
+        if params.get("series"):
+            s = self.series.get(params["series"])
+            rows = [r for r in rows if s and s["town"] == "slt" and r.get("series_slug") == s["slug"]]
+        if params.get("status"):
+            rows = [r for r in rows if r.get("status", "published") == params["status"]]
+        rows = sorted(rows, key=lambda r: r["start_at"]) if resource == "events" else rows
         lo, hi = _instant(params.get("from")), _instant(params.get("to"))
         if lo or hi:
             rows = [r for r in rows if (not lo or _instant(r["start_at"]) >= lo)
@@ -80,6 +102,7 @@ class FakeAPI:
 
     def create(self, resource, payload, idempotency_key=None):
         self.calls.append(("POST", resource, copy.deepcopy(payload)))
+        _no_series_writes(resource)
         table = self.tables.setdefault(resource, {})
         if payload["slug"] in table:
             raise TownloopsError(409, "slug_taken", f"slug {payload['slug']!r} taken")
@@ -88,13 +111,15 @@ class FakeAPI:
             table[row["slug"]] = row
             return copy.deepcopy(row)
         row = {"id": len(self.events) + 1, "slug": payload["slug"], "town_slug": "slt",
-               "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": []}
+               "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": [],
+               "status": "published", "series_slug": None, "series_id": None}
         for k in EVENT_PATCH_FIELDS - {"venue_id", "venue_name"}:
             if k in payload and k not in self.create_drops:
                 row[k] = payload[k]
         self._bind_venue(row, payload.get("venue_id"), payload.get("venue_name"))
         row["category_slugs"] = sorted(row["category_slugs"])
         row["tags"] = sorted(_slug(t) for t in row["tags"])
+        self._auto_link(row)
         self.events[row["slug"]] = row
         return copy.deepcopy(row)
 
@@ -116,8 +141,23 @@ class FakeAPI:
         row["venue_id"] = v["id"] if v else None
         row["venue_slug"] = v["slug"] if v else None
 
+    def _auto_link(self, row):
+        key = series_key(row.get("title"))
+        s = next((s for s in self.series.values()
+                  if key and s["is_active"] and s["town"] == "slt" and series_key(s["title"]) == key),
+                 None)
+        if s:
+            row["series_slug"], row["series_id"] = s["slug"], s["id"]
+
+    def link(self, slug, series_slug):
+        """A curator (or the backfill) puts a live event in a Series."""
+        s = self.series[series_slug] if series_slug else None
+        self.events[slug]["series_slug"] = s and s["slug"]
+        self.events[slug]["series_id"] = s and s["id"]
+
     def update(self, resource, slug, payload):
         self.calls.append(("PATCH", resource, slug, copy.deepcopy(payload)))
+        _no_series_writes(resource)
         if resource != "events":
             return self._update_entity(resource, slug, payload)
         row = self.events[slug]
@@ -151,6 +191,11 @@ class FakeAPI:
 
     def creates(self):
         return [c[2] for c in self.calls if c[0] == "POST"]
+
+
+def _no_series_writes(resource):
+    if resource == "series":
+        raise TownloopsError(405, "method_not_allowed", "series are read-only")
 
 
 def _instant(value):

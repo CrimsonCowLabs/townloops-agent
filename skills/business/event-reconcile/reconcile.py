@@ -4,6 +4,8 @@ the live TownLoops catalog, stage new/changed events locally, then enrich them
 (event image, venue, host business/community + images).
 
 Never writes to TownLoops. Everything lands in the local DB for the operator;
+the Series (`series_slug`/`series_id`) each live event reports is mirrored onto
+the local rows shipped as it;
 approved rows flow through the normal derive → enrich → ship workqueue, and
 event-ship PATCHes the live row for events staged as `changed`.
 """
@@ -22,7 +24,7 @@ from typing import Optional
 import yaml
 from dateutil import tz as _tz
 
-from engine import entity_classify, entity_enrich, inspection
+from engine import entity_classify, entity_enrich, inspection, series_sync
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import iso_utc_now, open_db, record_activity
@@ -403,6 +405,8 @@ def cmd_run(args) -> int:
             live = Live(args.horizon_days)
             print(json.dumps({"live_events": len(live.events),
                               **{f"live_{k}": len(v) for k, v in live.entities.items()}}))
+            if not getattr(args, "dry_run", False):
+                series_sync.mirror(conn, live.events)
             pulled = None if args.cmd == "enrich" else pull(conn, live, profile, args, run_id)
             enriched = None
             llm = entity_classify.codex_llm(_MAX_PAGE_READS, _PAGE_READ_TIMEOUT_S, float("inf"))

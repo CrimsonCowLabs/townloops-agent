@@ -84,12 +84,21 @@
     },
     {
       "id": "entity-live-sync",
-      "name": "Daily entity live sync (resync shipped venues/hosts/people from TownLoops, PATCH enrichment into live blanks, GET-verify)",
+      "name": "Daily entity live sync (resync shipped venues/hosts/people from TownLoops, PATCH enrichment into live blanks, GET-verify; re-read event Series + fill Series-shared blanks)",
       "schedule": "30 3 * * *",
       "skills": ["entity-live-sync"],
       "deliver": "local",
       "no_agent": true,
       "prompt": "python /home/agent/.hermes/scripts/entity_live_sync.py"
+    },
+    {
+      "id": "series-candidates",
+      "name": "Weekly Series candidates (read-only: title Clusters that could become a Series, Series spanning several venues or with same-day duplicates) → report + Telegram",
+      "schedule": "30 5 * * 0",
+      "skills": ["series-candidates"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/scripts/series_candidates.py"
     },
     {
       "id": "api-check",

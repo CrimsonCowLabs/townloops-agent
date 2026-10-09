@@ -201,3 +201,126 @@ class TestFreezeGuard:
         freeze_path.write_text(json.dumps({"resources": ["events"]}))
         with pytest.raises(townloops_api.TownloopsError):
             townloops_api._guard_write("events")
+
+
+# --------------------------------------------------------------------------
+# Series contract (ADR 0007): additive arrival is fine; Series writes,
+# writable membership or a vanished `series_slug` fail the check loudly.
+# --------------------------------------------------------------------------
+
+EVENTS_P = "/api/v1/towns/{town_slug}/events"
+SERIES_P = "/api/v1/towns/{town_slug}/series"
+SERIES_ONE_P = SERIES_P + "/{series_slug}"
+
+
+def _event_schemas(resource_extra=(), patch_extra=()):
+    props = {"slug": {"type": "string"}, "title": {"type": "string"}}
+    return {
+        "EventResource": {"properties": {**props, **{f: {"type": ["integer", "null"]
+                                                     if f.endswith("_id") else ["string", "null"]}
+                                                 for f in resource_extra}}},
+        "EventPayload": {"properties": dict(props)},
+        "EventPatch": {"properties": {**props, **{f: {"type": "string"} for f in patch_extra}}},
+    }
+
+
+PRE_SERIES = _make_spec(paths={EVENTS_P: {"get": {}, "post": {}}}, schemas=_event_schemas())
+WITH_SERIES = _make_spec(
+    paths={EVENTS_P: {"get": {}, "post": {}}, SERIES_P: {"get": {}}, SERIES_ONE_P: {"get": {}}},
+    schemas={**_event_schemas(("series_slug", "series_id")),
+             "SeriesResource": {"properties": {"slug": {"type": "string"}}}})
+
+
+def _with(spec, paths=None, schemas=None):
+    out = json.loads(json.dumps(spec))
+    out["paths"].update(paths or {})
+    out["components"]["schemas"].update(schemas or {})
+    return out
+
+
+class TestSeriesContract:
+    def test_series_arriving_is_additive(self, api_mod):
+        r = api_mod.diff_specs(PRE_SERIES, WITH_SERIES)
+        assert r["counts"]["breaking"] == 0 and r["resources_to_freeze"] == []
+        assert api_mod.series_contract(PRE_SERIES, WITH_SERIES) == []
+
+    def test_a_series_write_operation_is_flagged(self, api_mod):
+        new = _with(WITH_SERIES, paths={SERIES_P: {"get": {}, "post": {}}})
+        [problem] = api_mod.series_contract(WITH_SERIES, new)
+        assert "POST" in problem and "series" in problem
+
+    def test_writable_membership_is_flagged(self, api_mod):
+        new = _with(WITH_SERIES, schemas={"EventPatch": _event_schemas(
+            patch_extra=("series_slug",))["EventPatch"]})
+        [problem] = api_mod.series_contract(WITH_SERIES, new)
+        assert "EventPatch.series_slug" in problem
+
+    def test_series_slug_disappearing_is_flagged(self, api_mod):
+        [problem] = api_mod.series_contract(WITH_SERIES, PRE_SERIES)
+        assert "series_slug" in problem
+        assert api_mod.series_contract(PRE_SERIES, PRE_SERIES) == []
+
+
+@pytest.fixture
+def check(tmp_state_dir, monkeypatch):
+    """Run `api.py check` against `new` with `old` as the last snapshot."""
+    spec = importlib.util.spec_from_file_location(
+        "townloops_api_skill_check", REPO_ROOT / "skills" / "business" / "townloops-api" / "api.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    sent: list[str] = []
+    monkeypatch.setattr(mod, "_telegram_notify", sent.append)
+
+    def go(old, new, api=None):
+        from tests.fake_townloops import FakeAPI
+        import engine.townloops_api as tl
+        monkeypatch.setattr(tl, "Client", lambda: api or FakeAPI())
+        (tmp_state_dir / "openapi.json").write_text(json.dumps(old))
+        monkeypatch.setattr(mod, "_fetch_openapi", lambda url: new)
+        return mod.main(["check"])
+
+    go.telegrams = sent
+    go.state = tmp_state_dir
+    return go
+
+
+class TestCheckSeries:
+    def test_additive_series_passes_and_refreshes_the_snapshot(self, check):
+        from tests.fake_townloops import FakeAPI
+        api = FakeAPI(series=[{"id": 1, "slug": "trivia", "title": "Trivia"},
+                              {"id": 2, "slug": "old", "title": "Old", "is_active": False}])
+        assert check(PRE_SERIES, WITH_SERIES, api) == 0
+        assert not (check.state / "api_freeze.json").exists()
+        snap = json.loads((check.state / "series.json").read_text())
+        assert [s["slug"] for s in snap["series"]] == ["trivia"]
+
+    def test_vanished_series_slug_freezes_events_and_fails(self, check):
+        assert check(WITH_SERIES, PRE_SERIES) == 1
+        freeze = json.loads((check.state / "api_freeze.json").read_text())
+        assert "events" in freeze["resources"]
+        assert any("Series contract" in t and "series_slug" in t for t in check.telegrams)
+
+    def test_series_write_surface_fails_loudly(self, check):
+        new = _with(WITH_SERIES, paths={SERIES_ONE_P: {"get": {}, "patch": {}}})
+        assert check(WITH_SERIES, new) == 1
+        assert any("PATCH" in t for t in check.telegrams)
+
+    def test_a_standing_series_write_surface_alerts_once(self, check):
+        new = _with(WITH_SERIES, paths={SERIES_ONE_P: {"get": {}, "patch": {}}})
+        assert check(new, new) == 0
+        assert not any("Series contract" in t for t in check.telegrams)
+
+
+class TestClientNeverWritesSeries:
+    @pytest.mark.parametrize("call", [
+        lambda c: c.create("series", {"title": "x"}),
+        lambda c: c.update("series", "x", {"title": "y"}),
+        lambda c: c.delete("series", "x"),
+    ])
+    def test_writes_are_refused_before_the_wire(self, call, monkeypatch):
+        from engine.townloops_api import Client, TownloopsError
+        c = Client(base_url="http://test.invalid", api_key="k", town_slug="t")
+        monkeypatch.setattr(c, "_request", lambda *a, **k: pytest.fail("reached the wire"))
+        with pytest.raises(TownloopsError) as e:
+            call(c)
+        assert e.value.code == "read_only_resource"

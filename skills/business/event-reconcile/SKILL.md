@@ -13,6 +13,8 @@ everything lands in the local DB for the operator.
 1. **Live snapshot** (read-only): `verify_town()`, then every live event from
    2 days ago to `--horizon-days` ahead (default 180), plus all live venues,
    businesses, communities.
+   The Series each live event reports (`series_slug`/`series_id`) is mirrored
+   onto the local rows shipped as it (not on `--dry-run`).
 2. **Pull**: every `approved` seed → Firecrawl markdown → Codex extraction
    (event-find's prompt plus `organizer`, `organizer_kind`, `image_url`).
 3. **Cross-reference** each extraction (`engine/reconcile.py`):
@@ -21,9 +23,12 @@ everything lands in the local DB for the operator.
    - same local day → `unchanged`, or `changed` if the start moved > 30 min
      or the venue name differs from the live venue;
    - different day → `changed` (rescheduled) only for a one-off: the key matches
-     exactly one live occurrence, it is unclaimed, not already past, and within
-     60 days. Recurring series (several live occurrences) always count as `new`
-     — a past occurrence is never moved onto a future date;
+     exactly one live occurrence, it is in no TownLoops Series, unclaimed, not
+     already past, and within 60 days. A live occurrence with a `series_slug`
+     (archived Series included) makes a new date `new` — recurrence is decided
+     by the Series, title/source_url rules only for live rows with none — and
+     several live occurrences always count as `new`; a past occurrence is never
+     moved onto a future date;
    - no match → `new`.
 4. **Stage locally** — `new` and `changed` are upserted with the same `event_uid`
    as event-find (`seed + title + start`), at `state=metadata-extracted`,

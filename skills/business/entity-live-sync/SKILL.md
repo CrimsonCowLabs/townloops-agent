@@ -42,6 +42,22 @@ flagged, `extra_json.sync_error_at` is stamped, and the next run retries it
 after the rows that haven't failed lately (so stubborn rows can't starve the
 rest). The sweep calls `verify_town()` first.
 
+## Series pass
+
+After the entity sweep, under the same lock (`engine/series_sync.py`):
+
+1. **Re-read Series membership** — the live events from 60 days back on are
+   listed and each one's `series_slug`/`series_id` is copied onto the local
+   rows shipped as it (a curator's or the backfill's later linking — or
+   unlinking — reaches local rows here). Never inferred locally.
+2. **Fill Series-shared blanks** — for up to `--limit` upcoming occurrences
+   this agent shipped that are in a Series: blank description (ticket line
+   stripped), categories, tags (minus `free`/`cancelled`/`sold-out`) and
+   accessibility notes from the richest sibling, the venue only when every
+   sibling with a resolved venue shares it. Full-body PATCH + GET verify;
+   outcomes are `series-fill` activities (a failure is `ok=0`). Events this
+   agent didn't ship are left alone. See `event-ship/references/recurring-series.md`.
+
 ## Commands
 
 ```bash

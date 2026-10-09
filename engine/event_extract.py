@@ -97,6 +97,12 @@ def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[
     return (bool(md), md, "" if md else "empty markdown")
 
 
+# An explicit recurrence rule on a source page is expanded into dated
+# occurrences this far ahead — the rolling horizon event-find re-reads twice
+# a day, so later dates arrive as the window moves.
+RECURRENCE_HORIZON_DAYS = 60
+
+
 def build_extraction_prompt(profile: dict, seed_name: str, seed_url: str,
                              markdown: str, extra_fields: str = "") -> str:
     """`extra_fields` is appended verbatim to the key list — one
@@ -122,7 +128,8 @@ Return ONLY a JSON array — no prose, no markdown, no code fence. Each object m
   "tags":        JSON array of up to 5 short lowercase descriptive tags (e.g. "free", "all-ages", "dog-friendly", "21+"), or []
   "source_url":  the URL on this page that links to the event's own detail page, or null if not present
 {extra_fields}
-Only extract events with a specific date. Skip generic listings like "meets every Tuesday" unless you can compute a concrete next date. Skip past events (before today).
+Only extract events with a specific date. Skip past events (before today).
+Recurring events: when the page states an explicit rule ("every Thursday through December", "first Friday of each month, 6-8pm"), emit one object per date it gives within the next {RECURRENCE_HORIZON_DAYS} days, each with the identical title and venue (the event's own name, with no date or "Week 3" in the title) so every occurrence groups together. Never invent a recurrence from vague wording ("meets regularly", "most weekends") — skip it unless a concrete date is stated.
 
 Scraped page follows:
 ---

@@ -22,6 +22,7 @@ from tests.test_categories import SLT_CATEGORIES
 
 
 START = "2026-10-10T03:00:00+00:00"   # 2026-10-09 20:00 in America/Los_Angeles
+TZ = __import__("dateutil.tz").tz.gettz("America/Los_Angeles")
 SRC = "https://tahoe.example/events/jazz-night"
 
 
@@ -432,3 +433,41 @@ class TestShipEntityLookup:
         self._venue(conn, townloops_slug="riva-grill", extra_json=json.dumps({"note": "x"}))
         ship._ship_entity(api, conn, "venue", "v-uid")
         assert json.loads(self._venue_row(conn)["extra_json"]) == {"note": "x", "live_id": 7}
+
+
+class TestFindBySeriesDay:
+    """A Series' occurrence on the same town-local date is the event, whatever
+    its source_url or start time — a second source's copy, not a new date."""
+
+    SERIES = [{"id": 1, "slug": "jazz-night", "title": "Jazz Night"}]
+
+    def test_same_local_day_in_the_series_is_found(self):
+        api = FakeAPI([live_event("jazz-oct-9", start="2026-10-10T02:00:00+00:00",
+                                  source_url="https://other.example/x",
+                                  series_slug="jazz-night", series_id=1)], series=self.SERIES)
+        m = find_live_event(api, slug="hermes-jazz", source_url=SRC, start_at=START,
+                            series_slug="jazz-night", tz=TZ)
+        assert m.row["slug"] == "jazz-oct-9" and m.matched_by == "series-day"
+
+    def test_another_day_in_the_series_is_not(self):
+        api = FakeAPI([live_event("jazz-oct-10", start="2026-10-11T03:00:00+00:00",
+                                  source_url="https://other.example/x",
+                                  series_slug="jazz-night", series_id=1)], series=self.SERIES)
+        m = find_live_event(api, slug="hermes-jazz", source_url=SRC, start_at=START,
+                            series_slug="jazz-night", tz=TZ)
+        assert m.row is None and not m.ambiguous
+
+    def test_two_on_the_day_are_ambiguous(self):
+        api = FakeAPI([live_event(s, source_url=f"https://o.example/{s}",
+                                  series_slug="jazz-night", series_id=1)
+                       for s in ("jazz-a", "jazz-b")], series=self.SERIES)
+        m = find_live_event(api, slug="hermes-jazz", source_url=SRC, start_at=START,
+                            series_slug="jazz-night", tz=TZ)
+        assert m.row is None and sorted(r["slug"] for r in m.ambiguous) == ["jazz-a", "jazz-b"]
+
+    def test_slug_still_wins(self):
+        api = FakeAPI([live_event("hermes-jazz", source_url=None)], series=self.SERIES)
+        m = find_live_event(api, slug="hermes-jazz", source_url=SRC, start_at=START,
+                            series_slug="jazz-night", tz=TZ)
+        assert m.row["slug"] == "hermes-jazz"
+        assert not [c for c in api.calls if c[0] == "LIST"]

@@ -1,22 +1,33 @@
-# Recurring-series normalisation
+# Series-shared enrichment
 
-From the CMO's `townloops-repeated-event-normalization` note. Use when several
-events are occurrences of the same show / class / meeting.
+TownLoops groups the Events that recur under one name into a **Series**
+(ADR 0007): `series_slug` / `series_id` on every Event resource, `?series=`
+on the event list. That is the grouping key — not title similarity, not
+`source_url`. A **Cluster** (titles that normalize to one key) with no Series
+is only a candidate: the weekly `series-candidates` report lists the ones
+that pass TownLoops' rule for a curator to create. The agent never creates,
+renames or archives a Series.
 
-1. Pick the canonical occurrence that already has the right enrichment.
-2. Select the run by a stable series signal — same `source_url` branch/prefix,
-   same organiser + recurring slug pattern, or same title family. Title-only
-   matching misses variants; prefer the source branch.
-3. Copy only **shared** fields (description, categories, tags, venue when the
-   series has one venue). Never overwrite per-occurrence identity: date,
-   start/end, slug.
-4. Title rules (e.g. a `TRPA: ` prefix on agency meetings) are idempotent —
-   add only when absent, never double-prefix.
-5. Ship each occurrence as a full-body PATCH (engine/live_patch) and verify:
-   row count matches, no unsynced rows remain, each title has the prefix once.
+1. Select the run by `series_slug` (`GET events?series=<slug>`). The filter
+   is `is_active`-agnostic: an archived Series still groups, it just isn't a
+   link target. An event with no `series_slug` has no siblings yet — don't
+   assemble a run from title families.
+2. Copy only **shared** fields, and only into blanks (live values win):
+   description (without a `Tickets:`/`RSVP:` line), categories, tags (minus
+   `free`, `cancelled`, `sold-out`), accessibility notes, and the venue only
+   when every sibling with a resolved venue is at the same one. Never
+   per-occurrence identity: date, start/end, slug, title, price/ticket line,
+   cancellation marks. Never take from a cancelled sibling.
+3. Ship each fill as a full-body PATCH (engine/live_patch) and GET-verify.
+   event-ship does this for every event it ships into a Series;
+   entity-live-sync's daily pass does it for the upcoming occurrences this
+   agent shipped (`engine/series_sync.py`).
+4. Title rules are idempotent — add a prefix or a "<Performer> at <Venue>"
+   suffix only when absent, never twice.
 
 A destination calendar's series title can map to a more specific live
 occurrence (a "Music on the Beach" listing ↔ that night's named-performer
-card) — match by date, source URL and venue, not title, before calling it
-missing. Reusing a sibling's verified description is fine only when it is
-clearly the same event family.
+card) — match by Series and date (`?series=` + the town-local day), then
+source URL and venue, not title, before calling it missing. Two live
+occurrences of one Series on one date are a duplicate for the operator,
+never a guess.

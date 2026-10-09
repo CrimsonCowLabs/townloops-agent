@@ -87,7 +87,7 @@ If adapters are implemented, select them through per-seed configuration such as 
 - Handle every pagination mechanism explicitly. Never infer full coverage from the first API response or rendered page.
 - Avoid passing entire large calendars through a fixed LLM content window; truncation silently drops events.
 - For annual landing pages, constrain extraction to the primary event section or canonical ticket listing. Social and news dates often become false events.
-- Expand recurrence text only when the rule is explicit, within a bounded rolling horizon.
+- Expand recurrence text only when the rule is explicit, within a bounded rolling horizon (`engine.event_extract.RECURRENCE_HORIZON_DAYS`, 60 days; the extraction prompt asks for it). Every occurrence gets one identical title and venue, so they auto-link into one TownLoops Series.
 - For multi-region sources, apply reliable source-level branch or geography filters where available.
 - Automation changes extraction, not approval. New events remain pending unless an explicit product policy says otherwise.
 

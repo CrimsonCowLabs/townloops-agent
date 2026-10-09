@@ -41,8 +41,12 @@ Nothing is POSTed until a lookup says it isn't live yet
   by a full-body PATCH, GET-verified before `pushed_hash` moves. A row we
   shipped before that now 404s is flagged for the operator
   (`extra_json.live_sync`), never re-created.
-- **Events**: GET by slug, then — the list endpoint has no `source_url`
-  filter — list the events starting within 12h and match `source_url`
+- **Events**: GET by slug; then, when the event will join a TownLoops Series
+  (see "Series" below), that Series' occurrences on the same town-local date
+  (`?series=<slug>&from=<day start>&to=<day end>`) — one is this event (a
+  second source's copy of one evening, whatever its source_url or start), two
+  or more are a duplicate for the operator; then — the list endpoint has no
+  `source_url` filter — list the events starting within 12h and match `source_url`
   (trailing `/` ignored; with several, the one at the same start wins).
   Found → **filled, not overridden**: blank live fields get the local value,
   local categories/tags are added to the live sets, a venue is bound only if
@@ -52,6 +56,34 @@ Nothing is POSTed until a lookup says it isn't live yet
   activity listing their slugs, the event parked `stuck-` for the operator.
 - **409 `slug_taken` is not success**: ship looks the row up again and
   continues as "found"; if it still isn't there, rc 1.
+
+## Series (ADR 0007)
+
+A TownLoops **Series** is the evergreen hub for Events that recur under one
+name. The agent never creates, renames or archives one (no API write surface;
+the client refuses `series` writes). An Event joins a Series only when
+TownLoops auto-links its title — same `series_key`, an *active* Series in the
+town — at create. So ship decides the title (`engine/series.py:decide_title`,
+recorded as a `series-title` activity; the local title never changes):
+
+- a title variant ("Trivia Thursday – Week 3") or a title from the same
+  source/source branch as the Series' occurrences ships under the **Series
+  title** — only when the derived venue is the Series' one resolved venue;
+- a performer-only title (it is a derived performer's/creator's name) whose
+  key matches a Series at another venue, or that recurs at other venues,
+  ships as **"<Performer> at <Venue>"** — never suffixed twice;
+- otherwise the source title. An archived Series is never a target.
+
+The Series snapshot is `state/series.json` (refreshed by the daily API check
+and lazily here, 10-min TTL). After shipping, ship GETs the event, records
+the `series_slug`/`series_id` TownLoops reports on the local row, and fills
+the event's blank **Series-shared** fields — description (ticket line
+stripped), categories, tags (minus `free`/`cancelled`/`sold-out`),
+accessibility notes, and the venue only when every sibling with a resolved
+venue shares it — from the richest sibling (full-body PATCH + GET verify; a
+failure is a failed `series-fill` activity, the event stays shipped). Date,
+times, slug, title, price/ticket line and cancellation marks never copy.
+TownLoops has no event image field, so images aren't shared.
 
 ## Accessibility notes
 
@@ -150,4 +182,4 @@ When the town is finally registered on TownLoops, an operator-triggered
 
 ## References
 
-- `references/recurring-series.md` — copying shared enrichment across a recurring series without touching per-occurrence fields; idempotent title prefixes.
+- `references/recurring-series.md` — Series-shared enrichment keyed on `series_slug`, without touching per-occurrence fields; idempotent title rules.

@@ -69,8 +69,21 @@ def _frozen_resources() -> frozenset[str]:
     return rs
 
 
+# Resources the agent only ever reads. Series membership comes from TownLoops'
+# auto-link or a curator (ADR 0007) — the agent never writes a Series, even
+# if the API grows a write surface for one.
+READ_ONLY_RESOURCES = frozenset({"series"})
+
+
 def _guard_write(resource: str) -> None:
-    """Raise TownloopsError(resource_frozen) if this resource is frozen."""
+    """Raise TownloopsError(read_only_resource) for a resource the agent
+    never writes, and TownloopsError(resource_frozen) if it is frozen."""
+    if resource in READ_ONLY_RESOURCES:
+        raise TownloopsError(
+            0, "read_only_resource",
+            f"resource {resource!r} is read-only for the agent — a Series is "
+            "created, edited and archived by a curator, never by this client.",
+        )
     if resource in _frozen_resources():
         raise TownloopsError(
             0, "resource_frozen",
@@ -92,6 +105,7 @@ class Client:
         "categories",
         "sponsors",
         "ad-slots",       # dash in URL segment; matches OpenAPI /towns/{slug}/ad-slots
+        "series",         # read-only (READ_ONLY_RESOURCES): list = active only, get = any
     )
 
     def __init__(

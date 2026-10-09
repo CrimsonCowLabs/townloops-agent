@@ -131,6 +131,14 @@ def with_ticket_line(description: Optional[str], line: Optional[str]) -> Optiona
     return f"{line}\n\n{body}"
 
 
+def without_ticket_line(description: Optional[str]) -> Optional[str]:
+    """`description` minus a ticket line event-ship put on top — what is left
+    describes the event, not one date's price."""
+    if not description:
+        return description
+    return _LINE.sub("", description, count=1).strip()
+
+
 def live_tags(tags: list[str], price: Optional[str]) -> list[str]:
     """A live row's tag set brought in line with the stated price: `free`
     added (room permitting) for a free event, dropped for a priced one."""
