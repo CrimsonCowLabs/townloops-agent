@@ -6,10 +6,16 @@ Three findings, each a list capped at `limit` plus an uncapped count:
   events dated in the window that aren't live yet (pending review, still in
   the pipeline, or stuck). The local side is the "found by a source but not on
   TownLoops" half of the CMO's next-30-days gap audit, without re-scraping.
+- **coverage** — per town-local day, the distinct live groups (a Series
+  counts once, however many occurrences it has that day), and the days whose
+  every group is a Series: where one-off coverage is thin.
 - **sparse_metadata** — live events missing a description, venue binding,
-  source_url or categories.
+  source_url or categories, one finding per group: a Series missing a
+  description on 44 occurrences is one finding.
 - **venues_missing_images** — venues of window events with no `image_path`,
   busiest first. Events carry no image field; the listing shows the venue's.
+
+Grouping is `engine.event_groups` — on `series_slug`, never on title.
 
 The window is whole town-local days. TownLoops filters `from`/`to` on UTC
 instants, so the fetch runs a day past the local end and every `start_at` is
@@ -27,6 +33,7 @@ from typing import Callable, Optional
 from zoneinfo import ZoneInfo
 
 from engine.derive_helpers import dict_rows as _rows, parse_instant, utc_z
+from engine.event_groups import group_events
 from engine.event_extract import town_tz_name
 
 
@@ -56,16 +63,20 @@ def audit_upcoming(conn: sqlite3.Connection, client, *, days: int = 30,
         if start and window_start <= start < window_end:
             live.append((start.astimezone(tz).date(), row))
     live.sort(key=lambda p: (p[0], p[1].get("start_at") or "", p[1].get("slug") or ""))
+    day_of = {id(row): day for day, row in live}
+    groups = group_events([row for _, row in live])
 
     return {
         "window": {"from": first.isoformat(), "to": last.isoformat(), "days": days, "tz": tz_name},
         "live_events": len(live),
+        "live_groups": len(groups),
         "gaps": {
             "empty_days": _empty_days(first, last, {d for d, _ in live}),
             "not_live": _not_live(conn, window_start, window_end, limit),
         },
-        "sparse_metadata": _sparse(live, limit),
-        "venues_missing_images": _venues_missing_images(client, live, limit),
+        "coverage": _coverage(first, last, groups, day_of),
+        "sparse_metadata": _sparse(groups, day_of, limit),
+        "venues_missing_images": _venues_missing_images(client, groups, day_of, limit),
     }
 
 
@@ -76,6 +87,23 @@ def _empty_days(first: date, last: date, busy: set[date]) -> list[str]:
             out.append(d.isoformat())
         d += timedelta(days=1)
     return out
+
+
+def _coverage(first: date, last: date, groups: list, day_of: dict) -> dict:
+    per_day: dict[date, dict[str, bool]] = {}
+    for g in groups:
+        for row in g.events:
+            per_day.setdefault(day_of[id(row)], {})[g.key] = g.is_series
+    days, series_only, d = [], [], first
+    while d <= last:
+        seen = per_day.get(d, {})
+        series = sum(seen.values())
+        days.append({"date": d.isoformat(), "groups": len(seen), "series": series,
+                     "singletons": len(seen) - series})
+        if seen and series == len(seen):
+            series_only.append(d.isoformat())
+        d += timedelta(days=1)
+    return {"days": days, "series_only_days": series_only}
 
 
 def _not_live(conn, lo: datetime, hi: datetime, limit: int) -> dict:
@@ -110,27 +138,36 @@ def _not_live(conn, lo: datetime, hi: datetime, limit: int) -> dict:
     return {"counts": counts, "total": len(found), "events": [f[2] for f in found[:limit]]}
 
 
-def _sparse(live: list, limit: int) -> dict:
+def _sparse(groups: list, day_of: dict, limit: int) -> dict:
     counts = dict.fromkeys(SPARSE_CHECKS, 0)
     events = []
-    for day, row in live:
-        missing = [f for f, is_missing in SPARSE_CHECKS.items() if is_missing(row)]
+    for g in groups:
+        hit = [(row, [f for f, is_missing in SPARSE_CHECKS.items() if is_missing(row)])
+               for row in g.events]
+        hit = [(row, missing) for row, missing in hit if missing]
+        if not hit:
+            continue
+        missing = [f for f in SPARSE_CHECKS if any(f in m for _, m in hit)]
         for f in missing:
             counts[f] += 1
-        if missing:
-            events.append({"slug": row.get("slug"), "title": (row.get("title") or "")[:200],
-                           "date": day.isoformat(), "source_url": row.get("source_url"),
-                           "missing": missing})
+        row = hit[0][0]
+        events.append({"slug": row.get("slug"), "title": (row.get("title") or "")[:200],
+                       "date": day_of[id(row)].isoformat(), "source_url": row.get("source_url"),
+                       "missing": missing, "series_slug": g.series_slug, "occurrences": len(hit)})
     return {"counts": counts, "total": len(events), "events": events[:limit]}
 
 
-def _venues_missing_images(client, live: list, limit: int) -> dict:
+def _venues_missing_images(client, groups: list, day_of: dict, limit: int) -> dict:
     by_venue: dict[str, dict] = {}
-    for day, row in live:
-        slug = row.get("venue_slug")
-        if slug:
-            v = by_venue.setdefault(slug, {"events_in_window": 0, "next_event": day})
-            v["events_in_window"] += 1
+    for g in groups:
+        for row in g.events:
+            slug = row.get("venue_slug")
+            if slug:
+                v = by_venue.setdefault(slug, {"events_in_window": 0, "groups": set(),
+                                               "next_event": day_of[id(row)]})
+                v["events_in_window"] += 1
+                v["groups"].add(g.key)
+                v["next_event"] = min(v["next_event"], day_of[id(row)])
     if not by_venue:
         return {"total": 0, "venues": [], "unverified": []}
 
@@ -144,7 +181,8 @@ def _venues_missing_images(client, live: list, limit: int) -> dict:
             missing.append({"venue_slug": slug, "name": venue.get("name"),
                             "website": venue.get("website"),
                             "events_in_window": seen["events_in_window"],
+                            "groups_in_window": len(seen["groups"]),
                             "next_event": seen["next_event"].isoformat()})
-    missing.sort(key=lambda v: (-v["events_in_window"], v["next_event"], v["venue_slug"]))
+    missing.sort(key=lambda v: (-v["groups_in_window"], -v["events_in_window"],
+                                v["next_event"], v["venue_slug"]))
     return {"total": len(missing), "venues": missing[:limit], "unverified": sorted(unverified)}
-

@@ -15,7 +15,8 @@ python skills/business/newsletter-weekly/newsletter.py push    --week 2026-W28 [
 python skills/business/newsletter-weekly/newsletter.py show    --week 2026-W28
 ```
 
-- `compose` — queries `GET /api/v1/towns/<slug>/events?from=<mon>&to=<sun>&status=published`, renders `template.html`, writes `state/newsletters/<week>.html`, logs `status='draft'` in the `newsletters` table.
+- `compose` — queries `GET /api/v1/towns/<slug>/events?from=<mon>&to=<sun>&status=published`, renders `template.html`, writes `state/newsletters/<week>.html`, logs `status='draft'` in the `newsletters` table. Prints `{"week", "events", "entries", "series", "singletons", "body"}` — `events` is raw occurrences, `entries` what the reader sees.
+  - **Series collapse** (`engine/event_groups.py`): a Series appears once, as its next occurrence in the week (its own local description, as-is), with its `cadence_text`, "+N more dates this week", and an "All dates" hub link — only when `GET /series/<slug>` says `is_active` and gives a `url` (an archived hub 404s). Events without a `series_slug` are never merged, even under the same title.
 - `push` — creates a Listmonk campaign from the draft body + schedules it. Default `send_at` = Monday of that week at 07:00 America/Los_Angeles (override with `--send-at`).
 - `show` — dumps the newsletter row from state.
 

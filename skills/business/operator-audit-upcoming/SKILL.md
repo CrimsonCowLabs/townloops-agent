@@ -32,19 +32,24 @@ python skills/business/operator-audit-upcoming/audit.py --days 14 --limit 20
 {
   "window": {"from": "2026-10-08", "to": "2026-11-06", "days": 30, "tz": "America/Los_Angeles"},
   "live_events": 182,
+  "live_groups": 61,
   "gaps": {
     "empty_days": ["2026-10-21"],
     "not_live": {"counts": {"pending_review": 4, "in_pipeline": 2, "stuck": 1}, "total": 7,
                  "events": [{"event_uid": "…", "title": "…", "date": "…", "state": "…",
                              "source": "…", "reason": "pending_review"}]}
   },
+  "coverage": {"days": [{"date": "2026-10-08", "groups": 3, "series": 2, "singletons": 1}],
+               "series_only_days": ["2026-10-13"]},
   "sparse_metadata": {"counts": {"description": 3, "venue": 9, "source_url": 0, "categories": 1},
                       "total": 11,
                       "events": [{"slug": "…", "title": "…", "date": "2026-10-09",
-                                  "source_url": "…", "missing": ["venue"]}]},
+                                  "source_url": "…", "missing": ["venue"],
+                                  "series_slug": "trivia-thursday", "occurrences": 4}]},
   "venues_missing_images": {"total": 5, "unverified": [],
                             "venues": [{"venue_slug": "…", "name": "…", "website": "…",
-                                        "events_in_window": 6, "next_event": "2026-10-09"}]}
+                                        "events_in_window": 6, "groups_in_window": 2,
+                                        "next_event": "2026-10-09"}]}
 }
 ```
 
@@ -53,10 +58,17 @@ python skills/business/operator-audit-upcoming/audit.py --days 14 --limit 20
 - `gaps.not_live` — local events dated in the window that aren't on TownLoops:
   `pending_review` (operator hasn't approved), `in_pipeline` (approved, the
   heartbeat will ship it), `stuck` (`operator-requeue` after checking why).
+- **Series count once** (grouped on `series_slug`, never title): `live_groups`
+  is distinct Series + one-offs; `coverage.days` counts groups per local day,
+  and `series_only_days` are days whose every group is a Series — one-off
+  coverage is thin there.
 - `sparse_metadata` — live events missing `description`, `venue` (no venue
-  binding), `source_url`, or `categories`.
+  binding), `source_url`, or `categories`, **one finding per group**: the row
+  is the group's first affected occurrence, `missing` the union across it,
+  `occurrences` how many are affected. `counts` count findings, not dates.
 - `venues_missing_images` — venues with upcoming events and no `image_path`,
-  busiest first. Events have no image field; the site shows the venue's.
+  busiest first (`groups_in_window`, then raw `events_in_window`). Events have
+  no image field; the site shows the venue's.
   `unverified` lists venue slugs the venue listing didn't return.
 
 ## Reading the result (the CMO's rules)

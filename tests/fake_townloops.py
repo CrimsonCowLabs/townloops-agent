@@ -47,6 +47,8 @@ EVENT_PATCH_FIELDS = {
 
 
 class FakeAPI:
+    town_slug = "slt"
+
     def __init__(self, events=None, venues=None, ignore=(), create_drops=(),
                  entities=None, categories=None, series=None):
         self.events = {e["slug"]: {"series_slug": None, "series_id": None, **copy.deepcopy(e)}

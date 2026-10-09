@@ -112,9 +112,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     elsewhere); `shared_fill` — blank Series-shared fields from siblings, never date/price/cancellation;
     `candidates` — the weekly `series-candidates` report), `series_sync.py` (mirror `series_slug`/`series_id`
     from TownLoops onto local rows; fill Series-shared blanks live — event-ship + entity-live-sync),
+    `event_groups.py` (collapse a listing on `series_slug` — never title; a singleton keys on its own slug/uid;
+    the earliest occurrence represents the group; `SeriesDetails` = `GET /series/{slug}` once per run; `hub_url`
+    only for an active Series with a `url`. The newsletter, nightly digest, upcoming audit and
+    `operator-list-events` all group through it — new listings do too),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
-    skill: days with no live event, local events not live yet, sparse live metadata, venues of
-    upcoming events with no image; LIST/GET only).
+    skill: days with no live event, per-day Series/one-off coverage, local events not live yet, sparse live metadata
+    (one finding per Series), venues of upcoming events with no image; LIST/GET only).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the

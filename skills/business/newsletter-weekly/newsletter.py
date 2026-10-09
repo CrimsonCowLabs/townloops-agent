@@ -19,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, "/app")
 from engine import db, listmonk_api, townloops_api  # noqa: E402
+from engine import event_groups  # noqa: E402
 from engine.log import get_logger  # noqa: E402
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape  # noqa: E402
@@ -74,6 +75,25 @@ def _load_active_ads() -> dict[str, list[dict]]:
     return grouped
 
 
+def _entries(groups: list, details) -> list[dict]:
+    """One template entry per group: a Series appears once, as its next
+    occurrence in the week, with its cadence, its other dates' count and —
+    only while active with a `url` — its hub. Singletons render as before."""
+    out = []
+    for g in groups:
+        e = dict(g.representative)
+        e["link"] = event_groups.public_url(e.get("url")) or e.get("source_url") or "#"
+        series = details.get(g.series_slug) if g.is_series else None
+        out.append({
+            "event": e,
+            "is_series": g.is_series,
+            "more_dates": len(g.others),
+            "cadence": (series or {}).get("cadence_text"),
+            "hub_url": event_groups.hub_url(series),
+        })
+    return out
+
+
 def cmd_compose(args) -> int:
     monday, sunday = _iso_week_dates(args.week)
     tl = townloops_api.Client()
@@ -89,7 +109,9 @@ def cmd_compose(args) -> int:
     )
     if not events:
         log.warning("no events for week", extra={"week": args.week})
-    events.sort(key=lambda e: e.get("start_at") or "")
+    groups = event_groups.group_events(events)
+    entries = _entries(groups, event_groups.SeriesDetails(tl))
+    variety = event_groups.split_counts(groups)
 
     env = Environment(
         loader=FileSystemLoader(TEMPLATE_DIR),
@@ -100,7 +122,8 @@ def cmd_compose(args) -> int:
         town_slug=tl.town_slug,
         iso_week=args.week,
         week_of=f"{monday:%b %-d} – {sunday:%b %-d, %Y}",
-        events=events,
+        entries=entries,
+        variety=variety,
         ads=_load_active_ads(),
     )
 
@@ -124,7 +147,8 @@ def cmd_compose(args) -> int:
     conn.commit()
     conn.close()
 
-    print(json.dumps({"week": args.week, "events": len(events), "body": str(out_path)}))
+    print(json.dumps({"week": args.week, "events": len(events), "entries": len(entries),
+                      **variety, "body": str(out_path)}))
     return 0
 
 

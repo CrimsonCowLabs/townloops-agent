@@ -14,6 +14,8 @@
   .event .when { color: #555; font-size: 14px; }
   .event .venue { color: #777; font-size: 14px; }
   .event .desc { font-size: 14px; margin-top: 6px; }
+  .event .cadence { color: #555; font-size: 13px; font-style: italic; }
+  .event .more { font-size: 13px; margin-top: 6px; }
   .footer { margin-top: 32px; color: #999; font-size: 12px; text-align: center; }
 </style>
 </head>
@@ -26,14 +28,17 @@
 {% endfor %}
 
 <h1>This week in {{ town_slug }}</h1>
-<div class="lede">{{ week_of }} · {{ events|length }} event{{ '' if events|length == 1 else 's' }}</div>
+<div class="lede">{{ week_of }} · {{ entries|length }} event{{ '' if entries|length == 1 else 's' }}</div>
 
-{% for e in events %}
-<div class="event">
-  <div class="name"><a href="{{ e.url or e.source_url or '#' }}">{{ e.title }}</a></div>
+{% for x in entries %}{% set e = x.event %}
+<div class="event{% if x.is_series %} series{% endif %}">
+  <div class="name"><a href="{{ e.link }}">{{ e.title }}</a></div>
+  {% if x.cadence %}<div class="cadence">{{ x.cadence }}</div>{% endif %}
   <div class="when">{{ e.start_at }}{% if e.end_at %} – {{ e.end_at }}{% endif %}</div>
   {% if e.venue_name %}<div class="venue">{{ e.venue_name }}</div>{% endif %}
   {% if e.description %}<div class="desc">{{ e.description|truncate(200) }}</div>{% endif %}
+  {% if x.more_dates %}<div class="more">+{{ x.more_dates }} more date{{ '' if x.more_dates == 1 else 's' }} this week{% if x.hub_url %} · <a href="{{ x.hub_url }}">All dates</a>{% endif %}</div>
+  {% elif x.hub_url %}<div class="more"><a href="{{ x.hub_url }}">All dates</a></div>{% endif %}
 </div>
 {% else %}
 <p>No events published for this week yet. Reply if you have one to add.</p>

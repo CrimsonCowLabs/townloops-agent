@@ -16,13 +16,14 @@ import os
 import sqlite3
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import requests
 
 from engine import db as _db
+from engine import event_groups
 from engine import event_state
 from engine import inspection
 from engine import lock as _lock
@@ -235,6 +236,16 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "SELECT status, COUNT(*) AS count FROM event_seeds GROUP BY status"
     ).fetchall()}
 
+    # Shipped in the window, one line per Series (event_groups), not per date.
+    cutoff = (now - timedelta(hours=hours)).isoformat(timespec="seconds")
+    shipped_rows = [dict(r) for r in conn.execute(
+        "SELECT event_uid, COALESCE(title, name) AS title, COALESCE(date_utc, date) AS date_sort, "
+        "COALESCE(date_local, date_utc, date) AS date_display, series_slug "
+        "FROM events WHERE state = 'shipped' AND state_updated_at >= ?", (cutoff,)
+    ).fetchall()]
+    shipped = event_groups.group_local_rows(shipped_rows)
+    shipped_counts = {"events": len(shipped_rows), **event_groups.split_counts(shipped)}
+
     md_lines = [
         f"# {town} — {today}",
         f"_Event-first pipeline nightly digest_",
@@ -251,6 +262,17 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
     else:
         md_lines.append("- (empty)")
 
+    md_lines += ["", f"## Shipped (last {hours}h)"]
+    for g in shipped:
+        r = g.representative
+        if g.is_series:
+            md_lines.append(f"- {r['title']} — Series `{g.series_slug}`, {len(g.events)} "
+                            f"date{'s' if len(g.events) != 1 else ''} from {r['date_display']}")
+        else:
+            md_lines.append(f"- {r['title']} — {r['date_display']}")
+    if not shipped:
+        md_lines.append("- (none)")
+
     report_dir = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
     report_path = report_dir / f"{today}.md"
@@ -260,6 +282,8 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         f"[{town}] nightly digest ({today})\n"
         f"events: {sum(events_by_state.values())} across {len(events_by_state)} states\n"
         f"pending approval: {approvals_pending}\n"
+        f"shipped: {shipped_counts['events']} events ({shipped_counts['series']} Series, "
+        f"{shipped_counts['singletons']} one-off)\n"
         f"seeds: {seeds}\n"
     )
     _telegram_notify(tg)
@@ -270,6 +294,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "events_by_state": events_by_state,
         "approvals_pending": approvals_pending,
         "seeds": seeds,
+        "shipped": shipped_counts,
         "workqueue": wq,
     }
 

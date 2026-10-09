@@ -143,3 +143,53 @@ def test_limit_caps_lists_not_counts(conn):
     assert out["sparse_metadata"]["counts"]["description"] == 5
     assert out["sparse_metadata"]["total"] == 5
     assert len(out["sparse_metadata"]["events"]) == 2
+
+
+# --- Series (issue #3): coverage and findings count a Series once ---------
+
+def _series(slug, start_at, series_slug, **kw):
+    return _ev(slug, start_at, series_slug=series_slug, **kw)
+
+
+def test_coverage_counts_a_series_once_and_flags_series_only_days(conn):
+    api = FakeAPI([
+        # Oct 8: a Series with two same-day occurrences, nothing else
+        _series("music-1", "2026-10-08T19:00:00Z", "daily-live-music"),
+        _series("music-2", "2026-10-08T23:00:00Z", "daily-live-music"),
+        # Oct 9: the Series plus a one-off
+        _series("music-3", "2026-10-09T19:00:00Z", "daily-live-music"),
+        _ev("book-talk", "2026-10-09T20:00:00Z"),
+    ], VENUES)
+    out = audit_upcoming(conn, api, days=3, now=NOW)
+    cov = out["coverage"]
+    assert cov["days"] == [
+        {"date": "2026-10-08", "groups": 1, "series": 1, "singletons": 0},
+        {"date": "2026-10-09", "groups": 2, "series": 1, "singletons": 1},
+        {"date": "2026-10-10", "groups": 0, "series": 0, "singletons": 0},
+    ]
+    assert cov["series_only_days"] == ["2026-10-08"]
+    assert out["live_events"] == 4 and out["live_groups"] == 2
+
+
+def test_sparse_metadata_is_one_finding_per_series(conn):
+    api = FakeAPI([
+        *[_series(f"trivia-{i}", f"2026-10-{9 + i:02d}T03:00:00Z", "trivia-thursday", description="")
+          for i in range(4)],
+        _ev("one-off", "2026-10-09T05:00:00Z", description=""),
+    ], VENUES)
+    out = audit_upcoming(conn, api, days=7, now=NOW)
+    sparse = out["sparse_metadata"]
+    assert sparse["counts"]["description"] == 2 and sparse["total"] == 2
+    trivia = next(e for e in sparse["events"] if e.get("series_slug") == "trivia-thursday")
+    assert trivia["slug"] == "trivia-0" and trivia["occurrences"] == 4
+    assert trivia["missing"] == ["description"]
+
+
+def test_venue_missing_image_across_a_series_is_one_finding(conn):
+    api = FakeAPI([_series(f"trivia-{i}", f"2026-10-{9 + i:02d}T03:00:00Z", "trivia-thursday",
+                           venue_id=2, venue_slug="lakeview-commons") for i in range(4)], VENUES)
+    out = audit_upcoming(conn, api, days=7, now=NOW)
+    imgs = out["venues_missing_images"]
+    assert imgs["total"] == 1
+    [v] = imgs["venues"]
+    assert v["venue_slug"] == "lakeview-commons" and v["events_in_window"] == 4 and v["groups_in_window"] == 1

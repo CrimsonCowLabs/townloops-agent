@@ -9,7 +9,7 @@ description: List events from the local event-first operator review database by 
 
 Use when the operator asks which locally managed events match a review filter: “list pending events,” “show events from the chamber source,” “what is approved before Aug 15?”, or “which events are declined?”.
 
-Returns one row per event, capped by `--limit` (default 20, max 100). It is read-only and wraps `db_v2.events_by_approval`. Prefer `operator-status` for counts and `operator-review-event` for one-event inspection.
+Returns one row per event — or per Series (only rows already shipped carry a `series_slug`, so collapsing shows mainly in `--status shipped`): occurrences sharing a `series_slug` collapse into one row (the earliest) with `dates` = how many matched — capped by `--limit` (default 20, max 100) in rows. It is read-only and wraps `db_v2.events_by_approval`. Prefer `operator-status` for counts and `operator-review-event` for one-event inspection.
 
 ## Scope boundary: local review queue vs. live TownLoops
 
@@ -27,12 +27,14 @@ python skills/business/operator-list-events/list.py --status approved
 python skills/business/operator-list-events/list.py --status pending --limit 5
 python skills/business/operator-list-events/list.py --status pending --before 2026-08-15
 python skills/business/operator-list-events/list.py --source "chamber"
+python skills/business/operator-list-events/list.py --series trivia-thursday
 ```
 
 - `--status`: `pending`, `approved`, `declined`, or `shipped` (default `pending`)
 - `--before`: ISO date or datetime
 - `--source`: case-insensitive substring of `discovered_via`
-- `--limit`: 1–100 (default 20)
+- `--limit`: 1–100 (default 20), counted in rows (a Series is one)
+- `--series`: a `series_slug` — expand one Series: every occurrence on TownLoops via `?series=` (past ones included, each with its `status`), oldest first, plus the Series' title/cadence. Use when the operator says "show all Trivia Thursday dates"; take the slug from a listing row's `series_slug` (or `townloops-api` `series`). Read-only.
 
 ## Output
 
@@ -47,10 +49,15 @@ python skills/business/operator-list-events/list.py --source "chamber"
       "date": "…",
       "venue": "…",
       "source": "…",
-      "category": "…"
+      "category": "…",
+      "series_slug": "trivia-thursday",
+      "dates": 4
     }
   ]
 }
 ```
+
+`count` is rows, `events_total` the occurrences behind them. `--series` prints
+`{"series": {"slug", "title", "cadence_text", "is_active"}, "count", "events": [{"slug", "title", "start_at", "venue_slug", "status"}]}`.
 
 A zero-match response is `count: 0` with `events: []`; it is not an error.

@@ -124,7 +124,7 @@
       "schedule": "0 8 * * 0",
       "skills": ["newsletter-weekly"],
       "deliver": "telegram",
-      "prompt": "Compute next week's ISO week (Mon-Sun ahead). Run `newsletter-weekly/newsletter.py compose --week <ISO>`. Read the draft body path from the JSON output; do NOT paste the whole HTML into Telegram. Send a summary: week label, event count, draft path, and a reminder that `push` requires operator approval. Do NOT push."
+      "prompt": "Compute next week's ISO week (Mon-Sun ahead). Run `newsletter-weekly/newsletter.py compose --week <ISO>`. Read the draft body path from the JSON output; do NOT paste the whole HTML into Telegram. Send a summary: week label, entry count split into Series and one-off events (`series` / `singletons` in the JSON; `events` is the raw occurrence count), draft path, and a reminder that `push` requires operator approval. Do NOT push."
     },
     {
       "id": "newsletter-push-reminder",
