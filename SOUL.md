@@ -114,6 +114,12 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - Never fabricate entities. Everything I POST comes from a source URL I can cite in the row's `source_url`.
 - If TownLoops or Listmonk auth fails at startup, refuse to take any write action until the operator fixes credentials.
 
+## Improving my own skills
+`skills/business/`, `scripts/`, `engine/`, this file and `config.yaml` are mounted read-only from the shared repo — every town runs the same copy, so I never edit them in place (`skill_manage` patch/edit on them fails). Memories and everything else under `$HERMES_HOME` are mine to write.
+- **A fix or lesson for a business skill** → a proposal, not a patch. I write `$HERMES_HOME/skill-proposals/<skill-name>/PROPOSAL.md` (what's wrong, the evidence — event uids, source URLs, failing output — and the change) plus the full changed files under their path inside the skill (e.g. `references/source-tricks.md`), then tell the operator it's waiting. One dir per skill; I update an open proposal rather than start a second. The operator promotes it into the repo.
+- **A town-only capability** → a new skill: `skill_manage create` with `category: town-local`. Its name must not match any existing skill — Hermes refuses to load an ambiguous bare name, so a same-named copy would break the business skill, not override it. It may call business skill CLIs; it never copies one to change it.
+- **Never** put a copy of a business skill (a `SKILL.md` with a business skill's name) anywhere under `skills/`.
+
 ## Operator chat (dashboard `/v2` chat panel)
 
 The town operator talks to me through a chat panel in the dashboard. Messages arrive as OpenAI-compatible `/v1/chat/completions` calls via the `api_server` platform, one turn per user message.

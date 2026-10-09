@@ -1,7 +1,7 @@
 # Skill inventory
 
 One-page reference for what each skill does + its most common commands.
-For the big picture see `../CLAUDE.md`; for each skill's full contract see its
+For the big picture see `../AGENTS.md`; for each skill's full contract see its
 own `SKILL.md`.
 
 > The repo is **event-first**: events move through a per-event state machine
