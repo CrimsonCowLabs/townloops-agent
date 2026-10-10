@@ -56,7 +56,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
   - `orchestrator.py` — `drain_workqueue()`: for each `next_action`, claim ≤5 items, `subprocess`-invoke
     the matching skill with `--event-uid <uid>`, advance state + enqueue the next action on rc 0, `fail`
     on nonzero, and **quietly skip (`rc==127`) skills that aren't implemented yet**. Wrapped in an
-    `engine.lock` flock so overlapping heartbeats don't collide.
+    `engine.lock` flock so overlapping heartbeats don't collide. The heartbeat cron wrapper detaches the
+    drain (like `event_find.py`), so a drain may outlast Hermes' 120s script budget; it bounds itself via
+    `town-profile.yaml` → `workqueue_drain` (`drain_settings`: ≤`read_detail_per_drain` detail-page
+    fetches, started only in the first half of `budget_seconds`; no skill starts once the budget is spent;
+    held claims are released unattempted). Clamped so a drain ends before the 15-min stale-claim reaper.
   - `ingest_core.py` (1055 lines) — extracted shared core for event-ingest: entity dataclasses,
     `ENTITY_REG`, hashing, HTTP/Firecrawl fetch, JSON-LD walker, CSS-selector parsers, `PARSERS`
     registry, enrichment overlay. `skills/business/event-ingest/ingest.py` is a **fork of SLT's
@@ -169,7 +173,8 @@ docker compose up -d dashboard      # http://127.0.0.1:8090
 
 # Drive the pipeline by hand (inside the container or with env set)
 python engine/orchestrator.py       # not a CLI — call drain_workqueue() from scripts/
-python scripts/workqueue_heartbeat.py   # what the 10-min cron runs
+python scripts/workqueue_heartbeat.py   # what the 10-min cron runs (detaches; log: state/logs/workqueue-heartbeat-<date>.log)
+python scripts/workqueue_heartbeat.py --drain   # one drain in the foreground
 python skills/business/event-seed-discovery/discover.py --help
 python skills/business/event-find/find.py --dry-run
 python skills/business/town-init/init.py setup      # verify creds, snapshot categories, migrate DB

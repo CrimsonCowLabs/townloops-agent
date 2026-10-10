@@ -16,14 +16,17 @@ import os
 import sqlite3
 import subprocess
 import sys
+import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
 from engine import autonomy
 from engine import db as _db
+from engine.derive_helpers import load_town_profile
 from engine import event_detail, event_groups
 from engine import event_state
 from engine import inspection
@@ -51,17 +54,59 @@ _ACTION_SKILLS: dict[str, tuple[str, str]] = {
     "ship":              ("event-ship",             "ship.py"),
 }
 
-# How many items to claim per action per heartbeat tick
+# How many items to claim per action per drain
 _BATCH_SIZE = 5
-# A detail read is a Firecrawl scrape + a Codex call (up to ~100s); one per
-# tick keeps it from eating Hermes' 120s cron script budget for the rest.
+# Longest one skill run may take (_invoke_skill kills it after this).
+SKILL_TIMEOUT_S = 120
+# A detail read is a Firecrawl scrape + a Codex call (up to ~100s). The
+# heartbeat runs detached (scripts/workqueue_heartbeat.py), outside Hermes'
+# 120s cron script budget, so a drain may fetch several — up to the town's
+# `workqueue_drain.read_detail_per_drain` and only in the first half of the
+# drain's budget, so the rest of the pipeline always gets the other half.
 # Events with no detail page of their own finish at once and don't count
-# (engine/event_detail.needs_fetch): up to _BATCH_SIZE of them go through.
-_BATCH_SIZES = {"read-detail": 1}
+# (engine/event_detail.needs_fetch). The hourly workqueue_rate_limits still
+# bound every claim.
 _FETCHING_ACTIONS = {"read-detail"}
+MAX_READ_DETAIL_PER_DRAIN = 20
+# A drain stops starting skills once its budget is spent; the last one may run
+# SKILL_TIMEOUT_S more. The whole drain must end before workqueue.
+# reap_stale_claims (15 min) would take its claims, with a skill run to spare.
+_MIN_BUDGET_S = 60
+_MAX_BUDGET_S = 15 * 60 - 2 * SKILL_TIMEOUT_S
 # A skill's "not now" (autonomous submissions held): the claim is released
 # without counting an attempt.
 RC_DEFERRED = 75
+
+
+@dataclass(frozen=True)
+class DrainSettings:
+    # Defaults: half the budget (210s) fits a handful of typical detail reads
+    # (~30–60s), the cap bounds the fast case; 420s + one skill run ends
+    # before the next 10-min heartbeat. Was 1 fetch per tick in-budget.
+    read_detail_per_drain: int = 6
+    budget_seconds: int = 420
+
+
+def drain_settings(profile: Optional[dict] = None) -> DrainSettings:
+    """The town's `workqueue_drain` block (town-profile.yaml), read fresh each
+    drain. Missing or bad values keep the defaults; all are clamped to safe
+    bounds."""
+    profile = load_town_profile() if profile is None else (profile or {})
+    src = profile.get("workqueue_drain") or {}
+    d = DrainSettings()
+
+    def num(key: str, default: int, lo: int, hi: int) -> int:
+        try:
+            v = int(src[key]) if src.get(key) is not None else default
+        except (TypeError, ValueError):
+            v = default
+        return max(lo, min(hi, v))
+
+    return DrainSettings(
+        read_detail_per_drain=num("read_detail_per_drain", d.read_detail_per_drain,
+                                  1, MAX_READ_DETAIL_PER_DRAIN),
+        budget_seconds=num("budget_seconds", d.budget_seconds, _MIN_BUDGET_S, _MAX_BUDGET_S),
+    )
 
 
 def _iso_utc_now() -> str:
@@ -93,7 +138,7 @@ def _telegram_notify(text: str) -> None:
 # --------------------------------------------------------------------------
 
 def _invoke_skill(skill: str, entry: str, event_uid: str,
-                  timeout_s: int = 120) -> tuple[int, str, str]:
+                  timeout_s: int = SKILL_TIMEOUT_S) -> tuple[int, str, str]:
     """Run a skill's entry script with `--event-uid <uid>`. Returns
     (returncode, stdout_tail, stderr_tail)."""
     path = SKILLS_ROOT / skill / entry
@@ -111,9 +156,12 @@ def _invoke_skill(skill: str, entry: str, event_uid: str,
             (proc.stderr or "").strip()[-2000:])
 
 
-def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
+def drain_workqueue(conn: Optional[sqlite3.Connection] = None, *,
+                    clock: Callable[[], float] = time.monotonic) -> dict:
     """Single heartbeat: for each action, claim up to _BATCH_SIZE items,
-    invoke the skill, mark complete or failed. Returns a summary dict."""
+    invoke the skill, mark complete or failed. No skill starts once the
+    drain's budget (drain_settings) is spent; claims it can't get to go back
+    to the queue unattempted. Returns a summary dict."""
     conn = conn or _db.connect()
     conn.row_factory = sqlite3.Row
     # Every town runs this heartbeat on repo code, so it keeps the schema in
@@ -127,30 +175,44 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
             # servicing the action loop, so they can't stall invisibly.
             reaped = workqueue.reap_stale_claims(conn)
             mode = autonomy.settings()
+            drain = drain_settings()
+            start = clock()
+            budget_spent = False
             resolved = resolve_stuck(conn, mode) if mode.autonomous else {}
             per_action: dict[str, dict] = {}
             for action, (skill, entry) in _ACTION_SKILLS.items():
+                if budget_spent:
+                    break
                 if action == "ship" and mode.autonomous:
                     gate = autonomy.submission_gate(conn, mode)
                     if gate.verdict != "submit":
                         per_action[action] = {"held": gate.reason}
                         continue
-                fetch_cap = _BATCH_SIZES.get(action, _BATCH_SIZE)
-                claims = workqueue.claim(conn, action, limit=max(fetch_cap, _BATCH_SIZE)
-                                         if action in _FETCHING_ACTIONS else fetch_cap)
+                fetching_action = action in _FETCHING_ACTIONS
+                claims = workqueue.claim(
+                    conn, action,
+                    limit=max(drain.read_detail_per_drain, _BATCH_SIZE)
+                    if fetching_action else _BATCH_SIZE)
                 if not claims:
                     continue
                 completed = 0
                 failed = 0
                 skipped = 0
+                deferred = 0
                 fetching = 0
                 for c in claims:
                     uid = c["event_uid"]
-                    if action in _FETCHING_ACTIONS and event_detail.needs_fetch(conn, c):
-                        fetching += 1
-                        if fetching > fetch_cap:   # next tick
-                            workqueue.release(conn, c["queue_id"])
-                            continue
+                    elapsed = clock() - start
+                    budget_spent = elapsed >= drain.budget_seconds
+                    hold = budget_spent
+                    if not hold and fetching_action and event_detail.needs_fetch(conn, c):
+                        hold = (fetching >= drain.read_detail_per_drain
+                                or elapsed >= drain.budget_seconds / 2)
+                        fetching += not hold
+                    if hold:   # next drain, no attempt counted
+                        workqueue.release(conn, c["queue_id"])
+                        deferred += 1
+                        continue
                     inspection.record(
                         worker="orchestrator", action="skill-invoke",
                         target=uid, detail=f"{skill} for event {uid[:12]}",
@@ -195,6 +257,7 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
                     "completed": completed,
                     "failed": failed,
                     "skipped_not_implemented": skipped,
+                    "deferred": deferred,
                     "claimed": len(claims),
                 }
 
@@ -202,6 +265,8 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
                 "town": town,
                 "ts": _iso_utc_now(),
                 "reaped_stale_claims": reaped,
+                "elapsed_s": round(clock() - start, 1),
+                "budget_spent": budget_spent,
                 **({"stuck_resolved": resolved} if resolved else {}),
                 "per_action": per_action,
                 "any_work": bool(per_action) or bool(reaped),

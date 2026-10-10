@@ -35,10 +35,13 @@ event-reconcile only see the seed's listing page; this reads the event's own
 
 One Firecrawl scrape + one Codex call per approved event. Skipped with no fetch
 (`no-detail-page`) when `source_url` is missing or is the seed's listing page.
-Hourly cap: `workqueue_rate_limits.read-detail` (default 30); the drainer
-claims one per heartbeat (6/hour) so the tick stays near Hermes' 120s cron
-limit. A read is bounded to ~100s (`engine/event_detail.py` timeouts) to stay
-inside the orchestrator's 120s per-skill timeout.
+Hourly cap: `workqueue_rate_limits.read-detail` (default 30). The heartbeat
+drain runs detached, so it fetches up to `workqueue_drain.read_detail_per_drain`
+pages (default 6) per 10-min drain, started only in the first half of the
+drain's `budget_seconds` (default 420) so the rest of the pipeline keeps the
+other half; the rest wait for the next drain with no attempt counted. A read is
+bounded to ~100s (`engine/event_detail.py` timeouts) to stay inside the
+orchestrator's 120s per-skill timeout.
 
 ## Failures
 

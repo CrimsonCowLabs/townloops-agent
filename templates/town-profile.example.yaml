@@ -73,6 +73,17 @@ discovery:
 #   drop_pct: 50       # % drop vs the average that alerts
 #   min_baseline: 4    # seeds averaging fewer events only alert on zero
 
+# Workqueue drain (engine/orchestrator.drain_settings). The 10-min heartbeat
+# runs detached, bounded by these; read on every drain. Detail-page reads
+# (Firecrawl + Codex, ~100s worst case) start only in the first half of the
+# budget; no skill starts once it is spent. workqueue_rate_limits (hourly,
+# per action; read-detail defaults to 30) still bound every claim.
+# workqueue_drain:
+#   read_detail_per_drain: 6   # 1–20
+#   budget_seconds: 420        # 60–660; keep budget + 120s under the 10-min tick
+# workqueue_rate_limits:
+#   read-detail: 30
+
 # Operating mode (engine/autonomy.py). `supervised` (the default) is the
 # operator-gated pipeline: seeds, events, business candidates and
 # cancellations wait for approval in the local dashboard. `autonomous`

@@ -105,3 +105,155 @@ class TestDrainWorkqueue:
         # Reaper cleared the orphan (attempts bumped to 1) so it could be
         # re-claimed and processed in the same tick.
         assert summary["reaped_stale_claims"] == 1
+
+
+# --------------------------------------------------------------------------
+# Read-detail throughput (issue #1 gap 7): the heartbeat runs detached, so a
+# drain may fetch several detail pages, bounded by the town's
+# `workqueue_drain` settings and a wall-clock budget.
+# --------------------------------------------------------------------------
+
+@pytest.fixture
+def profile(tmp_state_dir, monkeypatch):
+    """Write the town's town-profile.yaml."""
+    path = tmp_state_dir.parent / "town-profile.yaml"
+    monkeypatch.setenv("TOWN_PROFILE_PATH", str(path))
+    return path.write_text
+
+
+def _queue_detail_reads(conn, n: int, *, fetching: bool = True) -> list[str]:
+    uids = []
+    for i in range(n):
+        uid = f"d{i}" if fetching else f"n{i}"
+        _insert_event(conn, uid, state="approved")
+        if fetching:   # a detail page of its own → a scrape + an LLM call
+            conn.execute("UPDATE events SET source_url = ? WHERE event_uid = ?",
+                         (f"https://example.org/events/{uid}", uid))
+        workqueue.enqueue(conn, uid, "read-detail")
+        uids.append(uid)
+    conn.commit()
+    return uids
+
+
+class _Clock:
+    """A fake monotonic clock that each skill invocation advances."""
+
+    def __init__(self, per_call: float):
+        self.t = 0.0
+        self.per_call = per_call
+        self.calls: list[tuple[str, str, float]] = []
+
+    def __call__(self) -> float:
+        return self.t
+
+    def invoke(self, skill, entry, uid, *a, **k):
+        self.calls.append((skill, uid, self.t))
+        self.t += self.per_call
+        return (1, "", "boom")   # fail: nothing cascades, the queue stays readable
+
+
+def _pending(conn, action: str) -> int:
+    """Unresolved, unclaimed rows with no attempt counted."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM event_workqueue WHERE next_action = ? AND resolved_at IS NULL "
+        "AND claimed_at IS NULL AND attempts = 0", (action,)).fetchone()[0]
+
+
+class TestDrainSettings:
+    def test_defaults_fetch_more_than_one_detail_page_per_drain(self, profile):
+        profile("")
+        s = orchestrator.drain_settings()
+        assert s.read_detail_per_drain > 1
+        # The budget plus one more skill run ends before the next 10-min tick.
+        assert s.budget_seconds + orchestrator.SKILL_TIMEOUT_S <= 600
+
+    def test_town_profile_overrides(self, profile):
+        profile("workqueue_drain:\n  read_detail_per_drain: 3\n  budget_seconds: 300\n")
+        s = orchestrator.drain_settings()
+        assert (s.read_detail_per_drain, s.budget_seconds) == (3, 300)
+
+    def test_bad_values_keep_defaults_and_bounds_hold(self):
+        d = orchestrator.drain_settings({})
+        assert orchestrator.drain_settings(
+            {"workqueue_drain": {"read_detail_per_drain": "lots", "budget_seconds": None}}) == d
+        s = orchestrator.drain_settings(
+            {"workqueue_drain": {"read_detail_per_drain": 10_000, "budget_seconds": 99_999}})
+        # A drain ends before workqueue.reap_stale_claims would take its claims.
+        assert s.budget_seconds + orchestrator.SKILL_TIMEOUT_S < 15 * 60
+        assert s.read_detail_per_drain <= orchestrator.MAX_READ_DETAIL_PER_DRAIN
+        s = orchestrator.drain_settings({"workqueue_drain": {"read_detail_per_drain": 0}})
+        assert s.read_detail_per_drain >= 1
+
+
+class TestReadDetailThroughput:
+    def test_fetches_up_to_the_town_cap_and_releases_the_rest(self, fresh_db, profile,
+                                                              monkeypatch):
+        profile("workqueue_drain:\n  read_detail_per_drain: 3\n")
+        _queue_detail_reads(fresh_db, 5)
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        summary = orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert len(clock.calls) == 3
+        assert summary["per_action"]["read-detail"]["deferred"] == 2
+        assert _pending(fresh_db, "read-detail") == 2   # back in the queue, no attempt counted
+
+    def test_events_without_a_detail_page_do_not_count_against_the_cap(
+            self, fresh_db, profile, monkeypatch):
+        profile("workqueue_drain:\n  read_detail_per_drain: 1\n")
+        _queue_detail_reads(fresh_db, 2)
+        _queue_detail_reads(fresh_db, 3, fetching=False)
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert sorted(uid for _, uid, _ in clock.calls) == ["d0", "n0", "n1", "n2"]
+
+    def test_the_hourly_rate_limit_still_bounds_claims(self, fresh_db, profile, monkeypatch):
+        profile("workqueue_drain:\n  read_detail_per_drain: 6\n"
+                "workqueue_rate_limits:\n  read-detail: 2\n")
+        _queue_detail_reads(fresh_db, 5)
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert len(clock.calls) == 2
+
+    def test_detail_fetches_start_only_in_the_first_half_of_the_budget(
+            self, fresh_db, profile, monkeypatch):
+        # Detail reads go first in the pass; holding them to half the budget
+        # leaves the rest of the pipeline the other half.
+        profile("workqueue_drain:\n  read_detail_per_drain: 6\n  budget_seconds: 300\n")
+        _queue_detail_reads(fresh_db, 6)
+        _insert_event(fresh_db, "v1", state="detail-read")
+        workqueue.enqueue(fresh_db, "v1", "extract-venue")
+        fresh_db.commit()
+        clock = _Clock(per_call=100)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        summary = orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        fetched = [uid for skill, uid, _ in clock.calls if skill == "event-read-detail"]
+        assert len(fetched) == 2                          # started at t=0 and t=100
+        assert ("event-derive-venue", "v1", 200) in clock.calls
+        assert summary["per_action"]["read-detail"]["deferred"] == 4
+        assert _pending(fresh_db, "read-detail") == 4
+
+    def test_no_skill_starts_once_the_budget_is_spent(self, fresh_db, profile, monkeypatch):
+        profile("workqueue_drain:\n  budget_seconds: 120\n")
+        for i in range(4):
+            _insert_event(fresh_db, f"v{i}", state="detail-read")
+            workqueue.enqueue(fresh_db, f"v{i}", "extract-venue")
+        fresh_db.commit()
+        clock = _Clock(per_call=60)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        summary = orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert [t for _, _, t in clock.calls] == [0, 60]
+        assert summary["per_action"]["extract-venue"]["deferred"] == 2
+        assert summary["budget_spent"] is True
+        assert _pending(fresh_db, "extract-venue") == 2

@@ -16,7 +16,6 @@ ROOT = Path(__file__).resolve().parent.parent
 # Wrappers that need no migrate() of their own, and why. Any other
 # scripts/*.py is a cron wrapper that must migrate before its skill runs.
 NO_MIGRATE = {
-    "workqueue_heartbeat.py": "drain_workqueue migrates",
     "onboarding_tick.py": "run_tick drains, which migrates",
     "onboarding_summary.py": "read-only digest",
     "api_check.py": "API snapshot, no DB",
