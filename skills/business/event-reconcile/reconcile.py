@@ -27,7 +27,9 @@ from dateutil import tz as _tz
 from engine import entity_classify, entity_enrich, inspection, series_sync
 from engine import lock as _lock
 from engine import reconcile as rc
-from engine.derive_helpers import iso_utc_now, open_db, record_activity
+from engine.derive_helpers import (
+    iso_utc_now, open_db, parse_extra_json, record_activity, seed_ref,
+)
 from engine.entity_enrich import Budget
 from engine.event_extract import (
     build_extraction_prompt, codex_exec, event_uid, firecrawl_markdown,
@@ -231,7 +233,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
             conn.execute(
                 "INSERT INTO source_runs (source, started_at, ended_at, ok, fetched, inserted, updated, error) "
                 "VALUES (?, ?, ?, 0, 0, 0, 0, ?)",
-                (f"seed:{name}", started, iso_utc_now(), f"reconcile: {err}"[:400]),
+                (seed_ref(name), started, iso_utc_now(), f"reconcile: {err}"[:400]),
             )
             print(json.dumps({"seed": name, "error": err[:200]}))
             continue
@@ -266,7 +268,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
             conn.execute(
                 "INSERT INTO source_runs (source, started_at, ended_at, ok, fetched, inserted, updated, error) "
                 "VALUES (?, ?, ?, 1, ?, ?, ?, NULL)",
-                (f"seed:{name}", started, iso_utc_now(), len(events), per["new"], per["changed"]),
+                (seed_ref(name), started, iso_utc_now(), len(events), per["new"], per["changed"]),
             )
         print(json.dumps(per))
     return stats
@@ -296,10 +298,7 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
                  llm: Optional[entity_classify.LLM] = None) -> None:
     from engine.research import research_url, verify_image
     uid = event["event_uid"]
-    try:
-        meta = (json.loads(event.get("extra_json") or "{}") or {}).get("reconcile") or {}
-    except json.JSONDecodeError:
-        meta = {}
+    meta = parse_extra_json(event.get("extra_json")).get("reconcile") or {}
 
     # Event image (+ description backfill) from the event's detail page.
     if event.get("image_url") and not verify_image(event["image_url"]):

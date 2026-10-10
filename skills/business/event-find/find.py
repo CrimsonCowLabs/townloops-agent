@@ -22,6 +22,7 @@ import yaml
 
 from engine import autonomy, event_cancel, event_dedup, event_state, inspection, source_health
 from engine import lock as _lock
+from engine.derive_helpers import parse_extra_json, seed_ref
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
     build_extraction_prompt as _build_extraction_prompt,
     codex_exec as _codex_exec,
@@ -172,7 +173,7 @@ def _judge(conn, rows: list[dict], seen: set[str], page, ctx, llm) -> dict:
         # A reconcile-staged change to a live event is that event, not a
         # same-date duplicate of it.
         item["live_slug"] = r.get("townloops_slug") or (
-            (autonomy.extra(r).get("reconcile") or {}).get("live_slug"))
+            (parse_extra_json(r.get("extra_json")).get("reconcile") or {}).get("live_slug"))
     return _apply_judgement(conn, rows, autonomy.judge_items(items, page, ctx, llm))
 
 
@@ -269,7 +270,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
                 record_run(seed, started, True)
                 note = "no events listed"
                 if judging:
-                    judge(_pending_rows(conn, "source = ?", (f"seed:{seed_name}",)), (), md)
+                    judge(_pending_rows(conn, "source = ?", (seed_ref(seed_name),)), (), md)
             else:   # extraction failed: says nothing about the source's health
                 record_run(seed, started, True, error="codex returned no parseable JSON",
                            judge=False)
@@ -320,7 +321,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
 
         record_run(seed, started, True, len(events), inserted, updated)
         if judging:
-            judge(_pending_rows(conn, "source = ?", (f"seed:{seed_name}",)), seen_uids, md)
+            judge(_pending_rows(conn, "source = ?", (seed_ref(seed_name),)), seen_uids, md)
         ended = _iso_utc_now()
         conn.execute(
             "UPDATE event_seeds SET last_scraped_at = ?, last_event_count = ?, "

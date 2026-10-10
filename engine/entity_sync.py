@@ -30,7 +30,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Literal
 
-from engine.derive_helpers import iso_utc_now, record_activity
+from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
 from engine.live_patch import ENTITY_FIELDS, apply_entity_patch, sendable
 
 
@@ -63,27 +63,19 @@ def refresh_content_hash(conn: sqlite3.Connection, kind: str, entity_uid: str) -
                      (content_hash(kind, dict(r)), entity_uid))
 
 
-def _extra(row: dict) -> dict:
-    try:
-        extra = json.loads(row.get("extra_json") or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return extra if isinstance(extra, dict) else {}
-
-
 def live_sync_flag(row: dict) -> dict | None:
     """The operator flag on an entity row ({status, at, detail}), if any."""
-    return _extra(row).get("live_sync")
+    return parse_extra_json(row.get("extra_json")).get("live_sync")
 
 
 def is_cross_town(row: dict) -> bool:
-    return bool(_extra(row).get("cross_town"))
+    return bool(parse_extra_json(row.get("extra_json")).get("cross_town"))
 
 
 def needs_sync(row: dict) -> bool:
     """Shipped by us (in our town), changed since live was last verified,
     not flagged."""
-    extra = _extra(row)
+    extra = parse_extra_json(row.get("extra_json"))
     return bool(row.get("source_kind") != "live" and row.get("townloops_slug")
                 and row.get("pushed_at") and not ({"live_sync", "cross_town"} & extra.keys())
                 and row.get("pushed_hash") != row.get("content_hash"))
@@ -138,7 +130,7 @@ def sync_entity(client, conn: sqlite3.Connection, kind: str, entity_uid: str) ->
                                      + "; ".join(result.mismatches), pulled)
 
     _save_pulled(conn, kind, row, pulled)
-    extra = _extra(row)
+    extra = parse_extra_json(row.get("extra_json"))
     if extra.pop("sync_error_at", None):
         conn.execute(f"UPDATE {resource} SET extra_json = ? WHERE entity_uid = ?",
                      (json.dumps(extra) if extra else None, entity_uid))
@@ -164,7 +156,7 @@ def _error(conn: sqlite3.Connection, kind: str, row: dict, msg: str,
     """Transient failure: retried by the next sweep, after the rows that
     haven't failed lately (`sync_error_at`), so a stubborn row can't starve
     them."""
-    extra = _extra(row)
+    extra = parse_extra_json(row.get("extra_json"))
     extra["sync_error_at"] = iso_utc_now()
     conn.execute(f"UPDATE {RESOURCES[kind]} SET extra_json = ? WHERE entity_uid = ?",
                  (json.dumps(extra), row["entity_uid"]))
@@ -177,7 +169,7 @@ def flag_for_operator(conn: sqlite3.Connection, kind: str, row: dict,
     """Hand the entity to the operator: no sync touches it until
     `extra_json.live_sync` is cleared. An entity already flagged with this
     status is left as is (no repeat activity)."""
-    extra = _extra(row)
+    extra = parse_extra_json(row.get("extra_json"))
     if (extra.get("live_sync") or {}).get("status") == status:
         return SyncResult(status, pulled or [], detail=msg)
     extra["live_sync"] = {"status": status, "at": iso_utc_now(), "detail": msg[:1000]}
@@ -223,7 +215,7 @@ def clear_flag(conn: sqlite3.Connection, kind: str, entity_uid: str) -> bool:
     table = RESOURCES[kind]
     r = conn.execute(f"SELECT extra_json FROM {table} WHERE entity_uid = ?",
                      (entity_uid,)).fetchone()
-    extra = _extra(dict(r)) if r else {}
+    extra = parse_extra_json(r["extra_json"]) if r else {}
     if "live_sync" not in extra:
         return False
     del extra["live_sync"]

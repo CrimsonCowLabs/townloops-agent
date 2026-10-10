@@ -234,3 +234,20 @@ class TestMigrate:
         monkeypatch.setenv("TOWNLOOPS_DB_PATH", str(tmp_path / "t.db"))
         db_mod.migrate()
         assert db_mod.migrate() == []
+
+
+class TestParseExtraJson:
+    def test_an_object_is_returned_and_anything_else_is_empty(self):
+        from engine.derive_helpers import parse_extra_json
+        assert parse_extra_json('{"live_id": 7}') == {"live_id": 7}
+        for raw in (None, "", "not json", "[1, 2]", "3"):
+            assert parse_extra_json(raw) == {}
+
+
+class TestSeedRef:
+    def test_a_seed_reference_round_trips_and_anything_else_is_none(self):
+        from engine.derive_helpers import seed_name_of, seed_ref
+        assert seed_ref("Lake Tahoe Arena") == "seed:Lake Tahoe Arena"
+        assert seed_name_of(seed_ref("Lake Tahoe Arena")) == "Lake Tahoe Arena"
+        for ref in (None, "", "Lake Tahoe Arena", "event:x"):
+            assert seed_name_of(ref) is None

@@ -22,8 +22,9 @@ import re
 import sqlite3
 from typing import Optional
 
+from engine.derive_helpers import parse_extra_json
 from engine.event_extract import codex_exec
-from engine.page_extract import normalize, parse_object
+from engine.page_extract import find_quote, normalize, parse_object
 
 
 HOST_KINDS = ("business", "community", "nonprofit")
@@ -77,11 +78,8 @@ Text follows:
 
 
 def _on_text(value, norm_text: str, min_len: int = 3) -> Optional[str]:
-    if not isinstance(value, str):
-        return None
-    v = re.sub(r"\s+", " ", value).strip().strip("\"'")
-    key = normalize(v)
-    return v if len(key) >= min_len and key in norm_text else None
+    found = find_quote(value, norm_text, min_len)
+    return found.text if found else None
 
 
 def verify(parsed: dict, text: str, event: dict) -> dict:
@@ -118,7 +116,7 @@ def derive(conn: sqlite3.Connection, event: dict, page: Optional[str],
            llm=None) -> Optional[dict]:
     """The event's verified host and people — cached on the event after the
     first successful call. None when the LLM call failed (not looked at)."""
-    cached = _extra(event).get("people")
+    cached = parse_extra_json(event.get("extra_json")).get("people")
     if isinstance(cached, dict):
         return cached
     llm = llm or codex_exec
@@ -128,16 +126,8 @@ def derive(conn: sqlite3.Connection, event: dict, page: Optional[str],
     if parsed is None:
         return None
     result = verify(parsed, text, event)
-    extra = _extra(event)
+    extra = parse_extra_json(event.get("extra_json"))
     extra["people"] = result
     conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
                  (json.dumps(extra), event["event_uid"]))
     return result
-
-
-def _extra(event: dict) -> dict:
-    try:
-        extra = json.loads(event.get("extra_json") or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return extra if isinstance(extra, dict) else {}

@@ -13,7 +13,7 @@ import os
 import sys
 from typing import Optional
 
-from engine.derive_helpers import iso_utc_now
+from engine.derive_helpers import iso_utc_now, parse_extra_json
 
 
 ENTITY_TABLES = {
@@ -159,11 +159,7 @@ def cross_town(conn, kind: str, entity_uid: str) -> Optional[str]:
     table, _ = ENTITY_TABLES[kind]
     row = conn.execute(f"SELECT extra_json FROM {table} WHERE entity_uid = ?",
                        (entity_uid,)).fetchone()
-    try:
-        extra = json.loads((row and row[0]) or "{}")
-    except json.JSONDecodeError:
-        return None
-    return extra.get("cross_town") if isinstance(extra, dict) else None
+    return parse_extra_json(row and row[0]).get("cross_town")
 
 
 def _record_live_entity(conn, table: str, row, slug: str, live_id: Optional[int],
@@ -171,12 +167,7 @@ def _record_live_entity(conn, table: str, row, slug: str, live_id: Optional[int]
     """Record the live slug/id, or the other town the server filed it under
     (entity_sync then leaves it alone). pushed_hash is entity_sync's to set,
     after a GET verify."""
-    try:
-        extra = json.loads(row["extra_json"] or "{}")
-    except json.JSONDecodeError:
-        extra = {}
-    if not isinstance(extra, dict):
-        extra = {}
+    extra = parse_extra_json(row["extra_json"])
     if live_id is not None:
         extra["live_id"] = live_id
     if cross_town:

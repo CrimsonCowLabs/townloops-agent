@@ -87,3 +87,13 @@ def test_join_quotes_cuts_on_a_quote_boundary():
     page = "Meets every Monday at 6pm. Meets every Tuesday at 6pm."
     quotes = ["Meets every Monday at 6pm.", "Meets every Tuesday at 6pm."]
     assert px.join_quotes(quotes, page, lambda q: True, max_chars=30) == "Meets every Monday at 6pm."
+
+
+def test_find_quote_matches_normalized_text_without_outer_punctuation():
+    page = px.normalize("Doors open at **7pm**. Tickets are [$10](https://x.example) at the door.")
+    found = px.find_quote('  "Tickets are $10   at the door!" ', page, min_chars=4)
+    assert found.text == "Tickets are $10 at the door!"
+    assert page[found.pos:found.pos + len(found.key)] == "tickets are $10 at the door"
+    assert px.find_quote("Tickets are $20 at the door", page, min_chars=4) is None
+    assert px.find_quote("7pm", page) is None          # shorter than the default minimum
+    assert px.find_quote(None, page) is None

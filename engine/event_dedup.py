@@ -30,7 +30,9 @@ from datetime import datetime
 from typing import Optional
 from urllib.parse import urlparse
 
-from engine.derive_helpers import dict_rows as _rows, iso_utc_now, names_match, normalize_name
+from engine.derive_helpers import (
+    dict_rows as _rows, iso_utc_now, names_match, normalize_name, parse_extra_json, seed_name_of,
+)
 
 
 PRIMARY, SYNDICATOR = "primary", "syndicator"
@@ -201,9 +203,10 @@ def _best_decided(rows: list[dict]) -> dict:
 
 def _mark_duplicate(conn: sqlite3.Connection, dup: dict, winner: dict) -> None:
     now = iso_utc_now()
-    where = (winner.get("discovered_via") or winner.get("source") or "?").removeprefix("seed:")
+    via = winner.get("discovered_via") or winner.get("source") or "?"
+    where = seed_name_of(via) or via
     note = f"[dedup] same event as {winner['event_uid'][:12]} ({_title(winner)!r} from {where})"
-    extra = _extra(dup)
+    extra = parse_extra_json(dup.get("extra_json"))
     extra["duplicate_of"] = winner["event_uid"]
     conn.execute(
         "UPDATE events SET status = 'duplicate', approval_status = 'declined', "
@@ -237,11 +240,11 @@ def _same_day(conn: sqlite3.Connection, ev: dict) -> list[dict]:
 
 
 def _role_of(conn: sqlite3.Connection, ev: dict) -> str:
-    source = ev.get("source") or ""
-    if not source.startswith("seed:"):
+    name = seed_name_of(ev.get("source"))
+    if name is None:
         return PRIMARY
     rows = _rows(conn, "SELECT * FROM event_seeds WHERE name = ? ORDER BY seed_id LIMIT 1",
-                 (source[len("seed:"):],))
+                 (name,))
     return seed_role(rows[0]) if rows else PRIMARY
 
 
@@ -269,11 +272,3 @@ def _start(ev: dict) -> Optional[datetime]:
         return datetime.fromisoformat(value) if value else None
     except ValueError:
         return None
-
-
-def _extra(ev: dict) -> dict:
-    try:
-        extra = json.loads(ev.get("extra_json") or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return extra if isinstance(extra, dict) else {}

@@ -35,11 +35,11 @@ from typing import Callable, Optional
 from urllib.parse import urlsplit
 
 from engine import autonomy, event_cancel
-from engine.derive_helpers import iso_utc_now
+from engine.derive_helpers import iso_utc_now, seed_name_of
 from engine.discovery import canonicalize_url
 from engine.event_extract import codex_exec, firecrawl_markdown
 from engine.event_tickets import price_kind
-from engine.page_extract import join_quotes, normalize, parse_object
+from engine.page_extract import find_quote, join_quotes, normalize, parse_object
 
 
 # EventPayload / EventPatch limit.
@@ -121,19 +121,18 @@ def ticket_price(quote, page: str) -> Optional[str]:
     states a cost (engine/event_tickets.price_kind)."""
     if not isinstance(quote, str):
         return None
-    text = re.sub(r"\s+", " ", _MD_EMPHASIS.sub("", quote)).strip().strip("\"'")
-    key = normalize(text).rstrip(".,;:!? ")
-    kind = price_kind(text)
-    if not key or len(text) > PRICE_MAX or kind is None:
-        return None
     norm_page = normalize(page)
-    pos = norm_page.find(key)
-    if pos < 0:
+    found = find_quote(_MD_EMPHASIS.sub("", quote), norm_page, min_chars=1)
+    if not found or len(found.text) > PRICE_MAX:
+        return None
+    kind = price_kind(found.text)
+    if kind is None:
         return None
     # Read a fragment ("Free") to the end of its sentence on the page
     # ("free parking in lot"): it must still say the same thing.
-    end = _SENTENCE_END.search(norm_page, pos + len(key))
-    return text if price_kind(norm_page[pos:end.start() if end else None]) == kind else None
+    end = _SENTENCE_END.search(norm_page, found.pos + len(found.key))
+    return found.text if price_kind(norm_page[found.pos:end.start() if end else None]) == kind \
+        else None
 
 
 _SENTENCE_END = re.compile(r"[!?;]|\.(?!\d)")
@@ -167,9 +166,10 @@ def _canon(url) -> Optional[str]:
 def seed_urls(conn: sqlite3.Connection, event: dict) -> set[str]:
     """Canonical listing URLs of the seed(s) the event was found on."""
     via = event.get("discovered_via") or event.get("source") or ""
-    if not via.startswith("seed:"):
+    name = seed_name_of(via)
+    if name is None:
         return set()
-    rows = conn.execute("SELECT url FROM event_seeds WHERE name = ?", (via[len("seed:"):],))
+    rows = conn.execute("SELECT url FROM event_seeds WHERE name = ?", (name,))
     return {u for u in (_canon(r[0]) for r in rows.fetchall()) if u}
 
 

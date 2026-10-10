@@ -71,7 +71,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
     same website/under its path, or name ≥0.85 → `already-live`), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
     `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
-    `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py`,
+    `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py` (also the one
+    `extra_json` parser `parse_extra_json`, and `seed_ref`/`seed_name_of` for the `seed:<name>` reference),
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5
     entity kinds, `enrich_entity` research + schema validation + fill-blanks; event-reconcile and
     event-enrich-entities use it — new enrichment work builds on it, not on a skill script),
@@ -81,7 +82,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `accessibility_notes` (venues also read the site's own accessibility/visit/FAQ page when the homepage links
     one — `entity_enrich.access_page`; a bare "ADA compliant"/web-accessibility footer doesn't count) — a failed
     or throttled call defers the entity: its other site fields fill, its status stays `pending` for a re-read;
-    `event_detail`'s accessibility quotes share its checks),
+    `event_detail`'s accessibility quotes share its checks; `find_quote` is the one quote-on-page check — event
+    judgement, event people and ticket prices use it too),
     `entity_classify.py` (blank `category_slug` on venues/businesses/communities ← town vocabulary:
     whole-word keyword map, Codex fallback constrained to the town's slugs; run by `enrich_entity`),
     `performer_research.py` (performer/creator evidence ladder: event evidence → venue-page links →
@@ -99,6 +101,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
     Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
     recorded on `event_seeds.feed_*` by `event-seed-discovery discover`/`probe`; no extra fetches),
+    `seeds.py` (seed writes — feed record, status change — and the autonomous `review` run: trial a proposed
+    seed, re-judge approved ones, look for a dead seed's moved calendar; network/LLM injected as `Tools`),
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
     alert, held until it recovers or the operator accepts the new level).
@@ -130,7 +134,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     (pause / circuit / pending cap → `SubmissionsHeld`) and the fail-closed `pending` check;
     records `submissions`), `moderation.py` (the hourly poll: published / rejected / merged
     (re-point) / gone, seed trust, rejection-rate breaker, remembered org rejections; the digest's
-    autonomous section), `event_people.py` (host + performers/creators from one quote-checked
+    autonomous section, built and formatted there), `event_people.py` (host + performers/creators from one quote-checked
     Codex pass over the event's own text, cached on the event; derive-hosts/-people use it),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
     skill: days with no live event, per-day Series/one-off coverage, local events not live yet, sparse live metadata
@@ -227,7 +231,7 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   the town needs an `api_ingest` key without publish permission). New entities are submitted only
   with `autonomy.entity_moderation: true` (needs CrimsonCowLabs/townloops#23). Changes to published
   values (date/venue, cancellations) are pending submissions for the merge flow, never PATCHes;
-  fill-blank PATCHes still go live. Exit 75 from a workqueue skill = "not now" (claim released, no
+  fill-blank PATCHes still go live. Exit 75 (`workqueue.RC_DEFERRED`) from a workqueue skill = "not now" (claim released, no
   attempt). Only the operator closes the circuit (`autonomy resume`). Supervised-only proposers
   answer `inactive`. Gate code paths on `autonomy.settings()` / `is_autonomous()` — never cache it.
   Tests drive whole towns in-process through `tests/autonomy_town.py`.

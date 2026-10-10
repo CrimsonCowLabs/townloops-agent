@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, NamedTuple, Optional
 
 # Prompt → reply text, or None when the call failed or wasn't made
 # (engine.entity_classify.codex_llm).
@@ -49,6 +49,26 @@ def normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip().lower()
 
 
+class Found(NamedTuple):
+    text: str   # the quote, whitespace collapsed and outer quote marks gone
+    key: str    # its normalized form, as found in the page
+    pos: int    # where, in the normalized page
+
+
+def find_quote(quote, norm_page: str, min_chars: int = _MIN_QUOTE_CHARS) -> Optional[Found]:
+    """The one quote-on-page check: `quote` as found in `norm_page`
+    (`normalize(page)`), compared without outer punctuation. None when it
+    isn't a string, is shorter than `min_chars` normalized, or isn't there."""
+    if not isinstance(quote, str):
+        return None
+    text = re.sub(r"\s+", " ", quote).strip().strip("\"'")
+    key = normalize(text).strip(" .,;:!?\"'")
+    if len(key) < min_chars:
+        return None
+    pos = norm_page.find(key)
+    return Found(text, key, pos) if pos >= 0 else None
+
+
 def join_quotes(quotes, page: str, keep: Callable[[str], bool],
                 max_chars: int) -> Optional[str]:
     """The quotes that are on `page` and pass `keep`, in page order, as
@@ -59,16 +79,11 @@ def join_quotes(quotes, page: str, keep: Callable[[str], bool],
     norm_page = normalize(page)
     kept: dict[str, tuple[int, str]] = {}
     for q in quotes:
-        if not isinstance(q, str):
+        found = find_quote(q, norm_page)
+        if not found or found.key in kept or not keep(found.text):
             continue
-        quote = re.sub(r"\s+", " ", q).strip().strip("\"'")
-        key = normalize(quote).rstrip(".,;:!? ")
-        if len(key) < _MIN_QUOTE_CHARS or key in kept or not keep(quote):
-            continue
-        pos = norm_page.find(key)
-        if pos < 0:
-            continue
-        kept[key] = (pos, quote if quote[-1] in ".!?" else quote.rstrip(",;:") + ".")
+        quote = found.text
+        kept[found.key] = (found.pos, quote if quote[-1] in ".!?" else quote.rstrip(",;:") + ".")
     joined = ""
     for _, sentence in sorted(kept.values()):
         longer = f"{joined} {sentence}".strip()

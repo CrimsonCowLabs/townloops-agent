@@ -22,7 +22,9 @@ The same path promotes community-group and non-profit candidates
 (`kind`): they ship as communities, a non-profit with community kind
 'nonprofit'. In autonomous mode the agent approves verified candidates
 itself (`auto_approve`, engine/autonomy) and the client is a GatedClient, so
-what ships lands `pending` in the TownLoops moderation queue.
+what ships lands `pending` in the TownLoops moderation queue; a create the
+gate holds ends the run (`held`), the candidate still approved, no attempt
+spent.
 """
 
 from __future__ import annotations

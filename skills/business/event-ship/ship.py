@@ -36,16 +36,15 @@ from engine import autonomy
 from engine import categories as cats
 from engine import event_dedup, event_detail, event_state, event_tickets
 from engine.derive_helpers import (
-    iso_utc_now, load_event, open_db, parse_event_uid_arg, record_activity,
+    iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
+    seed_name_of,
 )
 from engine.entity_ship import ship_entity as _ship_entity, slug_for as _slug_for
 from engine.event_extract import town_tz_name, utc_times
+from engine.workqueue import RC_DEFERRED
 
 
 _WORKER = "event-ship"
-# Exit code for "not now": the workqueue releases the claim without counting
-# an attempt (engine/orchestrator).
-RC_DEFERRED = 75
 # _ship_event's answer when TownLoops already rejected this event.
 _DECLINED = object()
 
@@ -128,7 +127,6 @@ def _linked_names(conn, event_uid: str, kinds=("performer", "creator")) -> list[
 
 def _local_cluster_venues(conn, event: dict, key: str) -> set[str]:
     """Venue tokens of other local events whose title has this key."""
-    import json
     from engine import series
     out: set[str] = set()
     for r in conn.execute(
@@ -139,10 +137,7 @@ def _local_cluster_venues(conn, event: dict, key: str) -> set[str]:
             (event["event_uid"], event.get("title") or "")).fetchall():
         if series.series_key(r["title"]) != key:
             continue
-        try:
-            live_id = (json.loads(r["v_extra"] or "{}") or {}).get("live_id")
-        except (json.JSONDecodeError, AttributeError):
-            live_id = None
+        live_id = parse_extra_json(r["v_extra"]).get("live_id")
         token = series.venue_token(live_id, r["venue_name"] or r["venue_raw"])
         if token:
             out.add(token)
@@ -199,7 +194,7 @@ def _derived_venue_name(conn, event: dict) -> Optional[str]:
 
 
 def _seed_url(conn, event: dict) -> Optional[str]:
-    seed = (event.get("source") or "").removeprefix("seed:")
+    seed = seed_name_of(event.get("source"))
     r = conn.execute("SELECT url FROM event_seeds WHERE name = ?", (seed,)).fetchone()
     return r["url"] if r else None
 
@@ -408,10 +403,7 @@ def _remember_change_submission(conn, event_uid: str, pending_slug: str, target_
     import json
     row = conn.execute("SELECT extra_json FROM events WHERE event_uid = ?",
                        (event_uid,)).fetchone()
-    try:
-        extra = json.loads((row["extra_json"] if row else None) or "{}") or {}
-    except (json.JSONDecodeError, TypeError):
-        extra = {}
+    extra = parse_extra_json(row["extra_json"] if row else None)
     extra["change_submission"] = {"pending_slug": pending_slug, "target_slug": target_slug,
                                   "fields": fields}
     conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
@@ -526,11 +518,7 @@ def _ensure_utc_times(conn, event: dict) -> bool:
 
 def _reconcile_change(event: dict) -> Optional[dict]:
     """event-reconcile metadata when this row is a change to a live event."""
-    import json
-    try:
-        meta = (json.loads(event.get("extra_json") or "{}") or {}).get("reconcile") or {}
-    except (json.JSONDecodeError, AttributeError):
-        return None
+    meta = parse_extra_json(event.get("extra_json")).get("reconcile") or {}
     if meta.get("kind") == "changed" and meta.get("live_slug"):
         return meta
     return None
@@ -567,7 +555,6 @@ def _resolve_venue_id(client, conn, event: dict, venue_slug: Optional[str]) -> O
     or the step-1 slug when nothing was derived — looked up live. None when
     unresolved. Events bind venues by `venue_id`; `venue_slug` is ignored by
     the API and `venue_name` fails on duplicate names."""
-    import json
     from engine.live_lookup import find_live_entity
     vuid = event.get("derived_venue_uid")
     if vuid:
@@ -576,10 +563,7 @@ def _resolve_venue_id(client, conn, event: dict, venue_slug: Optional[str]) -> O
         ).fetchone()
         if not v:
             return None
-        try:
-            live_id = (json.loads(v["extra_json"] or "{}") or {}).get("live_id")
-        except (json.JSONDecodeError, AttributeError):
-            live_id = None
+        live_id = parse_extra_json(v["extra_json"]).get("live_id")
         if live_id:
             return live_id
         venue_slug = v["townloops_slug"]
@@ -772,7 +756,7 @@ def main() -> int:
             print(f"event {event_uid[:12]}: submissions held ({gate.reason}) — not now")
             return RC_DEFERRED
         client = autonomy.GatedClient(client, conn, mode)
-        seed = (event.get("source") or "").removeprefix("seed:") or None
+        seed = seed_name_of(event.get("source")) or None
         client.context = {"seed": seed, "discovery_source": f"event:{seed}" if seed else None}
     try:
         return _ship(client, conn, event)

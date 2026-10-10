@@ -97,6 +97,33 @@ def dict_rows(conn: sqlite3.Connection, sql: str, args: tuple = ()) -> list[dict
     return [dict(r) for r in cur.execute(sql, args).fetchall()]
 
 
+def parse_extra_json(raw: Optional[str]) -> dict:
+    """A row's `extra_json` as a dict: {} when it is empty, unparseable or
+    not a JSON object."""
+    try:
+        extra = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return extra if isinstance(extra, dict) else {}
+
+
+# An event's `source`, a source_runs row's `source` and a seed decision's
+# target name their seed as "seed:<name>" (SQL joins spell it 'seed:' || name).
+SEED_PREFIX = "seed:"
+
+
+def seed_ref(name: str) -> str:
+    """The reference to the seed called `name`."""
+    return f"{SEED_PREFIX}{name}"
+
+
+def seed_name_of(ref: Optional[str]) -> Optional[str]:
+    """The seed name in a seed reference; None when `ref` isn't one."""
+    if isinstance(ref, str) and ref.startswith(SEED_PREFIX):
+        return ref[len(SEED_PREFIX):]
+    return None
+
+
 def parse_event_uid_arg(argv: Optional[list[str]] = None) -> str:
     p = argparse.ArgumentParser()
     p.add_argument("--event-uid", required=True)

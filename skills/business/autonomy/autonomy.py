@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from engine import autonomy, moderation
-from engine.derive_helpers import dict_rows, open_db
+from engine.derive_helpers import dict_rows, open_db, seed_ref
 
 
 def _status(args) -> int:
@@ -41,9 +41,9 @@ def _targets(conn, query: str) -> list[str]:
     q = query.strip()
     out = [q]
     if q.isdigit():
-        out += [f"seed:{r['name']}" for r in dict_rows(
+        out += [seed_ref(r['name']) for r in dict_rows(
             conn, "SELECT name FROM event_seeds WHERE seed_id = ?", (int(q),))]
-    out += [f"seed:{r['name']}" for r in dict_rows(
+    out += [seed_ref(r['name']) for r in dict_rows(
         conn, "SELECT name FROM event_seeds WHERE lower(name) = lower(?)", (q,))]
     out += [r["local_uid"] for r in dict_rows(
         conn, "SELECT local_uid FROM submissions WHERE slug = ? AND local_uid IS NOT NULL", (q,))]

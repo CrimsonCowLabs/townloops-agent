@@ -18,18 +18,21 @@ published. Outcomes are attributed to the event's seed and Series (and an
 entity's discovery source): seed trust is refreshed, a high rejection rate
 opens the circuit (engine/autonomy.check_rejection_rate), and a rejected
 discovered organisation is remembered by name so it is never proposed again.
+
+`digest()` is the nightly digest's autonomous section, and `digest_markdown`
+/ `digest_telegram` format it (engine/orchestrator.summary sends them).
 """
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import timedelta
 from typing import Optional
 
 from engine import autonomy
 from engine.derive_helpers import (
-    dict_rows as _rows, iso_utc_now, names_match, parse_instant,
+    dict_rows as _rows, iso_utc_now, names_match, parse_extra_json, parse_instant,
+    seed_name_of,
 )
 
 
@@ -152,10 +155,7 @@ def _change_fields(conn: sqlite3.Connection, sub: dict) -> dict:
     (event-ship records them on the event); {} for one recorded before that."""
     row = conn.execute("SELECT extra_json FROM events WHERE event_uid = ?",
                        (sub.get("local_uid"),)).fetchone()
-    try:
-        rec = (json.loads((row[0] if row else None) or "{}") or {}).get("change_submission") or {}
-    except (json.JSONDecodeError, AttributeError):
-        return {}
+    rec = parse_extra_json(row[0] if row else None).get("change_submission") or {}
     return (rec.get("fields") or {}) if rec.get("pending_slug") == sub["slug"] else {}
 
 
@@ -194,10 +194,7 @@ def _remember_rejection(conn: sqlite3.Connection, table: str, sub: dict) -> None
                        (sub["slug"],)).fetchone()
     if not row:
         return
-    try:
-        cand = (json.loads(row[1] or "{}") or {}).get("candidate_uid")
-    except (json.JSONDecodeError, AttributeError):
-        cand = None
+    cand = parse_extra_json(row[1]).get("candidate_uid")
     reason = f"{bd.TOWNLOOPS_REASON}: moderator rejected {sub['slug']}"
     if cand:
         conn.execute("UPDATE discovery_candidates SET status = 'rejected', reject_reason = ? "
@@ -245,7 +242,7 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
                          f" ({r['townloops_slug']}) — {r['cancel_note']}")
     for d in log:
         if d["subject"] == "seed" and d["verdict"] == "relocate":
-            attention.append(f"seed {d['target'].removeprefix('seed:')} moved: "
+            attention.append(f"seed {seed_name_of(d['target']) or d['target']} moved: "
                              f"{d['evidence'].get('from')} → {d['evidence'].get('to')}")
     stuck = conn.execute("SELECT COUNT(*) FROM events WHERE state LIKE 'stuck-%'").fetchone()[0]
     if stuck:
@@ -263,11 +260,60 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
                        "approval_rate": round(accepted / n, 2) if n else None,
                        "rejection_rate": round(decided.get("rejected", 0) / n, 2) if n else None},
         "pending_in_townloops": o["pending"],
-        "seeds_added": [d["target"].removeprefix("seed:") for d in seeds if d["verdict"] == "approve"],
-        "seeds_retired": [f"{d['target'].removeprefix('seed:')} ({d['reason']})" for d in seeds
-                          if d["verdict"] == "retire"],
+        "seeds_added": [seed_name_of(d["target"]) or d["target"] for d in seeds
+                        if d["verdict"] == "approve"],
+        "seeds_retired": [f"{seed_name_of(d['target']) or d['target']} ({d['reason']})"
+                          for d in seeds if d["verdict"] == "retire"],
         "organisations_approved": by[("candidate", "submit")],
         "series_candidates": report.get("clusters") or [],
         "suspect_series": (report.get("multi_venue") or []) + (report.get("duplicate_dates") or []),
         "needs_attention": attention,
     }
+
+
+def digest_markdown(a: dict) -> list[str]:
+    """`digest()` as the nightly report's markdown section."""
+    m = a["moderation"]
+    rate = lambda v: "n/a" if v is None else f"{v:.0%}"  # noqa: E731
+    lines = ["", "## Autonomous decisions (last 24h)",
+             f"- Events submitted to TownLoops: {a['events_submitted']} "
+             f"(entities: {a['entities_submitted']}); still pending in TownLoops: "
+             f"{a['pending_in_townloops']}",
+             f"- Events approved by the agent: {a['events_approved']}; dropped: "
+             f"{a['events_dropped']}"
+             + (" — " + ", ".join(f"{r} ×{n}" for r, n in a["top_drop_reasons"])
+                if a["top_drop_reasons"] else ""),
+             f"- Moderator: {m['published']} published, {m['merged']} merged, "
+             f"{m['rejected']} rejected (approval {rate(m['approval_rate'])}, "
+             f"rejection {rate(m['rejection_rate'])})",
+             f"- Seeds added: {', '.join(a['seeds_added']) or 'none'}; retired: "
+             f"{', '.join(a['seeds_retired']) or 'none'}",
+             f"- Organisations approved for submission: {a['organisations_approved']}"]
+    lines += ["", "## Series candidates"]
+    lines += [f"- **{c.get('title')}** — {c.get('dates')} dates at "
+              f"`{c.get('venue_slug') or c.get('venue_id')}`" for c in a["series_candidates"]] \
+        or ["- (none in the latest weekly report)"]
+    if a["suspect_series"]:
+        lines += [f"- Suspect Series `{d.get('slug')}`: {d.get('venues')} venues"
+                  + (f", same-day duplicates {', '.join(d.get('dates') or [])}"
+                     if d.get("dates") else "") for d in a["suspect_series"]]
+    lines += ["", "## Needs attention"] + ([f"- {x}" for x in a["needs_attention"]]
+                                          or ["- nothing"])
+    return lines
+
+
+def digest_telegram(a: dict) -> str:
+    """`digest()` as the nightly Telegram summary's lines."""
+    m = a["moderation"]
+    out = (f"submitted: {a['events_submitted']} events, {a['entities_submitted']} entities "
+           f"({a['pending_in_townloops']} pending in TownLoops)\n"
+           f"dropped: {a['events_dropped']}"
+           + (" — top: " + ", ".join(f"{r} ×{n}" for r, n in a["top_drop_reasons"][:3])
+              if a["top_drop_reasons"] else "") + "\n"
+           f"moderator: {m['published'] + m['merged']} accepted, {m['rejected']} rejected\n"
+           f"seeds: +{len(a['seeds_added'])} added, {len(a['seeds_retired'])} retired\n")
+    if a["series_candidates"]:
+        out += f"Series candidates: {len(a['series_candidates'])}\n"
+    if a["needs_attention"]:
+        out += "needs attention:\n" + "\n".join(f"• {x}" for x in a["needs_attention"][:8]) + "\n"
+    return out

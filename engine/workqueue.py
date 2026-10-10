@@ -27,6 +27,9 @@ from engine import event_state
 
 
 MAX_ATTEMPTS = 3
+# A workqueue skill's exit code for "not now" (autonomous submissions held):
+# the orchestrator releases the claim without counting an attempt.
+RC_DEFERRED = 75
 
 # Default per-action-per-hour limits. Overridden by town-profile.yaml
 # workqueue_rate_limits.<action>.

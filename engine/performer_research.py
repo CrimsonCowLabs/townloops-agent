@@ -36,7 +36,7 @@ from typing import Callable, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
 from engine import research
-from engine.derive_helpers import iso_utc_now, normalize_name
+from engine.derive_helpers import iso_utc_now, normalize_name, parse_extra_json
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
 
 KINDS = ("performer", "creator")
@@ -420,18 +420,10 @@ def _classify(kind: str, candidates: list[Candidate], evidence: Evidence) -> Fin
                    why="no public profile names this " + kind)
 
 
-def _parse_extra(text: Optional[str]) -> dict:
-    try:
-        extra = json.loads(text or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return extra if isinstance(extra, dict) else {}
-
-
 def _extra(conn: sqlite3.Connection, table: str, entity_uid: str) -> dict:
     row = conn.execute(f"SELECT extra_json FROM {table} WHERE entity_uid = ?",
                        (entity_uid,)).fetchone()
-    return _parse_extra(row and row["extra_json"])
+    return parse_extra_json(row and row["extra_json"])
 
 
 def _record(conn: sqlite3.Connection, kind: str, entity_uid: str, record: dict) -> None:
@@ -523,7 +515,7 @@ def review_queue(conn: sqlite3.Connection) -> list[dict]:
     for kind in REVIEW_KINDS:
         for r in conn.execute(f"SELECT entity_uid, name, extra_json FROM {SPECS[kind].table} "
                               "WHERE enrichment_status = ? ORDER BY name", (REVIEW_STATUS,)):
-            rec = _parse_extra(r["extra_json"]).get("research") or {}
+            rec = parse_extra_json(r["extra_json"]).get("research") or {}
             out.append({"kind": kind, "entity_uid": r["entity_uid"], "name": r["name"],
                         "status": rec.get("status"), "why": rec.get("why"),
                         "venues": rec.get("venues", []),
@@ -541,7 +533,7 @@ def resolve(conn: sqlite3.Connection, kind: str, entity_uid: str,
                        "WHERE entity_uid = ?", (entity_uid,)).fetchone()
     if not row or row["enrichment_status"] != REVIEW_STATUS:
         raise ValueError(f"{kind} {entity_uid} is not waiting for review")
-    rec = _parse_extra(row["extra_json"]).get("research") or {}
+    rec = parse_extra_json(row["extra_json"]).get("research") or {}
     if accept_url is None:
         fill_blanks(conn, kind, entity_uid, {}, "not-found")
         _record(conn, kind, entity_uid, {**rec, "status": "operator-rejected", "filled": []})

@@ -26,11 +26,12 @@ import requests
 
 from engine import autonomy
 from engine import db as _db
-from engine.derive_helpers import load_town_profile
+from engine.derive_helpers import load_town_profile, parse_extra_json
 from engine import event_detail, event_groups
 from engine import event_state
 from engine import inspection
 from engine import lock as _lock
+from engine import moderation
 from engine import workqueue
 
 
@@ -73,9 +74,6 @@ MAX_READ_DETAIL_PER_DRAIN = 20
 # reap_stale_claims (15 min) would take its claims, with a skill run to spare.
 _MIN_BUDGET_S = 60
 _MAX_BUDGET_S = 15 * 60 - 2 * SKILL_TIMEOUT_S
-# A skill's "not now" (autonomous submissions held): the claim is released
-# without counting an attempt.
-RC_DEFERRED = 75
 
 
 @dataclass(frozen=True)
@@ -218,7 +216,7 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None, *,
                         target=uid, detail=f"{skill} for event {uid[:12]}",
                     )
                     rc, out, err = _invoke_skill(skill, entry, uid)
-                    if rc == RC_DEFERRED:
+                    if rc == workqueue.RC_DEFERRED:
                         workqueue.release(conn, c["queue_id"])
                         skipped += 1
                         continue
@@ -302,7 +300,7 @@ def resolve_stuck(conn: sqlite3.Connection, mode: autonomy.Settings,
                 workqueue.enqueue(conn, uid, action)
                 conn.execute("UPDATE event_workqueue SET attempts = 0 "
                              "WHERE event_uid = ? AND next_action = ?", (uid, action))
-            extra = autonomy.extra(ev)
+            extra = parse_extra_json(ev.get("extra_json"))
             extra["autonomy"] = {**(extra.get("autonomy") or {}),
                                  "retries": d.evidence["retries"]}
             conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
@@ -413,9 +411,8 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
     mode = autonomy.settings()
     auto = None
     if mode.autonomous:
-        from engine import moderation
         auto = moderation.digest(conn, cutoff, _series_report(report_dir))
-        md_lines += _autonomy_markdown(auto)
+        md_lines += moderation.digest_markdown(auto)
     report_path = report_dir / f"{today}.md"
     report_path.write_text("\n".join(md_lines))
 
@@ -428,7 +425,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         f"seeds: {seeds}\n"
     )
     if auto:
-        tg += _autonomy_telegram(auto)
+        tg += moderation.digest_telegram(auto)
     _telegram_notify(tg)
 
     return {
@@ -449,52 +446,6 @@ def _series_report(report_dir: Path) -> Optional[dict]:
         return json.loads((report_dir / "series-candidates-latest.json").read_text())
     except (OSError, ValueError):
         return None
-
-
-def _autonomy_markdown(a: dict) -> list[str]:
-    m = a["moderation"]
-    rate = lambda v: "n/a" if v is None else f"{v:.0%}"  # noqa: E731
-    lines = ["", "## Autonomous decisions (last 24h)",
-             f"- Events submitted to TownLoops: {a['events_submitted']} "
-             f"(entities: {a['entities_submitted']}); still pending in TownLoops: "
-             f"{a['pending_in_townloops']}",
-             f"- Events approved by the agent: {a['events_approved']}; dropped: "
-             f"{a['events_dropped']}"
-             + (" — " + ", ".join(f"{r} ×{n}" for r, n in a["top_drop_reasons"])
-                if a["top_drop_reasons"] else ""),
-             f"- Moderator: {m['published']} published, {m['merged']} merged, "
-             f"{m['rejected']} rejected (approval {rate(m['approval_rate'])}, "
-             f"rejection {rate(m['rejection_rate'])})",
-             f"- Seeds added: {', '.join(a['seeds_added']) or 'none'}; retired: "
-             f"{', '.join(a['seeds_retired']) or 'none'}",
-             f"- Organisations approved for submission: {a['organisations_approved']}"]
-    lines += ["", "## Series candidates"]
-    lines += [f"- **{c.get('title')}** — {c.get('dates')} dates at "
-              f"`{c.get('venue_slug') or c.get('venue_id')}`" for c in a["series_candidates"]] \
-        or ["- (none in the latest weekly report)"]
-    if a["suspect_series"]:
-        lines += [f"- Suspect Series `{d.get('slug')}`: {d.get('venues')} venues"
-                  + (f", same-day duplicates {', '.join(d.get('dates') or [])}"
-                     if d.get("dates") else "") for d in a["suspect_series"]]
-    lines += ["", "## Needs attention"] + ([f"- {x}" for x in a["needs_attention"]]
-                                          or ["- nothing"])
-    return lines
-
-
-def _autonomy_telegram(a: dict) -> str:
-    m = a["moderation"]
-    out = (f"submitted: {a['events_submitted']} events, {a['entities_submitted']} entities "
-           f"({a['pending_in_townloops']} pending in TownLoops)\n"
-           f"dropped: {a['events_dropped']}"
-           + (" — top: " + ", ".join(f"{r} ×{n}" for r, n in a["top_drop_reasons"][:3])
-              if a["top_drop_reasons"] else "") + "\n"
-           f"moderator: {m['published'] + m['merged']} accepted, {m['rejected']} rejected\n"
-           f"seeds: +{len(a['seeds_added'])} added, {len(a['seeds_retired'])} retired\n")
-    if a["series_candidates"]:
-        out += f"Series candidates: {len(a['series_candidates'])}\n"
-    if a["needs_attention"]:
-        out += "needs attention:\n" + "\n".join(f"• {x}" for x in a["needs_attention"][:8]) + "\n"
-    return out
 
 
 # --------------------------------------------------------------------------

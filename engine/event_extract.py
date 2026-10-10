@@ -24,6 +24,7 @@ from dateutil.parser import isoparse as _isoparse
 
 from engine import categories as _cats
 from engine import event_dedup
+from engine.derive_helpers import seed_ref
 from engine.discovery import (
     FIRECRAWL_TIMEOUT_S,
     _firecrawl_base,
@@ -265,7 +266,7 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'pending', 'metadata-extracted', ?, ?)
             """,
             (
-                uid, f"seed:{seed_name}", "scraped",
+                uid, seed_ref(seed_name), "scraped",
                 evt.get("title") or "", evt.get("title") or "",
                 date_iso, date_day, date_iso, date_utc,
                 evt.get("end_at") or None, evt.get("end_at") or None, end_at_utc,
@@ -275,7 +276,7 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
                 evt.get("venue") or None,  # hosting_group placeholder
                 evt.get("source_url") or None,
                 now, now, chash, now,
-                now, f"seed:{seed_name}",
+                now, seed_ref(seed_name),
             ),
         )
         # Copies of this event from other seeds share one canonical uid, and

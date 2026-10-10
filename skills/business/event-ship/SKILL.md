@@ -199,8 +199,9 @@ The client is an `engine/autonomy.GatedClient`:
   pending one is adopted and its blanks filled.
 - **New entities** are created only with `autonomy.entity_moderation: true`
   (the TownLoops entity gate); until then the event ships with its venue's
-  name only, for the moderator's curate-venue flow. Existing live entities
-  are still adopted and filled.
+  name only, for the moderator's curate-venue flow, and the held entity is
+  logged as a `ship-<kind>` activity reading `held (<reason>)`, not a
+  failure. Existing live entities are still adopted and filled.
 - **Changes to a published event**: every change event-reconcile staged
   lands somewhere. One to a value the live row already has (date, venue, any
   other field) is submitted as a pending event carrying the same

@@ -25,7 +25,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Optional
 
-from engine.derive_helpers import dict_rows as _rows, iso_utc_now
+from engine.derive_helpers import dict_rows as _rows, iso_utc_now, seed_ref
 
 LABELS = {"zero": "listed nothing", "drop": "sharp drop", "recovered": "recovered"}
 DEFAULTS = {"window": 6, "min_runs": 3, "drop_pct": 50, "min_baseline": 4}
@@ -43,7 +43,7 @@ def record_run(conn: sqlite3.Connection, seed: dict, *, started: str, ended: str
     """Record one event-find run of `seed` and (unless `judge` is off, as for
     an extraction that failed to parse) judge the seed's health. Returns {seed, seed_id, status:
     zero|drop|recovered, note} when it changed, else None."""
-    source = _source(seed["name"])
+    source = seed_ref(seed["name"])
     conn.execute(
         "INSERT INTO source_runs (source, started_at, ended_at, ok, fetched, inserted, updated, error) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
@@ -100,7 +100,7 @@ def ack(conn: sqlite3.Connection, seed_id: int) -> bool:
     if row is None:
         return False
     last = conn.execute("SELECT MAX(started_at) FROM source_runs WHERE source = ?",
-                        (_source(row[0]),)).fetchone()[0]
+                        (seed_ref(row[0]),)).fetchone()[0]
     _clear(conn, seed_id)
     conn.execute("UPDATE event_seeds SET health_since = ? WHERE seed_id = ?",
                  (last or iso_utc_now(), seed_id))
@@ -113,11 +113,6 @@ def alert_text(town: str, changes: list[dict]) -> str:
     for c in changes:
         lines.append(f"• {c['seed']} — {LABELS[c['status']]}: {c['note']}")
     return "\n".join(lines)
-
-
-def _source(seed_name: str) -> str:
-    """A seed's key in source_runs."""
-    return f"seed:{seed_name}"
 
 
 def _clear(conn: sqlite3.Connection, seed_id: int) -> None:

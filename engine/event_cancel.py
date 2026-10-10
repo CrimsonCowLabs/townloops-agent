@@ -56,7 +56,9 @@ from datetime import datetime, timezone
 from typing import Iterable, Literal, Optional
 
 from engine import event_state
-from engine.derive_helpers import dict_rows as _rows, iso_utc_now
+from engine.derive_helpers import (
+    dict_rows as _rows, iso_utc_now, parse_extra_json, seed_name_of, seed_ref,
+)
 
 
 DEFAULT_MISS_THRESHOLD = 4   # event-find runs twice a day → two days unlisted
@@ -88,7 +90,7 @@ def record_seed_run(conn: sqlite3.Connection, seed_name: str, seen_uids: Iterabl
     rows = conn.execute(
         "SELECT event_uid FROM events WHERE source = ? AND status IN ('active', 'duplicate') "
         "AND date_utc > ? AND date_day <= ?",
-        (f"seed:{seed_name}", _iso(now), max(days))).fetchall()
+        (seed_ref(seed_name), _iso(now), max(days))).fetchall()
     out = {"seen": 0, "missed": 0}
     for (uid,) in rows:
         if uid in seen_set:
@@ -115,12 +117,12 @@ def flag_vanished(conn: sqlite3.Connection, threshold: int = DEFAULT_MISS_THRESH
                               "AND status != 'superseded'", (g, g))
         if any(m["cancel_status"] in _DECIDED for m in members):
             continue
-        sources = [m for m in members if (m["source"] or "").startswith("seed:")]
+        sources = [m for m in members if seed_name_of(m["source"])]
         # One row per live event: a copy event-ship retired onto a sibling's
         # slug (status 'duplicate') shares that slug and isn't flagged again.
         shipped = [m for m in members if m["townloops_slug"] and m["status"] != "duplicate"]
         if sources and all(m["missed_finds"] >= threshold for m in sources):
-            names = ", ".join(sorted({m["source"][len("seed:"):] for m in sources}))
+            names = ", ".join(sorted({seed_name_of(m["source"]) for m in sources}))
             note = f"not listed by {names} for {threshold}+ finds in a row"
             for m in shipped:
                 if m["cancel_status"] is None:
@@ -129,7 +131,7 @@ def flag_vanished(conn: sqlite3.Connection, threshold: int = DEFAULT_MISS_THRESH
                         "  cancel_flagged_at = ?, cancel_note = ? WHERE event_uid = ?",
                         (iso_utc_now(), note, m["event_uid"]))
                     flagged.append(m["event_uid"])
-        elif not any("cancel_listing" in _extra(m) for m in members):
+        elif not any("cancel_listing" in parse_extra_json(m.get("extra_json")) for m in members):
             for m in shipped:
                 if m["cancel_status"] in _FLAGGED:
                     conn.execute(
@@ -187,7 +189,7 @@ def record_listing(conn: sqlite3.Connection, uid: str, quote: Optional[str],
     rows = _rows(conn, "SELECT * FROM events WHERE event_uid = ?", (uid,))
     if not rows:
         return None
-    row, extra = rows[0], _extra(rows[0])
+    row, extra = rows[0], parse_extra_json(rows[0].get("extra_json"))
     if quote is None:
         if extra.pop("cancel_listing", None) is None:
             return None
@@ -229,11 +231,6 @@ def decline_cancelled(conn: sqlite3.Connection, uid: str, quote: str, where: str
         autonomy.record(conn, "event", uid, autonomy.Decision(
             "drop", reason, {"quote": quote, "where": where}))
     return True
-
-
-def _extra(row: dict) -> dict:
-    from engine import autonomy
-    return autonomy.extra(row)
 
 
 # --------------------------------------------------------------------------
@@ -371,11 +368,12 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
     rows = [r for r in _rows(conn, "SELECT * FROM events WHERE cancel_status = 'possibly-cancelled' "
                                    "AND townloops_slug IS NOT NULL AND COALESCE(source_url, '') != '' "
                                    "ORDER BY date_utc")
-            if (autonomy.extra(r).get("autonomy") or {}).get("cancel_checked_at", "") < cutoff]
+            if (parse_extra_json(r.get("extra_json")).get("autonomy") or {})
+            .get("cancel_checked_at", "") < cutoff]
     for row in rows[:limit]:
         uid, slug = row["event_uid"], row["townloops_slug"]
         out["checked"] += 1
-        extra = autonomy.extra(row)
+        extra = parse_extra_json(row.get("extra_json"))
         extra["autonomy"] = {**(extra.get("autonomy") or {}), "cancel_checked_at": iso_utc_now()}
         conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?", (json.dumps(extra), uid))
         conn.commit()

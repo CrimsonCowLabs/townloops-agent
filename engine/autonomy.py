@@ -41,7 +41,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Iterable, Optional
 
 from engine.derive_helpers import (
-    dict_rows as _rows, iso_utc_now, load_town_profile, normalize_name, parse_instant,
+    dict_rows as _rows, iso_utc_now, load_town_profile, normalize_name, parse_extra_json,
+    parse_instant, seed_ref,
 )
 
 
@@ -496,11 +497,9 @@ Page text follows:
 
 
 def _on_page(quote, page_norm: str) -> Optional[str]:
-    from engine.page_extract import normalize
-    if not isinstance(quote, str):
-        return None
-    key = normalize(quote).strip(" .,;:!?\"'")
-    return quote.strip() if len(key) >= _MIN_QUOTE and key in page_norm else None
+    from engine.page_extract import find_quote
+    found = find_quote(quote, page_norm, _MIN_QUOTE)
+    return found.text if found else None
 
 
 def _ai_verdict(answer: dict, facets: dict, page_norm: str, ctx: JudgeContext) -> Decision:
@@ -610,14 +609,6 @@ _SHIPPABLE_FROM = ("approved", "detail-read", "venue-derived", "hosts-derived",
                    "people-derived")
 
 
-def extra(row: dict) -> dict:
-    try:
-        extra = json.loads(row.get("extra_json") or "{}")
-    except json.JSONDecodeError:
-        return {}
-    return extra if isinstance(extra, dict) else {}
-
-
 def resolve_stuck(event: dict, s: Settings, now: Optional[datetime] = None) -> Decision:
     """What to do with a `stuck-<state>` event: `wait` (backoff not over),
     `retry` (re-enter the queue), `ship-as-is` (skip to ship with the fields
@@ -626,7 +617,8 @@ def resolve_stuck(event: dict, s: Settings, now: Optional[datetime] = None) -> D
         return await_operator()
     now = now or datetime.now(timezone.utc)
     state = (event.get("state") or "").removeprefix("stuck-")
-    retries = int((extra(event).get("autonomy") or {}).get("retries") or 0)
+    auto = parse_extra_json(event.get("extra_json")).get("autonomy") or {}
+    retries = int(auto.get("retries") or 0)
     # A failed ship is TownLoops not answering, not the event: it keeps
     # retrying (backoff capped at 16h) until the event has started.
     start = parse_instant(event.get("date_utc"))
@@ -767,7 +759,7 @@ def dedup_record(conn: sqlite3.Connection, seed_name: str) -> dict:
     rows = _rows(conn, "SELECT e.event_uid, e.status, e.canonical_event_uid FROM events e "
                        "WHERE e.source = ? AND e.canonical_event_uid IN (SELECT canonical_event_uid "
                        "  FROM events GROUP BY canonical_event_uid HAVING COUNT(DISTINCT source) > 1)",
-                 (f"seed:{seed_name}",))
+                 (seed_ref(seed_name),))
     return {"lost": sum(r["status"] == "duplicate" for r in rows), "of": len(rows)}
 
 
@@ -835,7 +827,7 @@ def classify_role(conn: sqlite3.Connection, seed: dict, s: Settings,
     own = host(seed.get("url"))
     hosts = [host(r[0]) for r in conn.execute(
         "SELECT source_url FROM events WHERE source = ? AND COALESCE(source_url, '') != ''",
-        (f"seed:{seed['name']}",)).fetchall()]
+        (seed_ref(seed['name']),)).fetchall()]
     hosts = [h for h in hosts if h]
     if len(hosts) < min_events or not own:
         return Decision("keep", "too-few-events", {"with_links": len(hosts), "trust": trust})
@@ -853,7 +845,7 @@ def classify_role(conn: sqlite3.Connection, seed: dict, s: Settings,
 def _recent_runs(conn: sqlite3.Connection, seed: dict, n: int, since: str = "") -> list[dict]:
     return _rows(conn, "SELECT ok, fetched, error FROM source_runs WHERE source = ? "
                        "AND started_at > ? ORDER BY started_at DESC, id DESC LIMIT ?",
-                 (f"seed:{seed['name']}", since, n))
+                 (seed_ref(seed['name']), since, n))
 
 
 def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
@@ -876,7 +868,7 @@ def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
         return Decision("retire", "low-trust", evidence)
     runs = _recent_runs(conn, seed, max(s.seed_dead_runs, s.seed_min_runs), since)
     total = conn.execute("SELECT COUNT(*) FROM source_runs WHERE source = ? AND started_at > ?",
-                         (f"seed:{seed['name']}", since)).fetchone()[0]
+                         (seed_ref(seed['name']), since)).fetchone()[0]
     recent = runs[:s.seed_dead_runs]
     if (total >= s.seed_min_runs and len(recent) >= s.seed_dead_runs
             and all(not r["ok"] or not r["fetched"] for r in recent)):
@@ -885,7 +877,7 @@ def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
                          "health": seed.get("health_status"), "trust": trust})
     if seed.get("health_status") and seed.get("health_flagged_at"):
         since = conn.execute("SELECT COUNT(*) FROM source_runs WHERE source = ? AND started_at >= ?",
-                             (f"seed:{seed['name']}", seed["health_flagged_at"])).fetchone()[0]
+                             (seed_ref(seed['name']), seed["health_flagged_at"])).fetchone()[0]
         if since >= s.seed_dead_runs:
             return Decision("check-moved", "health-alert-persists",
                             {"health": seed["health_status"], "note": seed.get("health_note"),

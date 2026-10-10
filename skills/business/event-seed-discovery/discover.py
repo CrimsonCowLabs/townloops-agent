@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """event-seed-discovery — LLM proposes seed source URLs; HEAD-verified; inserted as proposed.
 
-Autonomous mode adds `review` (engine/autonomy): proposed seeds are dry-run
-and approved only when the run yields at least one real upcoming in-town
+Autonomous mode adds `review` (engine/seeds, judged by engine/autonomy):
+proposed seeds are dry-run and approved only when the run yields at least one real upcoming in-town
 event (an error, challenge or empty page fails), seeds with a feed first;
 approved seeds are classified primary/syndicator from their events, their
 trust refreshed; trust decides the rest — a trial must score
@@ -28,11 +28,9 @@ from urllib.parse import urlparse
 
 import yaml
 
-from engine import autonomy, event_dedup, feed_probe, inspection, source_health
-from engine.event_extract import (
-    build_extraction_prompt, firecrawl_markdown as _trial_fetch,
-    parse_json_array as _parse_events, utc_times,
-)
+from engine import autonomy, event_dedup, inspection, source_health
+from engine import seeds as seed_ops
+from engine.event_extract import firecrawl_markdown as _trial_fetch
 
 
 VALID_KINDS = {"chamber", "government", "tourism", "library",
@@ -184,19 +182,6 @@ def _scrape_page(url: str) -> tuple[bool, int, str, str]:
         return (200 <= code < 400, code, data.get("rawHtml") or "", final)
 
 
-def _record_feed(conn: sqlite3.Connection, seed_url: str, html: str, final_url: str) -> dict:
-    """Probe the seed's page for a machine-readable feed and record it."""
-    found = feed_probe.detect(html, final_url)
-    detail = {"feeds": found["feeds"]}
-    if final_url != seed_url:   # short link / redirect: feeds resolve against the target
-        detail["resolved_url"] = final_url
-    conn.execute(
-        "UPDATE event_seeds SET feed_type = ?, feed_url = ?, feed_detail = ?, feed_probed_at = ? "
-        "WHERE url = ?",
-        (found["type"], found["url"], json.dumps(detail), _iso_utc_now(), seed_url))
-    return found
-
-
 def _valid_url(url: str) -> bool:
     try:
         p = urlparse(url)
@@ -281,7 +266,7 @@ def cmd_discover(args) -> int:
             """,
             (name[:200], url, kind, now, now),
         )
-        if _record_feed(conn, url, html, final_url)["url"]:
+        if seed_ops.record_feed(conn, url, html, final_url)["url"]:
             with_feed += 1
         already.add(url)
         inserted += 1
@@ -334,7 +319,7 @@ def cmd_probe(args) -> int:
             counts["unreachable"] += 1
             print(json.dumps({"seed": seed["name"], "error": f"unreachable (status {code})"}))
             continue
-        found = _record_feed(conn, seed["url"], html, final_url)
+        found = seed_ops.record_feed(conn, seed["url"], html, final_url)
         conn.commit()
         counts["probed"] += 1
         counts["with_feed"] += bool(found["url"])
@@ -406,69 +391,6 @@ def _site_search(query: str) -> list[dict]:
     return firecrawl_search(query, limit=5)
 
 
-def _set_status(conn, seed: dict, status: str, d: "autonomy.Decision") -> None:
-    conn.execute("UPDATE event_seeds SET status = ?, status_note = ?, status_changed_at = ? "
-                 "WHERE seed_id = ?", (status, f"[autonomy] {d.reason}", _iso_utc_now(),
-                                       seed["seed_id"]))
-    autonomy.record(conn, "seed", f"seed:{seed['name']}", d)
-    conn.commit()
-
-
-def _trial(conn, profile: dict, mode, name: str, url: str) -> "autonomy.Decision":
-    """Dry-run one seed URL: scrape, extract, judge what it lists."""
-    ok, md, err = _trial_fetch(url)
-    if not ok:
-        return autonomy.Decision("reject", "trial-unreachable", {"url": url, "error": err[:200]})
-    failure = autonomy.page_failure(md)
-    if failure:
-        return autonomy.judge_trial([], [], failure)
-    ok, out, err = _codex_exec(build_extraction_prompt(profile, name, url, md))
-    if not ok:
-        return autonomy.Decision("defer", "ai-unavailable", {"url": url})
-    items = []
-    for e in _parse_events(out):
-        if not (isinstance(e, dict) and e.get("title") and e.get("date")):
-            continue
-        start, end = utc_times(e.get("date"), e.get("end_at"))
-        items.append({"title": e["title"], "date": e["date"], "date_utc": start,
-                      "end_at_utc": end, "venue": e.get("venue"), "location": e.get("location"),
-                      "source_url": e.get("source_url")})
-    if not items:
-        return autonomy.judge_trial([], [], "empty-listing")
-    ctx = autonomy.judge_context(conn, profile, mode)
-    d = autonomy.judge_trial(items, autonomy.judge_items(items, md, ctx, _codex_exec), None, mode)
-    d.evidence["url"] = url
-    return d
-
-
-def _find_moved(conn, profile: dict, mode, seed: dict) -> tuple[Optional[str], list[str]]:
-    """A working calendar URL for a dead seed on its own site: where the seed
-    page now redirects, else what a same-site search finds. Each candidate
-    must pass the same trial as a proposed seed."""
-    tried: list[str] = []
-    candidates: list[str] = []
-    ok, code, html, final_url = _scrape_page(seed["url"])
-    if ok:
-        _record_feed(conn, seed["url"], html, final_url)
-        if final_url and final_url.rstrip("/") != seed["url"].rstrip("/"):
-            candidates.append(final_url)
-    host = (urlparse(seed["url"]).hostname or "").lower()
-    if host:
-        for r in _site_search(f"site:{host.removeprefix('www.')} events calendar"):
-            u = (r.get("url") or "").strip()
-            if u and (urlparse(u).hostname or "").lower().removeprefix("www.") == \
-                    host.removeprefix("www.") and u.rstrip("/") != seed["url"].rstrip("/"):
-                candidates.append(u)
-    for url in list(dict.fromkeys(candidates))[:3]:
-        tried.append(url)
-        if conn.execute("SELECT 1 FROM event_seeds WHERE url = ? AND seed_id != ?",
-                        (url, seed["seed_id"])).fetchone():
-            continue
-        if _trial(conn, profile, mode, seed["name"], url).verdict == "approve":
-            return url, tried
-    return None, tried
-
-
 def cmd_review(args) -> int:
     profile = _load_town_profile()
     mode = autonomy.settings(profile)
@@ -477,66 +399,9 @@ def cmd_review(args) -> int:
         return 0
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
-    out = {"trialed": 0, "approved": 0, "rejected": 0, "deferred": 0, "roles": 0,
-           "retired": 0, "relocated": 0}
-    proposed = [dict(r) for r in conn.execute(
-        "SELECT * FROM event_seeds WHERE status = 'proposed' "
-        "ORDER BY feed_url IS NULL, trial_at IS NOT NULL, trial_at, seed_id LIMIT ?",
-        (args.trials,))]
-    for seed in proposed:
-        out["trialed"] += 1
-        d = _trial(conn, profile, mode, seed["name"], seed["url"])
-        # The trial score is the trust a seed starts with (an approved seed's
-        # is then earned from moderator outcomes).
-        conn.execute("UPDATE event_seeds SET trial_at = ?, "
-                     "trust_score = COALESCE(?, trust_score) WHERE seed_id = ?",
-                     (_iso_utc_now(), d.evidence.get("trust"), seed["seed_id"]))
-        if d.verdict == "approve":
-            _set_status(conn, seed, "approved", d)
-            out["approved"] += 1
-        elif d.verdict == "reject":
-            _set_status(conn, seed, "rejected", d)
-            out["rejected"] += 1
-        else:
-            autonomy.record(conn, "seed", f"seed:{seed['name']}", d)
-            out["deferred"] += 1
-        conn.commit()
-
-    autonomy.refresh_trust(conn)
-    for seed in [dict(r) for r in conn.execute("SELECT * FROM event_seeds WHERE status = 'approved'")]:
-        role = autonomy.classify_role(conn, seed, mode)
-        if role.verdict in (event_dedup.PRIMARY, event_dedup.SYNDICATOR) \
-                and seed.get("source_role") != role.verdict:
-            conn.execute("UPDATE event_seeds SET source_role = ? WHERE seed_id = ?",
-                         (role.verdict, seed["seed_id"]))
-            autonomy.record(conn, "seed-role", f"seed:{seed['name']}", role)
-            seed["source_role"] = role.verdict
-            autonomy.refresh_trust(conn, [seed["name"]])   # a syndicator's dedup losses don't count
-            out["roles"] += 1
-        d = autonomy.judge_seed(conn, seed, mode)
-        if d.verdict == "retire":
-            _set_status(conn, seed, "retired", d)
-            out["retired"] += 1
-        elif d.verdict == "check-moved" and out["relocated"] + out["retired"] < args.moves:
-            moved, tried = _find_moved(conn, profile, mode, seed)
-            if moved:
-                conn.execute(
-                    "UPDATE event_seeds SET previous_url = url, url = ?, status_note = ?, "
-                    "  status_changed_at = ?, health_status = NULL, health_note = NULL, "
-                    "  health_baseline = NULL, health_flagged_at = NULL, health_since = ? "
-                    "WHERE seed_id = ?",
-                    (moved, f"[autonomy] calendar moved from {seed['url']}", _iso_utc_now(),
-                     _iso_utc_now(), seed["seed_id"]))
-                autonomy.record(conn, "seed", f"seed:{seed['name']}", autonomy.Decision(
-                    "relocate", "calendar-moved", {**d.evidence, "from": seed["url"],
-                                                   "to": moved}))
-                conn.commit()
-                out["relocated"] += 1
-            else:
-                _set_status(conn, seed, "retired", autonomy.Decision(
-                    "retire", d.reason, {**d.evidence, "searched": tried}))
-                out["retired"] += 1
-    conn.commit()
+    tools = seed_ops.Tools(fetch=_trial_fetch, scrape=_scrape_page, search=_site_search,
+                           llm=_codex_exec)
+    out = seed_ops.review(conn, profile, mode, tools, trials=args.trials, moves=args.moves)
     conn.close()
     inspection.record(worker="event-seed-discovery", action="skill-invoke", target="review",
                       detail=json.dumps(out), ok=True)
@@ -552,8 +417,8 @@ def cmd_retire(args) -> int:
     if not row:
         print(json.dumps({"error": f"no seed {args.seed_id}"}))
         return 1
-    _set_status(conn, dict(row), "retired",
-                autonomy.Decision("retire", "operator", {"note": args.reason or ""}))
+    seed_ops.set_status(conn, dict(row), "retired",
+                        autonomy.Decision("retire", "operator", {"note": args.reason or ""}))
     print(json.dumps({"seed_id": args.seed_id, "status": "retired"}))
     return 0
 
@@ -570,8 +435,8 @@ def cmd_restore(args) -> int:
     if args.previous_url and row["previous_url"]:
         conn.execute("UPDATE event_seeds SET url = previous_url, previous_url = url "
                      "WHERE seed_id = ?", (args.seed_id,))
-    _set_status(conn, dict(row), "approved",
-                autonomy.Decision("restore", "operator", {"was": row["status"]}))
+    seed_ops.set_status(conn, dict(row), "approved",
+                        autonomy.Decision("restore", "operator", {"was": row["status"]}))
     print(json.dumps({"seed_id": args.seed_id, "status": "approved"}))
     return 0
 
