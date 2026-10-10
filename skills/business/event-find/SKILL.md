@@ -113,7 +113,9 @@ that seed is judged against that seed's page —
    rejecting → `series-rejected-streak`; its predicted Series already has an
    occurrence on that town-local date → `series-duplicate`; a known town venue,
    or a location naming the town/an alias (or a listed ZIP) → in town; a ZIP
-   outside `zip_codes` → `out-of-town`.
+   outside `zip_codes` → `out-of-town`. Not dropped, and its predicted Series'
+   last `autonomy.series_publish_streak` submissions were all published → a
+   well-established event, approved here (`series-established`).
 2. what those can't settle goes to one Codex call per seed run that may only
    **quote the page** (is it an event? where is it?); a quote not on the page
    doesn't count. Unsettled → `insufficient-evidence` (dropped). A failed call

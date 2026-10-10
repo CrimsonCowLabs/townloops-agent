@@ -52,7 +52,8 @@ class TestSeedTrust:
         seed = town.seed_row("Arena")
         assert seed["status"] == "retired"
         [d] = [d for d in town.decisions("seed") if d["verdict"] == "retire"]
-        assert d["reason"] == "rejected-by-moderator" and d["evidence"]["rejected"] == 5
+        assert d["reason"] == "low-trust" and d["evidence"]["rejected"] == 5
+        assert d["evidence"]["trust"] < d["evidence"]["threshold"]
 
         town.listing(ARENA, [concert("Show 9", days=12)])
         town.run()

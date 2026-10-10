@@ -94,11 +94,13 @@ def _pending_rows(conn: sqlite3.Connection, where: str, args: tuple) -> list[dic
 
 
 def _series_checks(conn: sqlite3.Connection, s: autonomy.Settings):
-    """(series_duplicate, series_blocked) for the judgement: an event whose
-    title predicts an active Series is a duplicate when that Series already
-    has an occurrence on its town-local date, and skipped while the
-    moderator keeps rejecting the Series. Without a TownLoops client (or
-    with no Series) only the rejection check runs, on what was recorded."""
+    """(series_duplicate, series_blocked, series_established) for the
+    judgement: an event whose title predicts an active Series is a duplicate
+    when that Series already has an occurrence on its town-local date,
+    skipped while the moderator keeps rejecting the Series, and approved
+    without the AI pass while the moderator keeps publishing it. Without a
+    TownLoops client (or with no Series) only the streak checks run, on
+    what was recorded."""
     from engine import series
     from engine.event_extract import town_tz_name
     from engine.derive_helpers import parse_instant
@@ -134,7 +136,12 @@ def _series_checks(conn: sqlite3.Connection, s: autonomy.Settings):
         slug = predicted(item)
         return slug if autonomy.series_blocked(conn, slug, s) else None
 
-    return duplicate, blocked
+    def established(item: dict):
+        slug = predicted(item)
+        streak = autonomy.series_established(conn, slug, s)
+        return (slug, streak) if streak else None
+
+    return duplicate, blocked, established
 
 
 def _apply_judgement(conn: sqlite3.Connection, rows: list[dict], decisions: list) -> dict:
@@ -197,9 +204,10 @@ def _find(conn: sqlite3.Connection, args) -> int:
     judged = {"approved": 0, "dropped": 0, "deferred": 0}
     ctx = None
     if judging:
-        duplicate, blocked = _series_checks(conn, mode)
+        duplicate, blocked, established = _series_checks(conn, mode)
         ctx = autonomy.judge_context(conn, profile, mode, series_duplicate=duplicate,
-                                     series_blocked=blocked)
+                                     series_blocked=blocked,
+                                     series_established=established)
 
     def judge(rows, seen=frozenset(), page=None):
         for k, v in _judge(conn, rows, set(seen), page, ctx, _codex_exec).items():

@@ -112,10 +112,18 @@ discovery:
 #     min_runs: 4              # runs before a seed is judged at all
 #     dead_runs: 4             # consecutive failed/empty runs (or runs under a health
 #                              # alert) → look for a moved calendar, else retire
-#     reject_rate: 0.7         # rejected share of a seed's submissions → retire
-#     min_outcomes: 5
+#     min_outcomes: 5          # decided submissions before trust demotes or retires a seed
+#   seed_trust:                # trust 0..1: moderator-published share since the seed's last
+#                              # status change (a new seed starts at 0.5), scaled down by a
+#                              # health alert and dedup losses; a trial's score is the
+#                              # smoothed share of its listed events that passed judgement
+#     approve: 0.2             # a proposed seed's trial must score this (and pass ≥1 event)
+#     syndicator: 0.45         # below this an approved seed is demoted to syndicator
+#     retire: 0.3              # below this it is retired (re-probed first under a health alert)
 #   series_reject_streak: 3    # a Series rejected this many times in a row is skipped
 #                              # until one of its submissions is published
+#   series_publish_streak: 3   # a Series published this many times in a row is well
+#                              # established: new occurrences skip the AI judgement (0 = off)
 #   stuck_retries: 2           # backoff retries (1h, 2h) before a stuck event ships
 #                              # with what it has, or is dropped
 # zip_codes: ["96150"]         # optional: a listed ZIP outside these is out of town

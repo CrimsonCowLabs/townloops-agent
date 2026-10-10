@@ -5,9 +5,11 @@ Autonomous mode adds `review` (engine/autonomy): proposed seeds are dry-run
 and approved only when the run yields at least one real upcoming in-town
 event (an error, challenge or empty page fails), seeds with a feed first;
 approved seeds are classified primary/syndicator from their events, their
-trust refreshed, and a seed the moderator mostly rejects — or one dead for
-several runs whose calendar can't be found again on its own site — is
-retired (reversible: `restore`). A moved calendar replaces the seed URL."""
+trust refreshed; trust decides the rest — a trial must score
+`seed_trust.approve`, a seed below `seed_trust.syndicator` is demoted to
+syndicator and one below `seed_trust.retire` — or one dead for several runs
+whose calendar can't be found again on its own site — is retired
+(reversible: `restore`). A moved calendar replaces the seed URL."""
 
 from __future__ import annotations
 
@@ -434,7 +436,7 @@ def _trial(conn, profile: dict, mode, name: str, url: str) -> "autonomy.Decision
     if not items:
         return autonomy.judge_trial([], [], "empty-listing")
     ctx = autonomy.judge_context(conn, profile, mode)
-    d = autonomy.judge_trial(items, autonomy.judge_items(items, md, ctx, _codex_exec), None)
+    d = autonomy.judge_trial(items, autonomy.judge_items(items, md, ctx, _codex_exec), None, mode)
     d.evidence["url"] = url
     return d
 
@@ -484,8 +486,11 @@ def cmd_review(args) -> int:
     for seed in proposed:
         out["trialed"] += 1
         d = _trial(conn, profile, mode, seed["name"], seed["url"])
-        conn.execute("UPDATE event_seeds SET trial_at = ? WHERE seed_id = ?",
-                     (_iso_utc_now(), seed["seed_id"]))
+        # The trial score is the trust a seed starts with (an approved seed's
+        # is then earned from moderator outcomes).
+        conn.execute("UPDATE event_seeds SET trial_at = ?, "
+                     "trust_score = COALESCE(?, trust_score) WHERE seed_id = ?",
+                     (_iso_utc_now(), d.evidence.get("trust"), seed["seed_id"]))
         if d.verdict == "approve":
             _set_status(conn, seed, "approved", d)
             out["approved"] += 1
@@ -499,12 +504,14 @@ def cmd_review(args) -> int:
 
     autonomy.refresh_trust(conn)
     for seed in [dict(r) for r in conn.execute("SELECT * FROM event_seeds WHERE status = 'approved'")]:
-        role = autonomy.classify_role(conn, seed)
+        role = autonomy.classify_role(conn, seed, mode)
         if role.verdict in (event_dedup.PRIMARY, event_dedup.SYNDICATOR) \
                 and seed.get("source_role") != role.verdict:
             conn.execute("UPDATE event_seeds SET source_role = ? WHERE seed_id = ?",
                          (role.verdict, seed["seed_id"]))
             autonomy.record(conn, "seed-role", f"seed:{seed['name']}", role)
+            seed["source_role"] = role.verdict
+            autonomy.refresh_trust(conn, [seed["name"]])   # a syndicator's dedup losses don't count
             out["roles"] += 1
         d = autonomy.judge_seed(conn, seed, mode)
         if d.verdict == "retire":

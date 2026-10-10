@@ -66,9 +66,13 @@ class Settings:
     horizon_days: int = 120
     seed_min_runs: int = 4             # successful runs before a seed is judged
     seed_dead_runs: int = 4            # consecutive zero/sharply-down runs → retire review
-    seed_reject_rate: float = 0.7      # rejected share of a seed's outcomes → retire
-    seed_min_outcomes: int = 5
+    seed_min_outcomes: int = 5         # decided submissions before trust demotes or retires
+    # Seed trust (0..1; a new seed starts at 0.5 — see seed_trust) decides:
+    seed_trust_approve: float = 0.2    # … a proposed seed's trial passes at this score
+    seed_trust_syndicator: float = 0.45  # … below this an approved seed is a syndicator
+    seed_trust_retire: float = 0.3     # … below this it is retired
     series_reject_streak: int = 3
+    series_publish_streak: int = 3     # published in a row → a well-established Series
     stuck_retries: int = 2             # backoff retries before a stuck event is resolved
 
     @property
@@ -83,6 +87,7 @@ def settings(profile: Optional[dict] = None) -> Settings:
     a = profile.get("autonomy") or {}
     breaker = a.get("circuit_breaker") or {}
     seeds = a.get("seed_retirement") or {}
+    trust = a.get("seed_trust") or {}
     d = Settings()
 
     def num(src: dict, key: str, default, cast=int):
@@ -102,9 +107,12 @@ def settings(profile: Optional[dict] = None) -> Settings:
         horizon_days=num(a, "horizon_days", d.horizon_days),
         seed_min_runs=num(seeds, "min_runs", d.seed_min_runs),
         seed_dead_runs=num(seeds, "dead_runs", d.seed_dead_runs),
-        seed_reject_rate=num(seeds, "reject_rate", d.seed_reject_rate, float),
         seed_min_outcomes=num(seeds, "min_outcomes", d.seed_min_outcomes),
+        seed_trust_approve=num(trust, "approve", d.seed_trust_approve, float),
+        seed_trust_syndicator=num(trust, "syndicator", d.seed_trust_syndicator, float),
+        seed_trust_retire=num(trust, "retire", d.seed_trust_retire, float),
         series_reject_streak=num(a, "series_reject_streak", d.series_reject_streak),
+        series_publish_streak=num(a, "series_publish_streak", d.series_publish_streak),
         stuck_retries=num(a, "stuck_retries", d.stuck_retries),
     )
 
@@ -367,6 +375,8 @@ class JudgeContext:
     series_duplicate: Optional[Callable[[dict], Optional[str]]] = None
     # event → slug of its predicted Series when that Series is rejection-blocked
     series_blocked: Optional[Callable[[dict], Optional[str]]] = None
+    # event → (slug, publish streak) of its predicted Series when well established
+    series_established: Optional[Callable[[dict], Optional[tuple[str, int]]]] = None
 
 
 def judge_context(conn: sqlite3.Connection, profile: dict, s: Settings, **kw) -> JudgeContext:
@@ -450,6 +460,12 @@ def _deterministic(item: dict, ctx: JudgeContext) -> tuple[Optional[Decision], d
     if facets.get("is_event") and facets.get("in_town"):
         return Decision("approve", "checks-passed",
                         {"town": facets["town_evidence"], "has_time": True}), facets
+    # The moderator keeps publishing this Series: a well-established event,
+    # approved on the checks above without the AI pass.
+    established = ctx.series_established(item) if ctx.series_established else None
+    if established:
+        return Decision("approve", "series-established",
+                        {"series_slug": established[0], "publish_streak": established[1]}), facets
     return None, facets
 
 
@@ -682,6 +698,26 @@ def series_blocked(conn: sqlite3.Connection, series_slug: Optional[str], s: Sett
     return len(rows) >= s.series_reject_streak and all(r == "rejected" for r in rows)
 
 
+def series_established(conn: sqlite3.Connection, series_slug: Optional[str],
+                       s: Settings) -> Optional[int]:
+    """The publish streak when the moderator published (or merged) this
+    Series' latest `series_publish_streak` or more decided submissions in a
+    row — a well-established event, approved without the AI pass — else
+    None. One rejection ends the streak."""
+    n = s.series_publish_streak
+    if not series_slug or n <= 0:
+        return None
+    streak = 0
+    for (status,) in conn.execute(
+            "SELECT status FROM submissions WHERE resource = 'events' AND series_slug = ? "
+            "AND status IN ('published', 'rejected', 'merged') ORDER BY decided_at DESC, id DESC",
+            (series_slug,)):
+        if status == "rejected":
+            break
+        streak += 1
+    return streak if streak >= n else None
+
+
 # --------------------------------------------------------------------------
 # Discovered organisations
 # --------------------------------------------------------------------------
@@ -734,20 +770,33 @@ def dedup_record(conn: sqlite3.Connection, seed_name: str) -> dict:
 
 def seed_trust(conn: sqlite3.Connection, seed: dict) -> float:
     """0..1: how far this seed's output is accepted — the moderator's
-    published share of its submissions (Laplace-smoothed, so a new seed
-    starts at 0.5), scaled down by a standing health alert and by how often
-    its copy of an event loses dedup to another source's."""
-    o = seed_outcomes(conn, seed["name"])
+    published share of its submissions since its last status change
+    (Laplace-smoothed, so a new or restored seed starts at 0.5), scaled down
+    by a standing health alert and by how often its copy of an event loses
+    dedup to another source's (not for a syndicator: losing to the
+    organiser's copy is its role). Trial approval, demotion to syndicator
+    and retirement are decided on it (judge_trial, classify_role,
+    judge_seed)."""
+    o = seed_outcomes(conn, seed["name"], seed.get("status_changed_at") or "")
     acceptance = (o["published"] + 1) / (o["published"] + o["rejected"] + 2)
     health = _HEALTH_FACTOR.get(seed.get("health_status"), 1.0)
     d = dedup_record(conn, seed["name"])
-    dedup = 1 - 0.5 * (d["lost"] / d["of"]) if d["of"] else 1.0
+    dedup = 1 - 0.5 * (d["lost"] / d["of"]) \
+        if d["of"] and seed.get("source_role") != "syndicator" else 1.0
     return round(acceptance * health * dedup, 3)
 
 
+def _trust_evidence(conn: sqlite3.Connection, seed: dict) -> tuple[float, int, dict]:
+    """(trust, decided outcomes, evidence) — the record a seed is judged on."""
+    o = seed_outcomes(conn, seed["name"], seed.get("status_changed_at") or "")
+    t = seed_trust(conn, seed)
+    return t, o["published"] + o["rejected"], {**o, "trust": t}
+
+
 def refresh_trust(conn: sqlite3.Connection, seed_names: Optional[Iterable[str]] = None) -> dict:
-    """Recompute and store trust for these seeds (default: every seed)."""
-    seeds = _rows(conn, "SELECT * FROM event_seeds")
+    """Recompute and store trust for these seeds (default: every seed). A
+    proposed or rejected seed keeps the score its trial gave it."""
+    seeds = _rows(conn, "SELECT * FROM event_seeds WHERE status NOT IN ('proposed', 'rejected')")
     wanted = set(seed_names) if seed_names is not None else None
     out = {}
     for seed in seeds:
@@ -759,12 +808,22 @@ def refresh_trust(conn: sqlite3.Connection, seed_names: Optional[Iterable[str]] 
     return out
 
 
-def classify_role(conn: sqlite3.Connection, seed: dict, min_events: int = 5) -> Decision:
-    """Primary or syndicator, from the seed's own events: a calendar whose
-    events mostly link to other sites' pages republishes other organisers'
-    events; one whose events link to its own site is the organiser's. Too
-    few events with links → keep."""
+def classify_role(conn: sqlite3.Connection, seed: dict, s: Settings,
+                  min_events: int = 5) -> Decision:
+    """Primary or syndicator. A seed whose trust has fallen below
+    `seed_trust_syndicator` (once `seed_min_outcomes` are decided) is
+    demoted to syndicator, so another source's copy of an event wins.
+    Otherwise from the seed's own events: a calendar whose events mostly
+    link to other sites' pages republishes other organisers' events; one
+    whose events link to its own site is the organiser's. Too few events
+    with links → keep."""
     from urllib.parse import urlparse
+    if not s.autonomous:
+        return await_operator()
+    trust, decided, record = _trust_evidence(conn, seed)
+    if decided >= s.seed_min_outcomes and trust < s.seed_trust_syndicator:
+        return Decision("syndicator", "low-trust",
+                        {**record, "threshold": s.seed_trust_syndicator})
 
     def host(url: Optional[str]) -> str:
         h = (urlparse(url or "").hostname or "").lower()
@@ -776,10 +835,11 @@ def classify_role(conn: sqlite3.Connection, seed: dict, min_events: int = 5) -> 
         (f"seed:{seed['name']}",)).fetchall()]
     hosts = [h for h in hosts if h]
     if len(hosts) < min_events or not own:
-        return Decision("keep", "too-few-events", {"with_links": len(hosts)})
+        return Decision("keep", "too-few-events", {"with_links": len(hosts), "trust": trust})
     off = sum(1 for h in hosts if h != own and not h.endswith("." + own))
     share = off / len(hosts)
-    evidence = {"events_with_links": len(hosts), "off_site_share": round(share, 2)}
+    evidence = {"events_with_links": len(hosts), "off_site_share": round(share, 2),
+                "trust": trust}
     if share >= 0.6:
         return Decision("syndicator", "links-off-site", evidence)
     if share <= 0.4:
@@ -794,17 +854,23 @@ def _recent_runs(conn: sqlite3.Connection, seed: dict, n: int, since: str = "") 
 
 
 def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
-    """An approved seed: `keep`, `retire` (most of its submissions were
-    rejected), or `check-moved` (its last `seed_dead_runs` runs failed or
-    listed nothing — look for a moved calendar before retiring it)."""
+    """An approved seed: `keep`, `retire` (its trust fell below
+    `seed_trust_retire` once `seed_min_outcomes` were decided), or
+    `check-moved` (its last `seed_dead_runs` runs failed or listed nothing,
+    or it is low-trust under a standing health alert — look for a moved
+    calendar before retiring it)."""
     if not s.autonomous:
         return await_operator()
     since = seed.get("status_changed_at") or ""   # a restored seed starts a fresh record
-    o = seed_outcomes(conn, seed["name"], since)
-    decided = o["published"] + o["rejected"]
-    if decided >= s.seed_min_outcomes and o["rejected"] / decided >= s.seed_reject_rate:
-        return Decision("retire", "rejected-by-moderator",
-                        {**o, "reject_rate": round(o["rejected"] / decided, 2)})
+    trust, decided, record = _trust_evidence(conn, seed)
+    if decided >= s.seed_min_outcomes and trust < s.seed_trust_retire:
+        evidence = {**record, "threshold": s.seed_trust_retire}
+        if seed.get("health_status"):
+            # Part of the low score is the source going quiet: what it lists
+            # now may not be its calendar any more.
+            return Decision("check-moved", "low-trust",
+                            {**evidence, "health": seed["health_status"]})
+        return Decision("retire", "low-trust", evidence)
     runs = _recent_runs(conn, seed, max(s.seed_dead_runs, s.seed_min_runs), since)
     total = conn.execute("SELECT COUNT(*) FROM source_runs WHERE source = ? AND started_at > ?",
                          (f"seed:{seed['name']}", since)).fetchone()[0]
@@ -813,34 +879,43 @@ def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
             and all(not r["ok"] or not r["fetched"] for r in recent)):
         return Decision("check-moved", "dead-source",
                         {"runs": [{"ok": bool(r["ok"]), "fetched": r["fetched"]} for r in recent],
-                         "health": seed.get("health_status")})
+                         "health": seed.get("health_status"), "trust": trust})
     if seed.get("health_status") and seed.get("health_flagged_at"):
         since = conn.execute("SELECT COUNT(*) FROM source_runs WHERE source = ? AND started_at >= ?",
                              (f"seed:{seed['name']}", seed["health_flagged_at"])).fetchone()[0]
         if since >= s.seed_dead_runs:
             return Decision("check-moved", "health-alert-persists",
                             {"health": seed["health_status"], "note": seed.get("health_note"),
-                             "runs_since_alert": since})
+                             "runs_since_alert": since, "trust": trust})
         return Decision("keep", "health-alert-watching", {"health": seed["health_status"],
-                                                          "runs_since_alert": since})
-    return Decision("keep", "healthy", {**o, "trust": seed.get("trust_score")})
+                                                          "runs_since_alert": since,
+                                                          "trust": trust})
+    return Decision("keep", "healthy", record)
 
 
 def judge_trial(items: list[dict], decisions_: list[Optional[Decision]],
-                failure: Optional[str]) -> Decision:
+                failure: Optional[str], s: Optional[Settings] = None) -> Decision:
     """A proposed seed's dry run: approve it when the page isn't an error /
-    challenge / empty page and at least one listed event passed the event
-    judgement (upcoming, in town, a real event)."""
+    challenge / empty page and its trial score — the Laplace-smoothed share
+    of the listed events that passed the event judgement (upcoming, in town,
+    a real event), the trust it starts with — reaches `seed_trust_approve`
+    with at least one passing. Deferred items (the AI call failed) aren't
+    counted; while any are, a seed short of the bar is deferred, not
+    rejected."""
+    s = s or Settings(mode=AUTONOMOUS)
     if failure:
         return Decision("reject", f"trial-{failure}", {})
     passed = [it["title"] for it, d in zip(items, decisions_) if d and d.verdict == "approve"]
-    if passed:
-        return Decision("approve", "trial-yielded-events",
-                        {"events": len(items), "passed": passed[:5]})
+    judged = sum(1 for d in decisions_ if d)
+    trust = round((len(passed) + 1) / (judged + 2), 3)
+    evidence = {"events": len(items), "passed": passed[:5], "trust": trust,
+                "threshold": s.seed_trust_approve}
+    if passed and trust >= s.seed_trust_approve:
+        return Decision("approve", "trial-yielded-events", evidence)
     if any(d is None for d in decisions_):
-        return Decision("defer", "ai-unavailable", {"events": len(items)})
-    reasons = sorted({d.reason for d in decisions_ if d})
-    return Decision("reject", "trial-no-usable-events", {"events": len(items), "reasons": reasons})
+        return Decision("defer", "ai-unavailable", evidence)
+    evidence["reasons"] = sorted({d.reason for d in decisions_ if d and d.verdict != "approve"})
+    return Decision("reject", "trial-low-yield" if passed else "trial-no-usable-events", evidence)
 
 
 # --------------------------------------------------------------------------
