@@ -99,17 +99,26 @@ This is intentional: a bad seed can create substantial review noise.
 Inactive in supervised mode. In autonomous mode:
 
 - **Proposed seeds** (feeds first, `--trials` per run, default 2) are dry-run:
-  scrape, extract, and judge the listed events as event-find would. Approved
-  only when at least one is a real upcoming in-town event; an error page
+  scrape, extract, and judge the listed events as event-find would. The
+  trial's score — the smoothed share of listed events that are real upcoming
+  in-town events, `(passed + 1) / (judged + 2)`, stored as its starting
+  `trust_score` — must reach `seed_trust.approve` (default 0.2) with at least
+  one passing; short of it is `trial-low-yield`. An error page
   (`trial-not-found`), bot wall (`trial-challenge`), empty page or empty
   listing, or nothing usable is a rejection. A 2xx alone never approves.
-- **Role**: a seed whose events mostly link to other sites is a
-  `syndicator`; one whose events link to its own site is `primary`
-  (`source_role`, so dedup keeps the organiser's copy).
-- **Trust** (`trust_score`) is refreshed from moderator outcomes, health and
-  dedup losses.
-- **Retire**: most of its submissions rejected by the moderator
-  (`seed_retirement.reject_rate` over `min_outcomes`) → `retired`. Its last
+- **Trust** (`trust_score`, 0..1) is refreshed from moderator outcomes since
+  the seed's last status change (an approved or restored seed starts at
+  0.5), scaled down by a health alert and by dedup losses (not counted for a
+  syndicator). It drives the two calls below, each only once
+  `seed_retirement.min_outcomes` (default 5) submissions are decided; every
+  decision carries the score in its evidence.
+- **Role**: trust below `seed_trust.syndicator` (default 0.45) → demoted to
+  `syndicator` (`low-trust`). Otherwise a seed whose events mostly link to
+  other sites is a `syndicator`; one whose events link to its own site is
+  `primary` (`source_role`, so dedup keeps the organiser's copy).
+- **Retire**: trust below `seed_trust.retire` (default 0.3) → `retired`
+  (`low-trust`); under a standing health alert it is re-probed for a moved
+  calendar first, as below. Its last
   `dead_runs` runs all failed or listed nothing, or a health alert persisted
   that long → first look for a moved calendar (where the seed page redirects
   now, then a same-site search), dry-running each candidate; one that passes

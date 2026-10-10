@@ -26,9 +26,12 @@ outcome. Logic: `engine/moderation.py`.
 - Each outcome is a `submission:<outcome>` decision in the activity log,
   attributed to the event's seed and Series (or the entity's discovery source).
 - Seed trust (`event_seeds.trust_score`) is refreshed for every seed with a new
-  outcome; the daily seed review retires seeds the moderator mostly rejects.
+  outcome; the daily seed review demotes or retires seeds on it.
 - A Series whose last `autonomy.series_reject_streak` submissions were all
-  rejected is skipped by event-find until one is published.
+  rejected is skipped by event-find until one is published. One whose last
+  `autonomy.series_publish_streak` were all published is well established:
+  event-find approves its new occurrences on the deterministic checks alone
+  (`series-established`), without the AI pass, until one is rejected.
 - A rejected discovered organisation is remembered by name: discovery never
   proposes it again, under any URL.
 - When the rejected share of recent outcomes passes

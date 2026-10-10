@@ -26,7 +26,7 @@ python autonomy/autonomy.py resume                 # close the circuit (operator
 
 ## Reason codes
 
-- Events: `checks-passed`, `ai-verified` (approved); `past`, `beyond-horizon`,
+- Events: `checks-passed`, `series-established`, `ai-verified` (approved); `past`, `beyond-horizon`,
   `no-start-time`, `not-an-event`, `out-of-town`, `series-duplicate`,
   `series-rejected-streak`, `insufficient-evidence`, `rejected-on-townloops`
   (dropped); `ai-unavailable` (deferred to the next run).
@@ -35,10 +35,11 @@ python autonomy/autonomy.py resume                 # close the circuit (operator
   `ship-failed`, `past` (drop).
 - Seeds: `trial-yielded-events` (approve), `trial-not-found`,
   `trial-challenge`, `trial-empty-page`, `trial-empty-listing`,
-  `trial-no-usable-events`, `trial-unreachable` (reject),
-  `rejected-by-moderator`, `dead-source`, `health-alert-persists` (retire, or
+  `trial-no-usable-events`, `trial-low-yield`, `trial-unreachable` (reject),
+  `low-trust`, `dead-source`, `health-alert-persists` (retire, or
   `calendar-moved` when a working calendar was found on the same site);
-  `links-off-site` / `links-on-site` (syndicator / primary).
+  `low-trust` / `links-off-site` (syndicator), `links-on-site` (primary).
+  Seed decisions carry the trust score (`trust`) and the threshold applied.
 - Submissions: `moderator-published`, `moderator-rejected`, `moderator-merged`,
   `moderator-gone`. Changes: `published-value-changed` (a date/venue change
   submitted for merge). Cancellations: `page-states-cancelled`.
