@@ -23,7 +23,8 @@ the host/people derivation (engine/event_people).
 A page that itself says the event is cancelled or postponed
 (autonomy.cancellation_evidence) ends the read there, without the Codex
 call: the event is declined with the page's sentence as the reason
-(engine/event_cancel.decline_cancelled), so it never ships.
+(engine/event_cancel.decline_cancelled), so it never ships. Supervised: it
+is flagged for the operator instead and the read goes on.
 """
 
 from __future__ import annotations
@@ -163,6 +164,12 @@ def _canon(url) -> Optional[str]:
         return None
 
 
+def is_listing(conn: sqlite3.Connection, event: dict) -> bool:
+    """The event's source_url is its seed's listing of many events, not a
+    page of its own."""
+    return _canon(event.get("source_url")) in seed_urls(conn, event)
+
+
 def seed_urls(conn: sqlite3.Connection, event: dict) -> set[str]:
     """Canonical listing URLs of the seed(s) the event was found on."""
     via = event.get("discovered_via") or event.get("source") or ""
@@ -240,10 +247,11 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         if ok else None
     if said and said.verdict == "submit":
         quote = said.evidence["quote"]
-        _record(conn, event, "read", url, {})
-        event_cancel.decline_cancelled(conn, event["event_uid"], quote, "its own page",
-                                       "page-states-cancelled")
-        return DetailResult("cancelled", fields={"cancelled": quote})
+        if event_cancel.decline_cancelled(conn, event["event_uid"], quote, "its own page",
+                                          "page-states-cancelled") == "declined":
+            _record(conn, event, "read", url, {})
+            return DetailResult("cancelled", fields={"cancelled": quote})
+        # Supervised: flagged for the operator; the read goes on.
     if ok:
         ok, out, err = llm(build_detail_prompt(event, url, markdown), timeout_s=CODEX_TIMEOUT_S)
         parsed = parse_object(out) if ok else None

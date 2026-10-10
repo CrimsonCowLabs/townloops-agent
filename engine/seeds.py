@@ -64,7 +64,7 @@ def trial(conn: sqlite3.Connection, profile: dict, mode: autonomy.Settings, tool
         return autonomy.Decision("reject", "trial-unreachable", {"url": url, "error": err[:200]})
     failure = autonomy.page_failure(md)
     if failure:
-        return autonomy.judge_trial([], [], failure)
+        return autonomy.judge_trial([], [], failure, mode)
     ok, out, err = tools.llm(build_extraction_prompt(profile, name, url, md))
     if not ok:
         return autonomy.Decision("defer", "ai-unavailable", {"url": url})
@@ -77,7 +77,7 @@ def trial(conn: sqlite3.Connection, profile: dict, mode: autonomy.Settings, tool
                       "end_at_utc": end, "venue": e.get("venue"), "location": e.get("location"),
                       "source_url": e.get("source_url")})
     if not items:
-        return autonomy.judge_trial([], [], "empty-listing")
+        return autonomy.judge_trial([], [], "empty-listing", mode)
     ctx = autonomy.judge_context(conn, profile, mode)
     d = autonomy.judge_trial(items, autonomy.judge_items(items, md, ctx, tools.llm), None, mode)
     d.evidence["url"] = url

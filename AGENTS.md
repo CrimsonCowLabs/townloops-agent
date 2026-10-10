@@ -215,7 +215,7 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **One canonical event per real event; cancellations are operator-gated.** `event_uid` is per seed;
   `canonical_event_uid` (engine/event_dedup) groups copies across seeds, and event-ship never creates
   a copy whose sibling is already live. An event missing from all its sources, or still listed but marked
-  cancelled on the listing (quote-checked; not-yet-shipped copies are just declined), is only *flagged*
+  cancelled on the listing (quote-checked; not-yet-shipped copies are declined in autonomous mode, flagged in supervised), is only *flagged*
   (`events.cancel_status`); it's marked cancelled on TownLoops only after the operator confirms
   (`confirm_cancellations` widget → `event-cancellations apply`). Never wire auto-cancel.
 - **Source-health alerts fire on transitions only.** `engine/source_health.record_run` is the one

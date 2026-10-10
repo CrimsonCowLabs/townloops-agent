@@ -300,8 +300,9 @@ def _submit_change(client, conn, event: dict, meta: dict,
     (date, venue, any other field) goes to the moderator as a pending event
     with the same source_url, for the TownLoops merge flow — the published
     event is never PATCHed with it. A change that only fills a blank live
-    field, and the accessibility-notes / ticket-line / `free` fills, are
-    PATCHed live and GET-verified like any fill-blank. Each outcome is a
+    field, and the accessibility-notes / ticket-line / `free` fills that only
+    fill (a blank description, a tag added), are PATCHed live and
+    GET-verified like any fill-blank. Each outcome is a
     recorded `change` decision. Returns the pending event's slug, else the
     live slug."""
     from engine.live_patch import apply_event_patch, shows
@@ -317,8 +318,11 @@ def _submit_change(client, conn, event: dict, meta: dict,
     venue_id = _resolve_venue_id(client, conn, event, venue_slug)
     if venue_id:
         payload["venue_id"] = venue_id
-    submit: dict[str, Any] = {}
     fill = _reconcile_fill_overrides(event, current)
+    # A ticket line atop a published description, or `free` dropped from
+    # published tags, rewrites a published value: merge flow, not a PATCH.
+    submit: dict[str, Any] = {f: fill.pop(f) for f in list(fill)
+                              if not _fills_only(current, f, fill[f])}
     submitted_keys, skipped = [], {}
     for key in sorted(changes):
         values = {f: v for f, v in _change_values(key, event, payload, current).items()
@@ -387,6 +391,14 @@ def _change_values(key: str, event: dict, payload: dict, current: dict) -> dict[
             return {"venue_id": payload["venue_id"]}
         return {"venue_name": payload["venue_name"]} if payload.get("venue_name") else {}
     return {key: payload[key]} if payload.get(key) not in (None, "", []) else {}
+
+
+def _fills_only(live: dict, field: str, value: Any) -> bool:
+    """Whether sending `value` only fills `live`: the field is blank there,
+    or (tags) nothing already on it is taken away."""
+    if field == "tags":
+        return set(live.get("tags") or []) <= set(value or [])
+    return _blank_on(live, field)
 
 
 def _blank_on(live: dict, field: str) -> bool:

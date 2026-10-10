@@ -217,6 +217,23 @@ class TestChanges:
         assert verdicts["submit"]["evidence"]["changes"] == ["start_at"]
         assert "accessibility_notes" in verdicts["patch"]["evidence"]["fields"]
 
+    def test_ticket_fills_that_rewrite_published_values_are_submitted_not_patched(self, town):
+        # A ticket line atop a published description, or `free` dropped from
+        # published tags, changes a published value: merge flow, never a PATCH.
+        new = soon(9)
+        stage_change(town, {"start_at": {"live": "x", "source": utc_times(new, None)[0]}},
+                     {"description": "Live jazz.", "tags": ["free", "music"]}, date=new)
+        town.conn.execute("UPDATE events SET price = '$20'")
+        town.conn.commit()
+        town.run()
+        live = town.api.events["jazz-live"]
+        assert (live["description"], live["tags"]) == ("Live jazz.", ["free", "music"])
+        [sent] = town.submitted_events()
+        assert sent["description"].startswith("Tickets: $20")
+        assert "free" not in sent["tags"]
+        assert set(change_decisions(town)["submit"]["evidence"]["fields"]) >= {
+            "description", "tags", "start_at"}
+
     def test_a_deleted_venue_change_reads_as_gone_not_merged(self, town):
         # The date never changed, so the target "showing our start time" is no
         # evidence of a merge.

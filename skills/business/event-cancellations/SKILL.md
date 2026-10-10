@@ -36,8 +36,10 @@ the marker off the title so it still matches its row, and then:
 - **live** — flags it `possibly-cancelled` (`cancel_note`: `listed as
   cancelled by <seed>: "<quote>"`), the same as a vanished event. The flag
   holds while the listing keeps saying so and clears when it stops.
-- **not shipped yet** — declines it with the quote as the note. read-detail
-  does the same when the event's own page says so.
+- **not shipped yet** — autonomous: declines it with the quote as the note.
+  Supervised: flags it `possibly-cancelled` for the operator; `apply` declines
+  it locally once confirmed. read-detail does the same when the event's own
+  page says so.
 
 ## CLI
 

@@ -6,7 +6,8 @@ already in hand: the listing event-find scraped (the extracted title or
 description says so, and the statement is on the page), and the event's own
 page when read-detail reads it. Only a statement that is on the page counts.
 
-- Not yet shipped: the event is declined with the quote as the reason.
+- Not yet shipped: autonomous declines it with the quote as the reason;
+  supervised flags it for the operator, and a confirmed flag declines it.
 - On TownLoops: it is flagged `possibly-cancelled` like a vanished event —
   the operator confirms it (supervised), or `submit_evidenced` re-reads its
   own page and submits a pending cancellation only if that page says so
@@ -160,6 +161,13 @@ class TestListedLiveEvent:
         assert api.patches() == []
 
 
+@pytest.fixture
+def autonomous(monkeypatch):
+    from engine import autonomy
+    monkeypatch.setattr(autonomy, "is_autonomous", lambda: True)
+
+
+@pytest.mark.usefixtures("autonomous")
 class TestListedUnshippedEvent:
     def test_a_pending_event_listed_as_cancelled_is_declined(self, conn):
         _find(conn, CANCELLED_JAZZ, OTHER)
@@ -178,6 +186,28 @@ class TestListedUnshippedEvent:
         assert _row(conn, uid)["state"] == "declined"
         assert conn.execute("SELECT COUNT(*) FROM event_workqueue WHERE event_uid = ? "
                             "AND resolved_at IS NULL", (uid,)).fetchone()[0] == 0
+
+
+class TestListedUnshippedEventSupervised:
+    """Supervised: the operator declines — the agent only flags the copy for
+    the operator's cancellations list, and a confirmed flag declines it."""
+
+    def test_a_pending_event_listed_as_cancelled_is_flagged_not_declined(self, conn):
+        _find(conn, CANCELLED_JAZZ, OTHER)
+        row = _row(conn, _uid(JAZZ))
+        assert row["state"] == "metadata-extracted"
+        assert row["cancel_status"] == "possibly-cancelled"
+        assert "CANCELLED: Jazz Night" in row["cancel_note"]
+        assert [r["event_uid"] for r in ec.flagged(conn)] == [_uid(JAZZ)]
+
+    def test_a_confirmed_flag_on_an_unshipped_copy_declines_it(self, conn):
+        _find(conn, CANCELLED_JAZZ, OTHER)
+        uid = _uid(JAZZ)
+        ec.confirm(conn, [uid])
+        out = ec.apply_confirmed(conn, client=None)
+        row = _row(conn, uid)
+        assert (row["state"], row["cancel_status"]) == ("declined", "cancelled")
+        assert out["cancelled"] == 1
 
 
 class TestOwnPageEvidence:
@@ -213,7 +243,7 @@ class TestDetailPage:
             fetch=lambda url, timeout_s=0: (True, markdown, ""),
             llm=lambda prompt, timeout_s=0: (True, "{}", ""))
 
-    def test_an_own_page_that_says_cancelled_declines_the_event(self, conn):
+    def test_an_own_page_that_says_cancelled_declines_the_event(self, conn, autonomous):
         event = self._approved(conn)
         out = self._read(conn, event, "# Jazz Night\n\nThis event has been cancelled. "
                                       "Refunds at the box office.")
@@ -221,6 +251,15 @@ class TestDetailPage:
         row = _row(conn, event["event_uid"])
         assert row["state"] == "declined"
         assert "This event has been cancelled" in row["approval_note"]
+
+    def test_supervised_an_own_page_that_says_cancelled_is_flagged_and_read(self, conn):
+        event = self._approved(conn)
+        out = self._read(conn, event, "# Jazz Night\n\nThis event has been cancelled. "
+                                      "Refunds at the box office.")
+        assert out.status == "read"
+        row = _row(conn, event["event_uid"])
+        assert (row["state"], row["cancel_status"]) == ("approved", "possibly-cancelled")
+        assert "This event has been cancelled" in row["cancel_note"]
 
     def test_an_own_page_that_says_nothing_lets_it_go_on(self, conn):
         event = self._approved(conn)

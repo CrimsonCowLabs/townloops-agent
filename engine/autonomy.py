@@ -889,7 +889,7 @@ def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
 
 
 def judge_trial(items: list[dict], decisions_: list[Optional[Decision]],
-                failure: Optional[str], s: Optional[Settings] = None) -> Decision:
+                failure: Optional[str], s: Settings) -> Decision:
     """A proposed seed's dry run: approve it when the page isn't an error /
     challenge / empty page and its trial score — the Laplace-smoothed share
     of the listed events that passed the event judgement (upcoming, in town,
@@ -897,7 +897,6 @@ def judge_trial(items: list[dict], decisions_: list[Optional[Decision]],
     with at least one passing. Deferred items (the AI call failed) aren't
     counted; while any are, a seed short of the bar is deferred, not
     rejected."""
-    s = s or Settings(mode=AUTONOMOUS)
     if failure:
         return Decision("reject", f"trial-{failure}", {})
     passed = [it["title"] for it, d in zip(items, decisions_) if d and d.verdict == "approve"]

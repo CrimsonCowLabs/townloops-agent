@@ -40,7 +40,8 @@ each listed event's extracted title/description for such a statement and
 keeps it only if the statement is on the scraped listing (`listing_statement`,
 quote-checked); `record_listing` then flags the live copy `possibly-cancelled`
 — the same operator confirm / autonomous own-page re-read as a vanished
-event — and declines copies not shipped yet (`decline_cancelled`, which
+event — and declines copies not shipped yet (autonomous; supervised flags them
+for the operator — `decline_cancelled`, which
 read-detail also uses when the event's own page says so). The marker comes
 off the title first (`strip_status`), so the listing still matches its row.
 A flag the listing holds isn't cleared by `flag_vanished` while the seed
@@ -212,25 +213,32 @@ def record_listing(conn: sqlite3.Connection, uid: str, quote: Optional[str],
                     "  cancel_note = ? WHERE event_uid = ? AND cancel_status IS NULL",
                     (iso_utc_now(), note[:1000], m["event_uid"])).rowcount:
                 out = "flagged"
-        elif decline_cancelled(conn, m["event_uid"], quote, f"{seed_name}'s listing",
-                               "listed-cancelled"):
-            out = out or "declined"
+        else:
+            out = decline_cancelled(conn, m["event_uid"], quote, f"{seed_name}'s listing",
+                                    "listed-cancelled") or out
     return out
 
 
 def decline_cancelled(conn: sqlite3.Connection, uid: str, quote: str, where: str,
-                      reason: str) -> bool:
-    """Decline an event not shipped yet because `where` says it is cancelled
-    or postponed (`quote`). In autonomous mode the drop is a recorded
-    decision. Caller commits."""
+                      reason: str) -> Optional[str]:
+    """An event not shipped yet that `where` says is cancelled or postponed
+    (`quote`). Autonomous: declined, a recorded decision ('declined').
+    Supervised: the operator declines — it is flagged `possibly-cancelled`
+    for the cancellations list ('flagged'), and a confirmed flag declines it
+    (apply_confirmed). Caller commits."""
     from engine import autonomy
-    if not event_state.decline(conn, uid, f'cancelled: {where} says "{quote}"',
-                               from_states=_PRE_SHIP):
-        return False
-    if autonomy.is_autonomous():
-        autonomy.record(conn, "event", uid, autonomy.Decision(
-            "drop", reason, {"quote": quote, "where": where}))
-    return True
+    note = f'cancelled: {where} says "{quote}"'
+    if not autonomy.is_autonomous():
+        return "flagged" if conn.execute(
+            "UPDATE events SET cancel_status = 'possibly-cancelled', cancel_flagged_at = ?, "
+            "  cancel_note = ? WHERE event_uid = ? AND cancel_status IS NULL "
+            f"AND state IN ({','.join('?' * len(_PRE_SHIP))})",
+            (iso_utc_now(), note[:1000], uid, *_PRE_SHIP)).rowcount else None
+    if not event_state.decline(conn, uid, note, from_states=_PRE_SHIP):
+        return None
+    autonomy.record(conn, "event", uid, autonomy.Decision(
+        "drop", reason, {"quote": quote, "where": where}))
+    return "declined"
 
 
 # --------------------------------------------------------------------------
@@ -319,6 +327,13 @@ def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> dict:
     from engine.live_lookup import is_not_found
     from engine.live_patch import apply_event_patch
     out = {"cancelled": 0, "failed": 0, "errors": []}
+    for row in _rows(conn, "SELECT * FROM events WHERE cancel_status = 'confirmed' "
+                           "AND townloops_slug IS NULL ORDER BY date_utc LIMIT ?", (limit,)):
+        # A copy flagged before it shipped: confirming it declines it locally.
+        event_state.decline(conn, row["event_uid"], row["cancel_note"] or "cancelled",
+                            from_states=_PRE_SHIP)
+        _set(conn, row["event_uid"], "cancelled", row["cancel_note"] or "cancelled before shipping")
+        out["cancelled"] += 1
     rows = _rows(conn, "SELECT * FROM events WHERE cancel_status = 'confirmed' "
                        "AND townloops_slug IS NOT NULL ORDER BY date_utc LIMIT ?", (limit,))
     for row in rows:
@@ -361,7 +376,7 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
     import json
     import os
     from datetime import timedelta
-    from engine import autonomy
+    from engine import autonomy, event_detail
     now = now or datetime.now(timezone.utc)
     out = {"checked": 0, "submitted": 0, "no_statement": 0, "errors": []}
     cutoff = (now - timedelta(hours=RECHECK_HOURS)).isoformat(timespec="seconds")
@@ -379,7 +394,7 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
         conn.commit()
         ok, page, err = fetch(row["source_url"])
         d = autonomy.cancellation_evidence(page if ok else None, row["title"] or row["name"],
-                                           own_page=not _is_listing(conn, row))
+                                           own_page=not event_detail.is_listing(conn, row))
         if d.verdict != "submit":
             out["no_statement"] += 1
             autonomy.record(conn, "cancellation", uid, d)
@@ -407,13 +422,6 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
              f"{d.evidence['quote'][:200]}")
         out["submitted"] += 1
     return out
-
-
-def _is_listing(conn: sqlite3.Connection, row: dict) -> bool:
-    """The event's source_url is its seed's listing of many events, not a
-    page of its own."""
-    from engine.event_detail import _canon, seed_urls
-    return _canon(row.get("source_url")) in seed_urls(conn, row)
 
 
 def _set(conn: sqlite3.Connection, uid: str, status: str, note: str) -> None:

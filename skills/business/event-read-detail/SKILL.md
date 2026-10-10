@@ -35,7 +35,8 @@ A page that itself says the event is cancelled or postponed (a status line,
 "this event has been cancelled", or a line naming the event — policy wording
 like "refunds if cancelled" never counts) ends the read before the Codex
 call: the event is declined with the page's sentence as the note
-(`detail-cancelled`) and never ships.
+(`detail-cancelled`) and never ships. Supervised: the event is flagged
+`possibly-cancelled` for the operator instead, and the read goes on.
 
 ## Budget
 
