@@ -8,6 +8,11 @@ in `submissions`).
               └─▶ gone   (deleted, or merged somewhere we can't find: listed
                           in the digest)
 
+A merge and a delete both 404. A change submission counts as merged when
+its target now shows any value it carried that the target didn't (recorded
+by event-ship on the event as `change_submission`); a cancellation, when the
+target shows the cancelled marking.
+
 An entity GET with no `status` field (TownLoops before the entity gate) is
 published. Outcomes are attributed to the event's seed and Series (and an
 entity's discovery source): seed trust is refreshed, a high rejection rate
@@ -130,10 +135,28 @@ def _change_landed(client, conn: sqlite3.Connection, sub: dict) -> bool:
     if sub.get("kind") == "cancellation":
         return (target.get("title") or "").lower().startswith("cancelled") \
             or "cancelled" in (target.get("tags") or [])
+    sent = _change_fields(conn, sub)
+    if sent:
+        # Merged if the target now shows any of the changed values — a
+        # moderator may merge only some of them.
+        from engine.live_patch import shows
+        return any(shows(target, f, v) for f, v in sent.items())
     row = conn.execute("SELECT date_utc FROM events WHERE event_uid = ?",
                        (sub.get("local_uid"),)).fetchone()
     mine, theirs = parse_instant(row[0]) if row else None, parse_instant(target.get("start_at"))
     return bool(mine and theirs and mine == theirs)
+
+
+def _change_fields(conn: sqlite3.Connection, sub: dict) -> dict:
+    """The values a change submission carried that its target didn't show
+    (event-ship records them on the event); {} for one recorded before that."""
+    row = conn.execute("SELECT extra_json FROM events WHERE event_uid = ?",
+                       (sub.get("local_uid"),)).fetchone()
+    try:
+        rec = (json.loads((row[0] if row else None) or "{}") or {}).get("change_submission") or {}
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+    return (rec.get("fields") or {}) if rec.get("pending_slug") == sub["slug"] else {}
 
 
 def _event_survivor(client, conn: sqlite3.Connection, sub: dict) -> Optional[str]:

@@ -19,9 +19,10 @@ waits (rc 75, the workqueue releases the claim without spending an attempt)
 while submissions are paused, the circuit is open or the pending cap is
 reached, and must come back `pending`. A live match TownLoops rejected means
 "don't submit" (the event is declined locally); a pending one is adopted
-and filled. A date/venue change to a published event is submitted as a
-pending event carrying its source_url, for the TownLoops merge flow, never
-PATCHed. Blank fields are first filled from the best other copy of the event
+and filled. A reconcile-staged change to a published value (date, venue or
+any other field) is submitted as a pending event carrying its source_url, for
+the TownLoops merge flow, never PATCHed; a change that only fills a blank live
+field is PATCHed live like any fill-blank. Blank fields are first filled from the best other copy of the event
 (engine/event_dedup.best_of_copies).
 """
 
@@ -299,21 +300,64 @@ def _decline_rejected(conn, event_uid: str, found) -> object:
 
 def _submit_change(client, conn, event: dict, meta: dict,
                    venue_slug: Optional[str]) -> Optional[str]:
-    """Autonomous: a source-side date/venue change to a live event goes to
-    the moderator as a pending event with the same source_url, for the
-    TownLoops merge flow — the published event is never PATCHed. Returns the
-    pending event's slug."""
+    """Autonomous: every source-side change event-reconcile staged for a live
+    event lands somewhere. A change to a value the live row already has
+    (date, venue, any other field) goes to the moderator as a pending event
+    with the same source_url, for the TownLoops merge flow — the published
+    event is never PATCHed with it. A change that only fills a blank live
+    field, and the accessibility-notes / ticket-line / `free` fills, are
+    PATCHed live and GET-verified like any fill-blank. Each outcome is a
+    recorded `change` decision. Returns the pending event's slug, else the
+    live slug."""
+    from engine.live_patch import apply_event_patch, shows
     changes = meta.get("changes") or {}
-    if not ({"start_at", "venue"} & changes.keys()):
-        return meta["live_slug"]
+    live_slug = meta["live_slug"]
+    uid = event["event_uid"]
+    try:
+        current = client.get("events", live_slug) or {}
+    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+        print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
     payload = _event_payload(event)
     venue_id = _resolve_venue_id(client, conn, event, venue_slug)
     if venue_id:
         payload["venue_id"] = venue_id
-    payload["slug"] = _slug_for("event", event["event_uid"])
-    client.context.update(kind="change", target_slug=meta["live_slug"],
-                          local_uid=event["event_uid"])
-    idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{event['event_uid'][:16]}"
+    submit: dict[str, Any] = {}
+    fill = _reconcile_fill_overrides(event, current)
+    submitted_keys, skipped = [], {}
+    for key in sorted(changes):
+        values = {f: v for f, v in _change_values(key, event, payload, current).items()
+                  if v is not None}
+        differ = {f: v for f, v in values.items() if not shows(current, f, v)}
+        if not differ:
+            skipped[key] = "already-live" if values else "no-source-value"
+        elif "venue_name" not in differ and all(_blank_on(current, f) for f in differ):
+            fill.update(differ)
+        else:
+            submit.update(differ)
+            submitted_keys.append(key)
+    for key, why in skipped.items():
+        autonomy.record(conn, "change", uid, autonomy.Decision(
+            "skip", why, {"change": key, "target_slug": live_slug}))
+    if fill:
+        try:
+            result = apply_event_patch(client, live_slug, fill, current=current)
+        except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+            print(f"patch event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+            return None
+        if result.mismatches:
+            _flag_for_review(conn, uid, live_slug, result.mismatches)
+            return None
+        autonomy.record(conn, "change", uid, autonomy.Decision(
+            "patch", "fill-blank-live", {"fields": sorted(fill), "target_slug": live_slug}))
+    if not submit:
+        return live_slug
+    payload.update(submit)
+    if "start_at" in submit and not submit.get("end_at"):
+        payload.pop("end_at", None)   # never an end that may fall before the new start
+    payload["slug"] = _slug_for("event", uid)
+    client.context.update(kind="change", target_slug=live_slug, local_uid=uid)
+    idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{uid[:16]}"
     try:
         result = client.create("events", payload, idempotency_key=idem)
     except autonomy.SubmissionsHeld:
@@ -321,16 +365,57 @@ def _submit_change(client, conn, event: dict, meta: dict,
     except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry
         from engine.live_lookup import is_conflict
         if not is_conflict(e):
-            record_activity(conn, _WORKER, "submit-change", event["event_uid"], ok=False,
-                            error=str(e)[:1000])
-            print(f"submit change for {meta['live_slug']} failed: {str(e)[:200]}", file=sys.stderr)
+            record_activity(conn, _WORKER, "submit-change", uid, ok=False, error=str(e)[:1000])
+            print(f"submit change for {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
             return None
         result = {"slug": payload["slug"]}
     slug = (result or {}).get("slug") or payload["slug"]
-    autonomy.record(conn, "change", event["event_uid"], autonomy.Decision(
+    _remember_change_submission(conn, uid, slug, live_slug, submit)
+    autonomy.record(conn, "change", uid, autonomy.Decision(
         "submit", "published-value-changed",
-        {"changes": sorted(changes), "target_slug": meta["live_slug"], "pending_slug": slug}))
+        {"changes": submitted_keys, "fields": sorted(submit), "target_slug": live_slug,
+         "pending_slug": slug}))
     return slug
+
+
+def _change_values(key: str, event: dict, payload: dict, current: dict) -> dict[str, Any]:
+    """The event fields a reconcile change sets, with the values to send:
+    a date change moves the end with it, a venue goes by live id (by name
+    only when the venue isn't live — the moderator's curate-venue flow),
+    any other change key is the payload field of that name."""
+    if key == "start_at":
+        return {"start_at": event["date_utc"],
+                "end_at": _patched_end(event.get("end_at_utc"), current.get("start_at"),
+                                       current.get("end_at"), event["date_utc"])}
+    if key == "venue":
+        if payload.get("venue_id"):
+            return {"venue_id": payload["venue_id"]}
+        return {"venue_name": payload["venue_name"]} if payload.get("venue_name") else {}
+    return {key: payload[key]} if payload.get(key) not in (None, "", []) else {}
+
+
+def _blank_on(live: dict, field: str) -> bool:
+    if field in ("venue_id", "venue_name"):
+        return not (live.get("venue_id") or live.get("venue_slug") or live.get("venue_name"))
+    return live.get(field) in (None, "", [])
+
+
+def _remember_change_submission(conn, event_uid: str, pending_slug: str, target_slug: str,
+                                fields: dict) -> None:
+    """What a change submission carried that the published event didn't show,
+    so the moderation poll can tell a merge (the target now shows any of it)
+    from a delete."""
+    import json
+    row = conn.execute("SELECT extra_json FROM events WHERE event_uid = ?",
+                       (event_uid,)).fetchone()
+    try:
+        extra = json.loads((row["extra_json"] if row else None) or "{}") or {}
+    except (json.JSONDecodeError, TypeError):
+        extra = {}
+    extra["change_submission"] = {"pending_slug": pending_slug, "target_slug": target_slug,
+                                  "fields": fields}
+    conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
+                 (json.dumps(extra, ensure_ascii=False), event_uid))
 
 
 def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Optional[str]:
@@ -533,25 +618,15 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     from engine.live_patch import apply_event_patch
     changes = meta.get("changes") or {}
     live_slug = meta["live_slug"]
-    notes = event.get("accessibility_notes")
-    line = _ticket_line(event)
-    if not ({"start_at", "venue"} & changes.keys()) and not (notes or line or event.get("price")):
+    if not ({"start_at", "venue"} & changes.keys()) and not (
+            event.get("accessibility_notes") or _ticket_line(event) or event.get("price")):
         return live_slug
     try:
         current = client.get("events", live_slug) or {}
     except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
         print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
         return None
-    overrides: dict[str, Any] = {}
-    if notes and not current.get("accessibility_notes"):
-        overrides["accessibility_notes"] = notes
-    described = event_tickets.with_ticket_line(
-        current.get("description") or event.get("description"), line)
-    if line and described != current.get("description"):
-        overrides["description"] = described
-    tags = event_tickets.live_tags(list(current.get("tags") or []), event.get("price"))
-    if tags != list(current.get("tags") or []):
-        overrides["tags"] = tags
+    overrides = _reconcile_fill_overrides(event, current)
     if "start_at" in changes:
         overrides["start_at"] = event["date_utc"]
         overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),
@@ -573,6 +648,25 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
         _flag_for_review(conn, event["event_uid"], live_slug, result.mismatches)
         return None
     return live_slug
+
+
+def _reconcile_fill_overrides(event: dict, current: dict) -> dict[str, Any]:
+    """The fills a reconcile-staged change brings to the live row: accessibility
+    notes only when it has none, the ticket line on top of its description,
+    `free` added to (or dropped from) its tags by the stated price."""
+    overrides: dict[str, Any] = {}
+    notes = event.get("accessibility_notes")
+    line = _ticket_line(event)
+    if notes and not current.get("accessibility_notes"):
+        overrides["accessibility_notes"] = notes
+    described = event_tickets.with_ticket_line(
+        current.get("description") or event.get("description"), line)
+    if line and described != current.get("description"):
+        overrides["description"] = described
+    tags = event_tickets.live_tags(list(current.get("tags") or []), event.get("price"))
+    if tags != list(current.get("tags") or []):
+        overrides["tags"] = tags
+    return overrides
 
 
 def _supersede_older_copies(conn, event_uid: str, live_slug: str) -> None:

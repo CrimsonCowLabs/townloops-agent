@@ -120,6 +120,115 @@ class TestMerges:
         assert row[0] == "jazz-live"
 
 
+JAZZ_URL = "https://arena.example/jazz"
+ARENA_VENUE = {"id": 6, "slug": "lake-tahoe-arena", "name": "Lake Tahoe Arena"}
+OLD_HALL = {"id": 5, "slug": "old-hall", "name": "Old Hall"}
+
+
+def stage_change(town, changes: dict, live: dict, **event) -> dict:
+    """A published event on TownLoops and event-reconcile's staged change to it.
+    The source's venue is a live venue the agent already mirrors locally."""
+    from engine.derive_helpers import mirror_live_entity
+    town.api.venues.update({"lake-tahoe-arena": ARENA_VENUE, "old-hall": OLD_HALL})
+    mirror_live_entity(town.conn, "venue", ARENA_VENUE)
+    start, _ = utc_times(soon(7), None)
+    town.api.events["jazz-live"] = {
+        "id": 50, "slug": "jazz-live", "title": "Jazz Night", "start_at": start,
+        "status": "published", "source_url": JAZZ_URL, "venue_id": None, "venue_slug": None,
+        "series_slug": None, "tags": [], "category_slugs": [], **live}
+    town.seed("Arena", ARENA)
+    ev = concert("Jazz Night", source_url=JAZZ_URL, **event)
+    town.listing(ARENA, [ev])
+    upsert_event(town.conn, "Arena", ev)
+    town.conn.execute("UPDATE events SET extra_json = ?",
+                      (json.dumps({"reconcile": {"kind": "changed", "live_slug": "jazz-live",
+                                                 "changes": changes}}),))
+    town.conn.commit()
+    return town.api.events["jazz-live"]
+
+
+def change_decisions(town) -> dict[str, dict]:
+    return {d["verdict"]: d for d in town.decisions("change")}
+
+
+class TestChanges:
+    """Every reconcile-staged change ends up somewhere: a change to a
+    published value goes to the moderator as a pending submission for the
+    merge flow, one that only fills a blank live field is PATCHed live."""
+
+    def test_a_venue_change_is_submitted_and_a_venue_only_merge_reads_as_merged(self, town):
+        stage_change(town, {"venue": {"live": "Old Hall", "live_slug": "old-hall",
+                                      "source": "Lake Tahoe Arena"}},
+                     {"venue_id": 5, "venue_slug": "old-hall"})
+        town.run()
+        assert town.api.patches() == []
+        [sent] = town.submitted_events()
+        assert sent["venue_id"] == 6 and sent["source_url"] == JAZZ_URL
+        assert town.api.events["jazz-live"]["venue_id"] == 5     # untouched until merged
+
+        town.api.merge("events", sent["slug"], into="jazz-live", fields=("venue_id", "venue_slug"))
+        out = town.poll()
+        assert (out["merged"], out["gone"]) == (1, 0)
+        row = town.conn.execute("SELECT townloops_slug FROM events WHERE status = 'active'"
+                                ).fetchone()
+        assert row[0] == "jazz-live"
+
+    def test_a_change_that_only_fills_a_blank_live_field_is_patched_not_submitted(self, town):
+        stage_change(town, {"venue": {"live": None, "live_slug": None,
+                                      "source": "Lake Tahoe Arena"}}, {})
+        town.run()
+        assert town.submitted_events() == []
+        assert town.api.events["jazz-live"]["venue_id"] == 6
+        d = change_decisions(town)["patch"]
+        assert d["reason"] == "fill-blank-live" and d["evidence"]["fields"] == ["venue_id"]
+        row = town.conn.execute("SELECT townloops_slug, state FROM events").fetchone()
+        assert tuple(row) == ("jazz-live", "shipped")
+
+    def test_other_changed_fields_are_submitted_too(self, town):
+        stage_change(town, {"title": {"live": "Jazz Nite", "source": "Jazz Night"}},
+                     {"title": "Jazz Nite"})
+        town.run()
+        assert town.api.patches() == []
+        [sent] = town.submitted_events()
+        assert sent["title"] == "Jazz Night"
+        d = change_decisions(town)["submit"]
+        assert d["evidence"]["changes"] == ["title"]
+
+        town.api.merge("events", sent["slug"], into="jazz-live", fields=("title",))
+        out = town.poll()
+        assert (out["merged"], out["gone"]) == (1, 0)
+
+    def test_a_date_change_submits_the_date_and_patches_live_blanks(self, town):
+        new = soon(9)
+        stage_change(town, {"start_at": {"live": "x", "source": utc_times(new, None)[0]}},
+                     {}, date=new)
+        town.conn.execute("UPDATE events SET price = 'Free', "
+                          "accessibility_notes = 'Wheelchair accessible.'")
+        town.conn.commit()
+        town.run()
+        [sent] = town.submitted_events()
+        assert sent["start_at"] == utc_times(new, None)[0]
+        live = town.api.events["jazz-live"]
+        assert live["start_at"] != sent["start_at"]                  # published value: merge only
+        assert live["tags"] == ["free"]                              # blanks: live directly
+        assert live["accessibility_notes"] == "Wheelchair accessible."
+        verdicts = change_decisions(town)
+        assert verdicts["submit"]["evidence"]["changes"] == ["start_at"]
+        assert "accessibility_notes" in verdicts["patch"]["evidence"]["fields"]
+
+    def test_a_deleted_venue_change_reads_as_gone_not_merged(self, town):
+        # The date never changed, so the target "showing our start time" is no
+        # evidence of a merge.
+        stage_change(town, {"venue": {"live": "Old Hall", "live_slug": "old-hall",
+                                      "source": "Lake Tahoe Arena"}},
+                     {"venue_id": 5, "venue_slug": "old-hall"})
+        town.run()
+        [sent] = town.submitted_events()
+        town.api.delete("events", sent["slug"])
+        out = town.poll()
+        assert (out["merged"], out["gone"]) == (0, 1)
+
+
 class TestCircuitBreaker:
     def test_a_high_rejection_rate_stops_submissions_and_alerts(self, town):
         town.set_profile(PROFILE, circuit_breaker={"reject_rate": 0.5, "min_outcomes": 4,
