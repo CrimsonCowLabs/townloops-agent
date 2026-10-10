@@ -123,6 +123,15 @@ class TestVenues:
         assert [c[1] for c in town.api.calls if c[0] == "POST"] == ["events"]
         assert town.submitted_events()[0]["venue_name"] == "Lake Tahoe Arena"
 
+    def test_a_held_entity_reads_as_held_not_failed(self, town):
+        town.seed("Arena", ARENA)
+        town.listing(ARENA, [concert("Jazz Night")])
+        town.run()
+        [row] = town.conn.execute("SELECT ok, detail, error FROM agent_activity "
+                                  "WHERE action = 'ship-venue'").fetchall()
+        assert row["ok"] == 1 and row["error"] is None
+        assert "held (entity-moderation-off)" in row["detail"]
+
     def test_with_the_entity_gate_the_venue_is_submitted_with_the_event(self, town):
         town.api.entity_status = "pending"
         town.set_profile(PROFILE, entity_moderation=True)

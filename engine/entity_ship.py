@@ -95,8 +95,10 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     created and since-enriched rows are then synced (engine/entity_sync):
     live values kept, live blanks filled, GET-verified. A row we shipped
     before that is gone from live is flagged for the operator, not
-    re-created."""
+    re-created. A create the submission gate holds (autonomous mode) raises
+    autonomy.SubmissionsHeld — a hold, not a failure; the caller decides."""
     from engine import entity_sync
+    from engine.autonomy import SubmissionsHeld
     from engine.live_lookup import find_live_entity, is_conflict
     table, resource = ENTITY_TABLES[kind]
     row = conn.execute(
@@ -131,6 +133,8 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
                 live = find_live_entity(client, resource, proposed_slug)
                 if live is None:
                     raise RuntimeError(f"409 on create but no live {kind} at {proposed_slug}") from e
+    except SubmissionsHeld:
+        raise
     except Exception as e:  # noqa: BLE001 — surfaced as a failed ship-<kind> activity
         print(f"  ship {kind} {entity_uid[:12]} failed: {str(e)[:120]}", file=sys.stderr)
         return None

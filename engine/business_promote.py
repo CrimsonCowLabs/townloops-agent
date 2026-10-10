@@ -209,7 +209,11 @@ def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
         if isinstance(client, autonomy.GatedClient):   # attribute the submission
             client.context = {"discovery_source": cand.get("source_signal") or "sweep",
                               "local_uid": entity_uid}
-        slug = entity_ship.ship_entity(client, conn, ekind, entity_uid)
+        try:
+            slug = entity_ship.ship_entity(client, conn, ekind, entity_uid)
+        except autonomy.SubmissionsHeld as e:   # stays approved, no attempt spent
+            out["held"] = e.reason
+            break
         if not slug:
             out["failed"] += 1
             _failed(conn, out, uid, f"{url}: ship failed — stays approved for the next run")

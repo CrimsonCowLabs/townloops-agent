@@ -799,7 +799,14 @@ def _ship(client, conn, event: dict) -> int:
     venue_slug: Optional[str] = None
     for kind in _SHIP_ORDER:
         for lk in by_kind[kind]:
-            slug = _ship_entity(client, conn, kind, lk["entity_uid"])
+            try:
+                slug = _ship_entity(client, conn, kind, lk["entity_uid"])
+            except autonomy.SubmissionsHeld as e:
+                # Not submitted now (e.g. no entity moderation yet): the event
+                # still ships, naming its venue; the entity waits.
+                record_activity(conn, _WORKER, f"ship-{kind}", event_uid,
+                                detail=f"{lk['entity_uid'][:12]} held ({e.reason})")
+                continue
             if slug and kind == "venue" and venue_slug is None:
                 venue_slug = slug
             record_activity(

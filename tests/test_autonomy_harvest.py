@@ -126,6 +126,19 @@ class TestOrganisations:
         discovery(town, "promote")
         assert posts(town, "businesses") == []
 
+    def test_a_held_promote_spends_no_attempt(self, town, harvest):
+        results, sites = harvest
+        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
+        discovery(town, "harvest")
+        town.set_profile(town.profile, entity_moderation=False)
+        out = json.loads(discovery(town, "promote"))
+        assert posts(town, "businesses") == []
+        assert out["held"] == "entity-moderation-off" and out["failed"] == 0
+        row = town.conn.execute("SELECT status, promote_attempts, promote_error "
+                                "FROM discovery_candidates").fetchone()
+        assert (row["status"], row["promote_attempts"], row["promote_error"]) == ("approved", 0, None)
+
     def test_harvest_is_inactive_in_supervised_mode(self, town, harvest):
         town.set_profile({**town.profile, "operating_mode": "supervised"})
         assert '"inactive": true' in discovery(town, "harvest")
