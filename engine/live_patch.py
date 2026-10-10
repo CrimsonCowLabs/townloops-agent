@@ -192,3 +192,13 @@ def apply_entity_patch(client, resource: str, slug: str, overrides: dict,
     client.update(resource, slug, body)
     after = client.get(resource, slug) or {}
     return PatchResult(body=body, mismatches=verify_entity(after, body))
+
+
+def shows(row: dict, field: str, value: Any) -> bool:
+    """Whether the live `row` already carries `value` for `field`. Sets
+    compare unordered, times as instants; `venue_name` is write-only on
+    events, so it shows only where the row names a matching venue."""
+    if field == "venue_name":
+        from engine.derive_helpers import names_match
+        return names_match(value, row.get("venue_name"))
+    return not verify_event({field: row.get(field)}, {field: value})

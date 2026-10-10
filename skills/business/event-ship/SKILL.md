@@ -201,10 +201,17 @@ The client is an `engine/autonomy.GatedClient`:
   (the TownLoops entity gate); until then the event ships with its venue's
   name only, for the moderator's curate-venue flow. Existing live entities
   are still adopted and filled.
-- **Changes to a published event** (event-reconcile's date/venue changes)
-  are submitted as a pending event carrying the same `source_url`, for the
-  TownLoops merge flow — never PATCHed. The moderation poll re-points the
-  local row once merged.
+- **Changes to a published event**: every change event-reconcile staged
+  lands somewhere. One to a value the live row already has (date, venue, any
+  other field) is submitted as a pending event carrying the same
+  `source_url`, for the TownLoops merge flow — never PATCHed. One that only
+  fills a blank live field (e.g. a venue on a venue-less event), plus the
+  accessibility-notes / ticket-line / `free` fills, is PATCHed live and
+  GET-verified. A venue with no live id goes in the submission by name. Each
+  outcome is a `change` decision (`submit`, `patch`, or `skip` when the live
+  row already shows it or the source has no value to send). What the submission carried is kept on the event
+  (`extra_json.change_submission`), and the moderation poll reads it as
+  merged (re-pointing the local row) once the target shows any of it.
 - Blank fields are first filled from the best other copy of the event
   (`event_dedup.best_of_copies`: primary source before syndicator, then seed
   trust).
