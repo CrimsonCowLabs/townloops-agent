@@ -27,7 +27,7 @@ from fastapi.templating import Jinja2Templates
 
 from dashboard import auth, chat, chat_db, db, db_v2, intent_handlers, skills
 
-from engine import db as _engine_db
+from engine import autonomy, db as _engine_db
 
 
 _HERMES_HOME = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes"))
@@ -76,6 +76,26 @@ app = FastAPI(title=f"townloops-agent dashboard — {_TOWN_SLUG}")
 app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
 
 
+def _refuse_autonomous_town(log) -> None:
+    """The dashboard is a supervised-mode surface. In an autonomous town the
+    agent makes the local calls and the TownLoops admin moderation queue is
+    the only human gate, so a dashboard offering local approvals must not
+    run. The mode is read fresh from town-profile.yaml at each start;
+    raising here makes uvicorn log the error and exit non-zero. The per-town
+    docker-compose.override.yml (bin/townloops-agent-add --autonomous) keeps
+    the service from being started at all; this is the backstop."""
+    if not autonomy.is_autonomous():
+        return
+    msg = ("refusing to start: this town runs in autonomous mode "
+           "(town-profile.yaml operating_mode: autonomous) — the TownLoops admin "
+           "moderation queue is its only review step and the local dashboard does "
+           "not run. Disable the service with "
+           "`services: {dashboard: {profiles: [\"supervised-dashboard\"]}}` in the "
+           "town's docker-compose.override.yml, or set operating_mode: supervised.")
+    log.error(msg)
+    raise RuntimeError(msg)
+
+
 @app.on_event("startup")
 def _dashboard_startup() -> None:
     """One-shot boot tasks:
@@ -88,9 +108,12 @@ def _dashboard_startup() -> None:
       doesn't leave "thinking…" bubbles frozen forever.
 
     Wrapped in try/except so a failed migration serves the rest of /v2
-    degraded rather than fail-closed."""
+    degraded rather than fail-closed.
+
+    Except the mode check, which fails closed: see `_refuse_autonomous_town`."""
     import logging
     log = logging.getLogger("dashboard.startup")
+    _refuse_autonomous_town(log)
     try:
         with _engine_db.connect() as conn:
             new_files = _engine_db.run_migrations(conn)

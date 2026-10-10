@@ -100,3 +100,69 @@ def test_template_gives_the_dashboard_the_codex_login(env, town):
     compose = (town / "docker-compose.yml").read_text()
     dashboard = compose[compose.index("\n  dashboard:"):]
     assert f"{env['HOME']}/.codex:/home/agent/.codex:rw" in dashboard
+
+
+# ---- autonomous towns: the dashboard service is kept from starting ---------
+
+OVERRIDE_LINE = 'services: {dashboard: {profiles: ["supervised-dashboard"]}}'
+
+
+def test_supervised_town_gets_no_override(env, tmp_path):
+    assert run(env, "testtown").returncode == 0
+    target = tmp_path / "towns" / "testtown"
+    assert not (target / "docker-compose.override.yml").exists()
+    assert "\noperating_mode: autonomous" not in (target / "town-profile.yaml").read_text()
+
+
+def test_autonomous_town_is_scaffolded_without_the_dashboard(env, tmp_path):
+    r = run(env, "testtown", "--autonomous")
+    assert r.returncode == 0, r.stderr
+    target = tmp_path / "towns" / "testtown"
+    assert OVERRIDE_LINE in (target / "docker-compose.override.yml").read_text()
+    import yaml
+    profile = yaml.safe_load((target / "town-profile.yaml").read_text())
+    assert profile["operating_mode"] == "autonomous"
+    assert "dashboard" in r.stdout and "autonomous" in r.stdout
+
+
+def test_rerender_of_autonomous_town_writes_a_missing_override(env, town):
+    profile = town / "town-profile.yaml"
+    profile.write_text(profile.read_text() + "\noperating_mode: autonomous\n")
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert OVERRIDE_LINE in (town / "docker-compose.override.yml").read_text()
+
+
+def test_rerender_keeps_an_override_that_already_disables_the_dashboard(env, town):
+    profile = town / "town-profile.yaml"
+    profile.write_text(profile.read_text() + "\noperating_mode: autonomous\n")
+    mine = ("services:\n  agent:\n    environment:\n      FOO: bar\n"
+            "  dashboard:\n    profiles: [\"supervised-dashboard\"]\n")
+    (town / "docker-compose.override.yml").write_text(mine)
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert (town / "docker-compose.override.yml").read_text() == mine
+
+
+def test_rerender_refuses_to_clobber_an_operator_override(env, town):
+    profile = town / "town-profile.yaml"
+    profile.write_text(profile.read_text() + "\noperating_mode: autonomous\n")
+    mine = "services:\n  agent:\n    environment:\n      FOO: bar\n"
+    (town / "docker-compose.override.yml").write_text(mine)
+    compose = town / "docker-compose.yml"
+    before = compose.read_text().replace("127.0.0.1:8090:8090", "0.0.0.0:8090:8090")
+    compose.write_text(before)
+
+    r = run(env, "testtown", "--rerender")
+
+    assert r.returncode != 0
+    assert "supervised-dashboard" in r.stderr
+    assert (town / "docker-compose.override.yml").read_text() == mine
+    assert compose.read_text() == before
+
+
+def test_autonomous_flag_on_rerender_is_refused(env, town):
+    """--rerender reads the mode from the town's own profile; the flag would
+    silently disagree with it."""
+    r = run(env, "testtown", "--rerender", "--autonomous")
+    assert r.returncode != 0 and "town-profile.yaml" in r.stderr
