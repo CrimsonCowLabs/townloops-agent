@@ -19,6 +19,11 @@ The read is recorded on the event (`detail_read_*`), so it happens once per
 source_url, not every tick; a page that is just the seed's listing (or no
 source_url) is never fetched. The page text is cached (`cached_page`) for
 the host/people derivation (engine/event_people).
+
+A page that itself says the event is cancelled or postponed
+(autonomy.cancellation_evidence) ends the read there, without the Codex
+call: the event is declined with the page's sentence as the reason
+(engine/event_cancel.decline_cancelled), so it never ships.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
+from engine import autonomy, event_cancel
 from engine.derive_helpers import iso_utc_now
 from engine.discovery import canonicalize_url
 from engine.event_extract import codex_exec, firecrawl_markdown
@@ -90,7 +96,7 @@ _MD_EMPHASIS = re.compile(r"[*_`]+")
 
 @dataclass
 class DetailResult:
-    status: str                  # read | no-detail-page | already-read | retry | failed
+    status: str                  # read | no-detail-page | already-read | retry | failed | cancelled
     fields: dict = field(default_factory=dict)
     error: str = ""
 
@@ -230,6 +236,14 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         ok, markdown, err = fetch(url)
     except TimeoutError as e:  # the Firecrawl token bucket stayed empty
         ok, markdown, err = False, "", str(e)
+    said = autonomy.cancellation_evidence(markdown, event.get("title") or event.get("name")) \
+        if ok else None
+    if said and said.verdict == "submit":
+        quote = said.evidence["quote"]
+        _record(conn, event, "read", url, {})
+        event_cancel.decline_cancelled(conn, event["event_uid"], quote, "its own page",
+                                       "page-states-cancelled")
+        return DetailResult("cancelled", fields={"cancelled": quote})
     if ok:
         ok, out, err = llm(build_detail_prompt(event, url, markdown), timeout_s=CODEX_TIMEOUT_S)
         parsed = parse_object(out) if ok else None

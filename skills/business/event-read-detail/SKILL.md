@@ -31,6 +31,12 @@ event-reconcile only see the seed's listing page; this reads the event's own
 - `detail_read_status` / `detail_read_url` / `detail_read_at` — the pass is
   recorded, so a page is read once per `source_url`, not every tick.
 
+A page that itself says the event is cancelled or postponed (a status line,
+"this event has been cancelled", or a line naming the event — policy wording
+like "refunds if cancelled" never counts) ends the read before the Codex
+call: the event is declined with the page's sentence as the note
+(`detail-cancelled`) and never ships.
+
 ## Budget
 
 One Firecrawl scrape + one Codex call per approved event. Skipped with no fetch

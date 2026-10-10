@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""event-cancellations — live events that vanished from their sources.
+"""event-cancellations — live events that vanished from their sources, or that
+their listing marks cancelled or postponed.
 Logic: engine/event_cancel.py (detection runs inside event-find).
 
 Subcommands:
