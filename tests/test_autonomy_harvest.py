@@ -101,6 +101,33 @@ class TestOrganisations:
             == "pending"
         assert {d["reason"] for d in town.decisions("candidate")} == {"verified-on-own-site"}
 
+    def test_a_merged_organisation_is_repointed_to_the_survivor_the_404_names(
+            self, town, harvest):
+        # The survivor's name differs, so only the 404's merged_into_slug finds it.
+        results, sites = harvest
+        town.api.tables["businesses"] = {
+            "nouveau": {"id": 9, "slug": "nouveau", "name": "Nouveau Cafe & Bakery",
+                        "website": "https://nouveau.example", "status": "published"}}
+        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
+        discovery(town, "harvest")
+        discovery(town, "promote", "--limit", "5")
+        [sent] = posts(town, "businesses")
+        town.api.merge("businesses", sent["slug"], into="nouveau", fields=("website",))
+        out = town.poll()
+        assert (out["merged"], out["gone"]) == (1, 0)
+        assert town.conn.execute("SELECT townloops_slug FROM businesses WHERE name = 'New Cafe'"
+                                 ).fetchone()[0] == "nouveau"
+
+    def test_entities_are_submitted_by_default(self, town, harvest):
+        results, sites = harvest
+        town.set_profile({k: v for k, v in town.profile.items() if k != "autonomy"})
+        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
+        discovery(town, "harvest")
+        discovery(town, "promote", "--limit", "5")
+        assert [p["name"] for p in posts(town, "businesses")] == ["New Cafe"]
+
     def test_a_rejected_organisation_is_not_resubmitted_under_a_new_url(self, town, harvest):
         results, sites = harvest
         results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]

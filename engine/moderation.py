@@ -14,7 +14,7 @@ by event-ship on the event as `change_submission`); a cancellation, when the
 target shows the cancelled marking.
 
 An entity GET with no `status` field (TownLoops before the entity gate) is
-published. Outcomes are attributed to the event's seed and Series (and an
+published; a merged entity's 404 names its survivor (`merged_into_slug`). Outcomes are attributed to the event's seed and Series (and an
 entity's discovery source): seed trust is refreshed, a high rejection rate
 opens the circuit (engine/autonomy.check_rejection_rate), and a rejected
 discovered organisation is remembered by name so it is never proposed again.
@@ -56,7 +56,7 @@ def poll(client, conn: sqlite3.Connection, s: autonomy.Settings, *, limit: int =
             if not is_not_found(e):
                 out["errors"].append(f"{sub['resource']}/{sub['slug']}: {str(e)[:200]}")
                 continue
-            outcome, survivor = _after_404(client, conn, sub)
+            outcome, survivor = _after_404(client, conn, sub, e)
         else:
             outcome = live.get("status") or ("published" if sub["resource"] != "events" else None)
             survivor = None
@@ -114,9 +114,11 @@ def _repoint_event(conn: sqlite3.Connection, sub: dict, survivor: str) -> None:
             "townloops_slug = ? AND event_uid != ? AND status != 'superseded'", (survivor, uid))
 
 
-def _after_404(client, conn: sqlite3.Connection, sub: dict) -> tuple[str, Optional[str]]:
+def _after_404(client, conn: sqlite3.Connection, sub: dict,
+               err: Exception) -> tuple[str, Optional[str]]:
     """A submission gone from TownLoops: merged into the record we can find
-    it folded into, else gone."""
+    it folded into, else gone. A merged entity's 404 names its survivor
+    (`merged_into_slug`, townloops ADR 0009); without one, it's looked up."""
     if sub["resource"] == "events":
         if sub.get("target_slug"):
             # Both a merge and a delete 404; only a target that now shows
@@ -125,7 +127,9 @@ def _after_404(client, conn: sqlite3.Connection, sub: dict) -> tuple[str, Option
                 else ("gone", None)
         survivor = _event_survivor(client, conn, sub)
     else:
-        survivor = _entity_survivor(client, conn, sub)
+        details = getattr(err, "details", None)
+        survivor = (details.get("merged_into_slug") if isinstance(details, dict) else None) \
+            or _entity_survivor(client, conn, sub)
     return ("merged", survivor) if survivor else ("gone", None)
 
 

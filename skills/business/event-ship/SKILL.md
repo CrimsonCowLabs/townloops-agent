@@ -197,8 +197,9 @@ The client is an `engine/autonomy.GatedClient`:
 - **Lookups count pending and rejected records**: a live match TownLoops
   rejected means "don't submit" (declined locally, `rejected-on-townloops`); a
   pending one is adopted and its blanks filled.
-- **New entities** are created only with `autonomy.entity_moderation: true`
-  (the TownLoops entity gate); until then the event ships with its venue's
+- **New entities** are submitted pending (the TownLoops entity gate);
+  approving the event publishes the pending venue and hosts it links to.
+  With `autonomy.entity_moderation: false` the event ships with its venue's
   name only, for the moderator's curate-venue flow, and the held entity is
   logged as a `ship-<kind>` activity reading `held (<reason>)`, not a
   failure. Existing live entities are still adopted and filled.

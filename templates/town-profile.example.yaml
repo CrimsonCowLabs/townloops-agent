@@ -98,10 +98,9 @@ discovery:
 # operating_mode: autonomous
 # autonomy:
 #   paused: false              # true stops submissions at once (collecting goes on)
-#   entity_moderation: false   # true once TownLoops moderates entities
-#                              # (CrimsonCowLabs/townloops#23) — until then new venues,
-#                              # hosts and organisations aren't submitted; events ship
-#                              # with the venue's name for the curate-venue flow
+#   entity_moderation: true    # new venues, hosts and organisations are submitted
+#                              # pending (TownLoops entity gate); false holds them and
+#                              # events ship with the venue's name for the curate-venue flow
 #   max_pending: 100           # cap on our submissions pending in TownLoops at once
 #   horizon_days: 120          # events further out are dropped
 #   circuit_breaker:           # stop submitting when the moderator rejects too much

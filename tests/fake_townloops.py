@@ -75,6 +75,7 @@ class FakeAPI:
         self.event_status = event_status
         self.entity_status = entity_status
         self.deleted: dict[tuple[str, str], dict] = {}
+        self.merged_into: dict[tuple[str, str], str] = {}
 
     def verify_town(self, *a, **k):
         return {"town_slug": "slt"}
@@ -84,7 +85,9 @@ class FakeAPI:
         table = self.tables.setdefault(resource, {})
         # Town-scoped like the server: another town's venue is a 404 here.
         if slug not in table or table[slug].get("town", "slt") != "slt":
-            raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found")
+            into = self.merged_into.get((resource, slug))
+            raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found",
+                                 {"merged_into_slug": into} if into else None)
         return copy.deepcopy(table[slug])
 
     def list(self, resource, **params):
@@ -212,12 +215,16 @@ class FakeAPI:
 
     def merge(self, resource, slug, into, fields=("start_at", "end_at", "venue_id", "venue_slug")):
         """Apply `fields` of pending `slug` onto published `into`, then
-        soft-delete `slug` (townloops `merge_event`)."""
+        soft-delete `slug` (townloops `merge_event`). A merged entity's 404
+        names the survivor (`merged_into_slug`, townloops ADR 0009); an
+        event's doesn't."""
         source = self.tables[resource][slug]
         for f in fields:
             if f in source:
                 self.tables[resource][into][f] = copy.deepcopy(source[f])
         self.delete(resource, slug)
+        if resource != "events":
+            self.merged_into[(resource, slug)] = into
 
     def delete(self, resource, slug):
         self.deleted[(resource, slug)] = self.tables[resource].pop(slug)

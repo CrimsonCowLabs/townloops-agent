@@ -228,8 +228,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   autonomous` (town-profile.yaml) moves every local gate into `engine/autonomy.py` and makes the
   TownLoops admin moderation queue the only human gate: creates go through `GatedClient` and
   must come back `pending` (a `published` answer opens the circuit and stops all submissions —
-  the town needs an `api_ingest` key without publish permission). New entities are submitted only
-  with `autonomy.entity_moderation: true` (needs CrimsonCowLabs/townloops#23). Changes to published
+  the town needs an `api_ingest` key without publish permission). New entities are submitted pending
+  too (TownLoops entity gate, townloops ADR 0009; `autonomy.entity_moderation: false` holds them, and
+  events then ship with the venue's name only). Changes to published
   values (date/venue, cancellations) are pending submissions for the merge flow, never PATCHes;
   fill-blank PATCHes still go live. Exit 75 (`workqueue.RC_DEFERRED`) from a workqueue skill = "not now" (claim released, no
   attempt). Only the operator closes the circuit (`autonomy resume`). Supervised-only proposers

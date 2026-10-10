@@ -137,7 +137,7 @@ again.
 
 In autonomous mode `harvest` (weekly cron `org-harvest-weekly`) sweeps and
 verifies every configured kind and approves verified candidates itself
-(`autonomy.judge_candidate` — only once `autonomy.entity_moderation` is on);
+(`autonomy.judge_candidate` — held while `autonomy.entity_moderation` is off);
 the `business-promote` cron then submits them through the gated client, so
 they land `pending` in the TownLoops moderation queue. `propose-*` answer
 `inactive`.

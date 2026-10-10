@@ -60,7 +60,7 @@ class Town:
         self.state = tmp_state_dir
         self.mp = monkeypatch
         self.conn = conn
-        self.api = api or FakeAPI(event_status="pending")
+        self.api = api or FakeAPI(event_status="pending", entity_status="pending")
         self.pages: dict[str, str] = {}
         self.extractions: dict[str, list[dict]] = {}
         self.judge: Callable[[str], str] = lambda prompt: "[]"

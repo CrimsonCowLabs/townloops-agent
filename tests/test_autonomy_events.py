@@ -116,7 +116,8 @@ class TestVenues:
         [d] = town.decisions("venue")
         assert d["reason"] == "ambiguous-live-venue"
 
-    def test_new_entities_wait_for_the_townloops_entity_gate(self, town):
+    def test_with_entity_moderation_off_new_entities_wait(self, town):
+        town.set_profile(PROFILE, entity_moderation=False)
         town.seed("Arena", ARENA)
         town.listing(ARENA, [concert("Jazz Night")])
         town.run()
@@ -124,6 +125,7 @@ class TestVenues:
         assert town.submitted_events()[0]["venue_name"] == "Lake Tahoe Arena"
 
     def test_a_held_entity_reads_as_held_not_failed(self, town):
+        town.set_profile(PROFILE, entity_moderation=False)
         town.seed("Arena", ARENA)
         town.listing(ARENA, [concert("Jazz Night")])
         town.run()
@@ -155,11 +157,12 @@ class TestTheGate:
         assert len(town.submitted_events()) == 1
 
     def test_the_pending_cap_is_respected(self, town):
-        town.set_profile(PROFILE, max_pending=2)
+        town.set_profile(PROFILE, max_pending=3)   # the venue + two events
         town.seed("Arena", ARENA)
         town.listing(ARENA, [concert(f"Show {i}", days=3 + i) for i in range(4)])
         town.run()
         town.drain(2)
+        assert [c[1] for c in town.api.calls if c[0] == "POST"].count("venues") == 1
         assert len(town.submitted_events()) == 2
         held = town.conn.execute("SELECT COUNT(*) FROM events WHERE state = 'entities-enriched'"
                                  ).fetchone()[0]

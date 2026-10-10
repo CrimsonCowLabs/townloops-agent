@@ -25,10 +25,10 @@ and nothing else is submitted (fail closed). Every create is recorded in
 `submissions`, which the moderation poll (engine/moderation.py) follows to
 its outcome.
 
-Entities (venues, hosts, people) are submitted only when the town profile
-says TownLoops moderates them (`autonomy.entity_moderation: true`, which
-needs the TownLoops entity gate, CrimsonCowLabs/townloops#23). Until then
-an autonomous event ships with its venue's name only and new entities wait.
+Entities (venues, hosts, people) are submitted pending too — TownLoops
+gates entity creates like events (townloops ADR 0009). The town profile can
+hold them (`autonomy.entity_moderation: false`); an autonomous event then
+ships with its venue's name only and new entities wait.
 """
 
 from __future__ import annotations
@@ -59,7 +59,7 @@ WORKER = "autonomy"
 class Settings:
     mode: str = SUPERVISED
     paused: bool = False
-    entity_moderation: bool = False
+    entity_moderation: bool = True
     max_pending: int = 100
     reject_rate: float = 0.5           # circuit breaker: rejected share of recent outcomes
     reject_window: int = 20            # … over this many recent outcomes
@@ -100,7 +100,7 @@ def settings(profile: Optional[dict] = None) -> Settings:
     return Settings(
         mode=AUTONOMOUS if profile.get("operating_mode") == AUTONOMOUS else SUPERVISED,
         paused=bool(a.get("paused")),
-        entity_moderation=bool(a.get("entity_moderation")),
+        entity_moderation=bool(a.get("entity_moderation", d.entity_moderation)),
         max_pending=num(a, "max_pending", d.max_pending),
         reject_rate=num(breaker, "reject_rate", d.reject_rate, float),
         reject_window=num(breaker, "window", d.reject_window),

@@ -17,7 +17,8 @@ outcome. Logic: `engine/moderation.py`.
 - **merged** — the GET 404s and the record was folded into a published one: a
   date/venue change or a cancellation into the event it targeted, otherwise the
   one published event on the same day with the same `source_url` (or title), or
-  the one published entity with the same name. The local row is re-pointed to
+  for an entity the survivor its 404 names (`merged_into_slug`), else the one
+  published entity with the same name. The local row is re-pointed to
   the survivor, so later enrichment goes to the right record.
 - **gone** — 404 and no survivor found: listed in the nightly digest.
 
