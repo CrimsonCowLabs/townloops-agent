@@ -247,3 +247,17 @@ the app container + its deploy live here, but **reverse-proxy/TLS/subdomain rout
 Caddyfile in `peak-to-crumble-web/`** — edit it there and run `./deploy.sh caddy`, never SSH-edit the
 VPS Caddyfile. The dashboard binds loopback (`127.0.0.1:8090`); front it with Caddy + TLS and set
 `DASHBOARD_COOKIE_SECURE=true`.
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues on CrimsonCowLabs/townloops-agent (via `gh`); `.scratch/cmo-port/` is legacy. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five-role vocabulary (needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `CONTEXT.md` + `docs/adr/` (created lazily). See `docs/agents/domain.md`.
