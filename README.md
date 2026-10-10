@@ -37,6 +37,8 @@ The LLM steps (`event-seed-discovery`, `event-find`) use **your ChatGPT account 
 
 Non-technical operators shouldn't need `docker exec`. The per-town compose ships a second service `dashboard` that exposes a web UI on **`http://127.0.0.1:8090`** (bound to loopback — front with nginx/Caddy + TLS for external access).
 
+The dashboard is for **supervised** towns only. An autonomous town (`operating_mode: autonomous` in `town-profile.yaml`) doesn't run it — the TownLoops admin moderation queue is its only review step. `bin/townloops-agent-add <slug> --autonomous` scaffolds such a town with a `docker-compose.override.yml` that keeps the service from starting (`services: {dashboard: {profiles: ["supervised-dashboard"]}}`), and the dashboard itself refuses to start (non-zero exit, logged reason) when the profile says autonomous.
+
 **First-run bootstrap** (order matters — the hash helper needs the image):
 
 ```bash

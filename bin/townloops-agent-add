@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # townloops-agent-add — scaffold a per-town townloops-agent instance.
 #
-# Usage: bin/townloops-agent-add <slug> [--target-dir DIR] [--rerender]
+# Usage: bin/townloops-agent-add <slug> [--target-dir DIR] [--autonomous | --rerender]
 #
 # Creates ~/townloops-agents/{slug}/ (or --target-dir/{slug}) with:
 #   docker-compose.yml    — hardened per-town compose (references the shared repo)
@@ -10,6 +10,12 @@
 #   cron/jobs.json        — bootstrap + steady-state cron entries
 #   cron/jobs.empty.json  — optional follower-mode override target
 #   state/                — empty; agent creates state/townloops.db + others on first tick
+#
+# --autonomous: scaffold the town in autonomous mode — town-profile.yaml gets
+# `operating_mode: autonomous` and docker-compose.override.yml puts the
+# dashboard service behind a profile no one enables (an autonomous town's
+# only review step is the TownLoops moderation queue; the dashboard also
+# refuses to start in that mode).
 #
 # Idempotent: refuses to overwrite existing files. Missing shared stacks
 # are reported as warnings — the docker compose up will fail with a clear
@@ -22,6 +28,10 @@
 # (hermes-home/auth.json) is there, and the host's Codex CLI login is there.
 # The old compose is kept as docker-compose.yml.bak-<time> and the diff is
 # printed — move any host-specific edits into docker-compose.override.yml.
+# If the town's town-profile.yaml says `operating_mode: autonomous`, it also
+# writes the dashboard-disabling docker-compose.override.yml when there is
+# none, and refuses (nothing changed) when the operator's own override
+# doesn't disable the dashboard — add the line it prints, then re-run.
 
 set -euo pipefail
 
@@ -29,9 +39,10 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 BASE_DIR="${TOWNLOOPS_AGENTS_ROOT:-$HOME/townloops-agents}"
 
 usage() {
-  echo "usage: $0 <slug> [--target-dir DIR] [--rerender]" >&2
+  echo "usage: $0 <slug> [--target-dir DIR] [--autonomous | --rerender]" >&2
   echo "  <slug>              lowercase alphanumeric + hyphens (matches TownLoops)" >&2
   echo "  --target-dir DIR    override BASE_DIR (default: \$HOME/townloops-agents)" >&2
+  echo "  --autonomous        scaffold in autonomous mode (no local dashboard)" >&2
   echo "  --rerender          re-render an existing town's docker-compose.yml" >&2
   exit 2
 }
@@ -42,12 +53,15 @@ fi
 
 SLUG=""
 RERENDER=0
+AUTONOMOUS=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --target-dir)
       BASE_DIR="$2"; shift 2 ;;
     --rerender)
       RERENDER=1; shift ;;
+    --autonomous)
+      AUTONOMOUS=1; shift ;;
     -h|--help)
       usage ;;
     -*)
@@ -61,6 +75,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$SLUG" ]]; then usage; fi
+if [[ "$RERENDER" == 1 && "$AUTONOMOUS" == 1 ]]; then
+  echo "--autonomous is for a new town; --rerender reads the mode from the town's town-profile.yaml (operating_mode)" >&2
+  exit 2
+fi
 if [[ ! "$SLUG" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
   echo "slug must be lowercase alphanumeric + hyphens (no leading/trailing hyphen)" >&2
   exit 2
@@ -70,6 +88,27 @@ TARGET="$BASE_DIR/$SLUG"
 TEMPLATES="$REPO/templates"
 # The compose template runs the agent as this uid ("user:" line).
 CONTAINER_UID="${TOWNLOOPS_CONTAINER_UID:-1000}"
+
+# An autonomous town doesn't run the local dashboard: its override puts the
+# service behind a compose profile no one enables.
+DASHBOARD_PROFILE="supervised-dashboard"
+DASHBOARD_OFF="services: {dashboard: {profiles: [\"$DASHBOARD_PROFILE\"]}}"
+
+is_autonomous_town() {  # town-profile.yaml says operating_mode: autonomous
+  grep -Eq "^operating_mode:[[:space:]]*[\"']?autonomous[\"']?[[:space:]]*(#.*)?$" \
+    "$1/town-profile.yaml" 2>/dev/null
+}
+
+write_dashboard_override() {  # a new override file only — never overwrites
+  cat > "$1/docker-compose.override.yml" <<EOF
+# Written by bin/townloops-agent-add: this town runs in autonomous mode
+# (town-profile.yaml operating_mode: autonomous), so the local dashboard
+# doesn't run — the TownLoops admin moderation queue is its only review step.
+# Add host-specific changes below; keep the dashboard profile while the town
+# is autonomous (the dashboard refuses to start in that mode anyway).
+$DASHBOARD_OFF
+EOF
+}
 
 if [[ "$RERENDER" == 1 ]]; then
   COMPOSE="$TARGET/docker-compose.yml"
@@ -96,6 +135,19 @@ if [[ "$RERENDER" == 1 ]]; then
     echo "    auth add openai-codex --type oauth --no-browser" >&2
     exit 6
   fi
+  OVERRIDE="$TARGET/docker-compose.override.yml"
+  WRITE_OVERRIDE=0
+  if is_autonomous_town "$TARGET"; then
+    if [[ ! -e "$OVERRIDE" ]]; then
+      WRITE_OVERRIDE=1
+    elif ! grep -q "$DASHBOARD_PROFILE" "$OVERRIDE"; then
+      echo "refusing to re-render: $TARGET is autonomous but its docker-compose.override.yml" >&2
+      echo "doesn't keep the dashboard from starting. Add this (merged into any existing" >&2
+      echo "services: key) to $OVERRIDE, then re-run:" >&2
+      echo "  $DASHBOARD_OFF" >&2
+      exit 9
+    fi
+  fi
   new="$(mktemp "$TARGET/.docker-compose.yml.XXXXXX")"
   trap 'rm -f "$new"' EXIT
   sed "s|{{SLUG}}|$SLUG|g" "$TEMPLATES/per-town-agent.docker-compose.yml.tmpl" > "$new"
@@ -104,6 +156,10 @@ if [[ "$RERENDER" == 1 ]]; then
   if [[ -z "$codex_dir" || ! -f "$codex_dir/auth.json" ]]; then
     echo "refusing to re-render: no Codex CLI login at ${codex_dir:-<unmounted>}/auth.json (mounted into both containers) — run \`codex login\` on the host" >&2
     exit 7
+  fi
+  if [[ "$WRITE_OVERRIDE" == 1 ]]; then
+    write_dashboard_override "$TARGET"
+    echo "wrote $OVERRIDE (autonomous town: dashboard disabled) — apply with: cd $TARGET && docker compose up -d --remove-orphans"
   fi
   if cmp -s "$new" "$COMPOSE"; then
     echo "$COMPOSE is up to date with the template"
@@ -147,6 +203,16 @@ render() {
 render "$TEMPLATES/per-town-agent.docker-compose.yml.tmpl" "$TARGET/docker-compose.yml"
 render "$TEMPLATES/env.example"                            "$TARGET/.env.example"
 render "$TEMPLATES/town-profile.example.yaml"              "$TARGET/town-profile.yaml"
+
+if [[ "$AUTONOMOUS" == 1 ]]; then
+  profile="$TARGET/town-profile.yaml"
+  if grep -q '^# operating_mode: autonomous$' "$profile"; then
+    sed -i 's/^# operating_mode: autonomous$/operating_mode: autonomous/' "$profile"
+  else
+    printf '\noperating_mode: autonomous\n' >> "$profile"
+  fi
+  write_dashboard_override "$TARGET"
+fi
 
 # Copy the .env template so operator can edit in-place; block-copy so the
 # real .env isn't populated with placeholders that ship secrets.
@@ -295,3 +361,12 @@ Next:
 
 Follower mode: mv cron/jobs.empty.json cron/jobs.json && docker compose restart agent
 EOF
+if [[ "$AUTONOMOUS" == 1 ]]; then
+  cat <<EOF
+
+Autonomous mode: town-profile.yaml has operating_mode: autonomous and
+docker-compose.override.yml keeps the dashboard from starting — the TownLoops
+admin moderation queue is the only review step. Give the town an api_ingest
+key WITHOUT publish permission (TOWNLOOPS_API_KEY in .env).
+EOF
+fi

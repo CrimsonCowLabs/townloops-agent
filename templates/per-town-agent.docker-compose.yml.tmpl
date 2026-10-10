@@ -9,9 +9,12 @@
 #   services: {dashboard: {ports: !override ["0.0.0.0:8090:8090"]}}
 # An autonomous town (town-profile.yaml `operating_mode: autonomous`) doesn't
 # run the dashboard — the TownLoops admin moderation queue is its only review
-# step. Put the dashboard behind a profile no one enables, in that town's
-# docker-compose.override.yml, then `docker compose up -d --remove-orphans`:
+# step. `bin/townloops-agent-add {slug} --autonomous` (and `--rerender` of an
+# autonomous town with no override yet) writes a docker-compose.override.yml
+# that puts the dashboard behind a profile no one enables; switching an
+# existing town, add it yourself, then `docker compose up -d --remove-orphans`:
 #   services: {dashboard: {profiles: ["supervised-dashboard"]}}
+# The dashboard also refuses to start (exits non-zero) in autonomous mode.
 #
 # Prerequisites (both from templates/_shared/):
 #   - firecrawl stack up (creates external network `firecrawl-shared-net`)
