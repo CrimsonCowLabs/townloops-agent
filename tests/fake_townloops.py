@@ -27,6 +27,14 @@ per-field merge where `None` leaves a field alone, an empty `name` is
 ignored, any other value — `""` included — is written, a `category_slug`
 not in `categories` (when given) clears the category, and a missing slug
 is a 404.
+
+Moderation (autonomous mode): `event_status` is the key's mode — events
+create as `published` (a key with `event.publish`, the default) or
+`pending` (an `api_ingest` key); `entity_status` does the same for entities
+(None = no `status` field, as before the TownLoops entity gate). An event
+list returns every status unless `status=` filters it, like the server.
+`approve` / `reject` / `merge` / `delete` are the moderator's side; a merged
+or deleted record GETs as a 404 and no longer lists.
 """
 
 from __future__ import annotations
@@ -50,7 +58,8 @@ class FakeAPI:
     town_slug = "slt"
 
     def __init__(self, events=None, venues=None, ignore=(), create_drops=(),
-                 entities=None, categories=None, series=None):
+                 entities=None, categories=None, series=None,
+                 event_status="published", entity_status=None):
         self.events = {e["slug"]: {"series_slug": None, "series_id": None, **copy.deepcopy(e)}
                        for e in (events or [])}
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
@@ -63,6 +72,9 @@ class FakeAPI:
         self.ignore = set(ignore)  # fields the "server" drops — forces a verify mismatch
         self.create_drops = set(create_drops)
         self.calls: list[tuple] = []
+        self.event_status = event_status
+        self.entity_status = entity_status
+        self.deleted: dict[tuple[str, str], dict] = {}
 
     def verify_town(self, *a, **k):
         return {"town_slug": "slt"}
@@ -110,11 +122,13 @@ class FakeAPI:
             raise TownloopsError(409, "slug_taken", f"slug {payload['slug']!r} taken")
         if resource != "events":
             row = {**copy.deepcopy(payload), "id": 1000 + len(table)}
+            if self.entity_status:
+                row["status"] = self.entity_status
             table[row["slug"]] = row
             return copy.deepcopy(row)
         row = {"id": len(self.events) + 1, "slug": payload["slug"], "town_slug": "slt",
                "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": [],
-               "status": "published", "series_slug": None, "series_id": None}
+               "status": self.event_status, "series_slug": None, "series_id": None}
         for k in EVENT_PATCH_FIELDS - {"venue_id", "venue_name"}:
             if k in payload and k not in self.create_drops:
                 row[k] = payload[k]
@@ -187,6 +201,26 @@ class FakeAPI:
                 v = None
             row[k] = v
         return copy.deepcopy(row)
+
+    # --- the moderator's side ------------------------------------------------
+
+    def approve(self, resource, slug):
+        self.tables[resource][slug]["status"] = "published"
+
+    def reject(self, resource, slug):
+        self.tables[resource][slug]["status"] = "rejected"
+
+    def merge(self, resource, slug, into, fields=("start_at", "end_at", "venue_id", "venue_slug")):
+        """Apply `fields` of pending `slug` onto published `into`, then
+        soft-delete `slug` (townloops `merge_event`)."""
+        source = self.tables[resource][slug]
+        for f in fields:
+            if f in source:
+                self.tables[resource][into][f] = copy.deepcopy(source[f])
+        self.delete(resource, slug)
+
+    def delete(self, resource, slug):
+        self.deleted[(resource, slug)] = self.tables[resource].pop(slug)
 
     def patches(self):
         return [c[3] for c in self.calls if c[0] == "PATCH"]

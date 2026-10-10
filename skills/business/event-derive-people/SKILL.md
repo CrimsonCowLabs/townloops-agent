@@ -8,16 +8,17 @@ chefs, workshop leaders) referenced in the event description or title.
 Inserts one shell row per person into `performers` or `creators` and
 links via `linked_events`.
 
-## v1: rule-based, LLM-free
+## How: the same quote-checked AI pass as event-derive-hosts
 
-For now this is a lightweight pass over event description:
-- If category is `music` and title matches "<Artist Name> at/live at/@ <Venue>",
-  extract artist as a `performers` row.
-- Otherwise NULL — advance and move on.
+`engine/event_people.py` asks Codex once per event (cached on the event) for
+named performers and creators. A name is kept only if it appears in the
+event's own text (title, description, detail page); the venue's and the
+host's names are never people. At most five. Each becomes a shell
+`performers` (`kind` 'unknown') or `creators` (`kind` 'other') row — or
+reuses a local row of the same name — linked by `linked_events`.
 
-Full LLM extraction ("read this description and list all named
-performers/creators") is deferred to v2 to keep Codex quota reserved
-for enrichment.
+Identity is **not** decided here: the `performer-research` batch walks the
+evidence ladder before a profile is attached (never inferred from a name).
 
 ## Contract
 
@@ -25,4 +26,5 @@ for enrichment.
 derive.py --event-uid <uid>
 ```
 
-Exit 0 always (NULL is legit). Non-zero only on DB errors.
+Exit 0 when people are linked or legitimately none; 1 to retry a failed AI
+call (on the last attempt: 0, no people); 2 when the event doesn't exist.

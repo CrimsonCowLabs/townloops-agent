@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 024).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 025).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -116,6 +116,17 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     the earliest occurrence represents the group; `SeriesDetails` = `GET /series/{slug}` once per run; `hub_url`
     only for an active Series with a `url`. The newsletter, nightly digest, upcoming audit and
     `operator-list-events` all group through it — new listings do too),
+    `autonomy.py` (the autonomy policy — the one place an operator's call is made by the agent:
+    `settings()` reads `operating_mode` + the `autonomy:` block fresh each call; event judgement
+    `judge_items` — deterministic checks, then one page-quote-checked LLM call per seed run;
+    seed trial/trust/role/retire; candidate, stuck-event, cancellation and Series-streak decisions;
+    every `Decision(verdict, reason, evidence)` logged to `agent_activity` worker `autonomy`;
+    supervised mode returns `await-operator`. `GatedClient` wraps creates: submission gate
+    (pause / circuit / pending cap → `SubmissionsHeld`) and the fail-closed `pending` check;
+    records `submissions`), `moderation.py` (the hourly poll: published / rejected / merged
+    (re-point) / gone, seed trust, rejection-rate breaker, remembered org rejections; the digest's
+    autonomous section), `event_people.py` (host + performers/creators from one quote-checked
+    Codex pass over the event's own text, cached on the event; derive-hosts/-people use it),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
     skill: days with no live event, per-day Series/one-off coverage, local events not live yet, sparse live metadata
     (one finding per Series), venues of upcoming events with no image; LIST/GET only).
@@ -202,6 +213,17 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   alert is held against the average it dropped from (`health_baseline`) so a lasting drop neither
   re-alerts nor clears itself. A recorded `feed_url` is evidence for the source-automation review,
   not a switch — event-find still scrapes the seed URL.
+- **Autonomous mode is a per-town switch; supervised stays the default.** `operating_mode:
+  autonomous` (town-profile.yaml) moves every local gate into `engine/autonomy.py` and makes the
+  TownLoops admin moderation queue the only human gate: creates go through `GatedClient` and
+  must come back `pending` (a `published` answer opens the circuit and stops all submissions —
+  the town needs an `api_ingest` key without publish permission). New entities are submitted only
+  with `autonomy.entity_moderation: true` (needs CrimsonCowLabs/townloops#23). Changes to published
+  values (date/venue, cancellations) are pending submissions for the merge flow, never PATCHes;
+  fill-blank PATCHes still go live. Exit 75 from a workqueue skill = "not now" (claim released, no
+  attempt). Only the operator closes the circuit (`autonomy resume`). Supervised-only proposers
+  answer `inactive`. Gate code paths on `autonomy.settings()` / `is_autonomous()` — never cache it.
+  Tests drive whole towns in-process through `tests/autonomy_town.py`.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
   `--yes-really-send`. Sunday cron only *composes* a draft. Never wire auto-push.
 - **`SPONSORS_ENABLED=false` is the safe default** — never flip it in a template. Money placements are
@@ -235,7 +257,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   operator's Promote button or a confirmed `promote_businesses` chat widget flips `verified` → `approved`
   (no CLI flag can), and the `business-promote` cron ships only `approved` rows — live re-check, local
   business, enrich, then `engine/entity_ship.ship_entity` (event-ship's entity path) → `promoted`. Operator
-  declines are remembered by name. See `docs/business-discovery-handoff.md`.
+  declines are remembered by name. See `docs/business-discovery-handoff.md`. It also covers
+  community groups and non-profits (`--kind`; non-profits ship as communities, `kind`
+  'nonprofit'), and in autonomous mode `harvest` approves verified candidates itself.
   The CMO's stranded candidates and research drafts come in once via `scripts/import_cmo.py`
   (`engine/cmo_import.py`): candidates and business drafts as `verified` candidates
   (`source_signal` `cmo-import:…`), other drafts as `needs-review` entities in `performers.py review`.

@@ -118,6 +118,38 @@ def unstuck(conn: sqlite3.Connection, event_uid: str) -> str | None:
     return restored
 
 
+def approve(conn: sqlite3.Connection, event_uid: str, note: str | None = None) -> bool:
+    """Approve a pending event the way the dashboard does: state `approved`
+    and the first workqueue action enqueued. False when it isn't pending any
+    more (another worker or the operator decided first)."""
+    from engine import workqueue
+    now = iso_utc_now()
+    cur = conn.execute(
+        "UPDATE events SET approval_status = 'approved', approval_note = ?, approval_at = ?, "
+        "  state = 'approved', state_updated_at = ? "
+        "WHERE event_uid = ? AND approval_status = 'pending' AND state = 'metadata-extracted'",
+        (note, now, now, event_uid))
+    if cur.rowcount:
+        workqueue.enqueue(conn, event_uid, next_action_for("approved"))
+    return cur.rowcount > 0
+
+
+def decline(conn: sqlite3.Connection, event_uid: str, note: str | None = None,
+            from_states: tuple[str, ...] = ("metadata-extracted",)) -> bool:
+    """Decline an event that is still in one of `from_states` (default: still
+    pending). Its open queue rows are resolved."""
+    now = iso_utc_now()
+    marks = ", ".join("?" * len(from_states))
+    cur = conn.execute(
+        "UPDATE events SET approval_status = 'declined', approval_note = ?, approval_at = ?, "
+        f"  state = 'declined', state_updated_at = ? WHERE event_uid = ? AND state IN ({marks})",
+        (note, now, now, event_uid, *from_states))
+    if cur.rowcount:
+        conn.execute("UPDATE event_workqueue SET resolved_at = ? "
+                     "WHERE event_uid = ? AND resolved_at IS NULL", (now, event_uid))
+    return cur.rowcount > 0
+
+
 def event_awaiting_operator(conn: sqlite3.Connection) -> Iterable[dict]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(

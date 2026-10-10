@@ -25,6 +25,13 @@ removes the page), so a cancelled event is marked in place: the title gets a
 "Cancelled: " prefix and the `cancelled` tag is added, as a full-body PATCH
 (engine/live_patch) with GET verify. A PATCH that doesn't land parks the
 event as `apply-failed` for the operator instead of being retried.
+
+Autonomous mode (engine/autonomy) has no confirm step and never PATCHes a
+published title: `submit_evidenced` re-reads a flagged event's own page, and
+only when the page itself says it is cancelled or postponed submits a
+pending "Cancelled: " copy carrying its source_url, for the TownLoops merge
+flow (`cancel_status` 'submitted'). A flag with no such statement stays
+flagged and is listed in the nightly digest — never acted on.
 """
 
 from __future__ import annotations
@@ -46,6 +53,8 @@ ProposalKind = Literal["confirm", "dismiss"]
 _PROPOSAL_KINDS = {"confirm": "confirm_cancellations", "dismiss": "dismiss_cancellations"}
 # The operator has decided about the event: detection leaves it alone.
 _DECIDED = ("confirmed", "cancelled", "dismissed")
+# 'submitted': autonomous mode sent a pending cancellation to TownLoops.
+_DECIDED = (*_DECIDED, "submitted")
 # Waiting on the operator: what confirm/dismiss act on.
 _FLAGGED = ("possibly-cancelled", "apply-failed")
 
@@ -227,6 +236,64 @@ def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> dict:
         else:
             _set(conn, uid, "cancelled", f"marked cancelled on TownLoops ({slug})")
             out["cancelled"] += 1
+    return out
+
+
+RECHECK_HOURS = 24
+
+
+def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
+                     now: Optional[datetime] = None) -> dict:
+    """Autonomous: re-read up to `limit` flagged events' own pages (each at
+    most once per RECHECK_HOURS) and submit a cancellation for those whose
+    page explicitly says so. `client` is an autonomy.GatedClient; `fetch(url)
+    → (ok, markdown, err)`."""
+    import json
+    import os
+    from datetime import timedelta
+    from engine import autonomy
+    now = now or datetime.now(timezone.utc)
+    out = {"checked": 0, "submitted": 0, "no_statement": 0, "errors": []}
+    cutoff = (now - timedelta(hours=RECHECK_HOURS)).isoformat(timespec="seconds")
+    rows = [r for r in _rows(conn, "SELECT * FROM events WHERE cancel_status = 'possibly-cancelled' "
+                                   "AND townloops_slug IS NOT NULL AND COALESCE(source_url, '') != '' "
+                                   "ORDER BY date_utc")
+            if (autonomy.extra(r).get("autonomy") or {}).get("cancel_checked_at", "") < cutoff]
+    for row in rows[:limit]:
+        uid, slug = row["event_uid"], row["townloops_slug"]
+        out["checked"] += 1
+        extra = autonomy.extra(row)
+        extra["autonomy"] = {**(extra.get("autonomy") or {}), "cancel_checked_at": iso_utc_now()}
+        conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?", (json.dumps(extra), uid))
+        conn.commit()
+        ok, page, err = fetch(row["source_url"])
+        d = autonomy.cancellation_evidence(page if ok else None, row["title"] or row["name"])
+        if d.verdict != "submit":
+            out["no_statement"] += 1
+            autonomy.record(conn, "cancellation", uid, d)
+            conn.commit()
+            continue
+        try:
+            live = client.get("events", slug) or {}
+            payload = {k: live[k] for k in ("title", "description", "start_at", "end_at",
+                                            "venue_id", "source_url", "category_slugs", "tags",
+                                            "accessibility_notes") if live.get(k) is not None}
+            payload.update(cancelled_overrides(live))
+            payload["slug"] = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG', 'unknown')}-cancel-{uid[:12]}"
+            client.context.update(kind="cancellation", target_slug=slug, local_uid=uid)
+            created = client.create("events", payload,
+                                    idempotency_key=f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG', '?')}:cancel:event:{uid[:16]}")
+        except autonomy.SubmissionsHeld as e:
+            out["errors"].append(f"{slug}: held ({e.reason})")
+            break
+        except Exception as e:  # noqa: BLE001 — stays flagged; re-checked tomorrow
+            out["errors"].append(f"{slug}: {str(e)[:200]}")
+            continue
+        d.evidence.update(target_slug=slug, pending_slug=(created or {}).get("slug"))
+        autonomy.record(conn, "cancellation", uid, d)
+        _set(conn, uid, "submitted", f"cancellation submitted for merge into {slug}: "
+             f"{d.evidence['quote'][:200]}")
+        out["submitted"] += 1
     return out
 
 

@@ -72,3 +72,39 @@ discovery:
 #   min_runs: 3        # runs needed before a seed is judged
 #   drop_pct: 50       # % drop vs the average that alerts
 #   min_baseline: 4    # seeds averaging fewer events only alert on zero
+
+# Operating mode (engine/autonomy.py). `supervised` (the default) is the
+# operator-gated pipeline: seeds, events, business candidates and
+# cancellations wait for approval in the local dashboard. `autonomous`
+# makes those calls in the agent — judging every extracted event, trialling
+# and retiring seeds, harvesting organisations — and submits everything to
+# TownLoops through an `api_ingest` key with NO publish permission, so it
+# lands `pending` in the TownLoops admin moderation queue: that is the only
+# human gate. A create that comes back `published` stops all submissions
+# (fail closed). The dashboard isn't run for an autonomous town (see the
+# compose `dashboard` profile); the nightly Telegram digest and
+# `autonomy why <id>` are the operator surfaces. Read on every cron run.
+# operating_mode: autonomous
+# autonomy:
+#   paused: false              # true stops submissions at once (collecting goes on)
+#   entity_moderation: false   # true once TownLoops moderates entities
+#                              # (CrimsonCowLabs/townloops#23) — until then new venues,
+#                              # hosts and organisations aren't submitted; events ship
+#                              # with the venue's name for the curate-venue flow
+#   max_pending: 100           # cap on our submissions pending in TownLoops at once
+#   horizon_days: 120          # events further out are dropped
+#   circuit_breaker:           # stop submitting when the moderator rejects too much
+#     reject_rate: 0.5         #   rejected share of …
+#     window: 20               #   … the last N decided submissions,
+#     min_outcomes: 10         #   once at least this many are decided
+#   seed_retirement:
+#     min_runs: 4              # runs before a seed is judged at all
+#     dead_runs: 4             # consecutive failed/empty runs (or runs under a health
+#                              # alert) → look for a moved calendar, else retire
+#     reject_rate: 0.7         # rejected share of a seed's submissions → retire
+#     min_outcomes: 5
+#   series_reject_streak: 3    # a Series rejected this many times in a row is skipped
+#                              # until one of its submissions is published
+#   stuck_retries: 2           # backoff retries (1h, 2h) before a stuck event ships
+#                              # with what it has, or is dropped
+# zip_codes: ["96150"]         # optional: a listed ZIP outside these is out of town

@@ -65,6 +65,15 @@
       "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py probe --limit 4"
     },
     {
+      "id": "event-seed-review",
+      "name": "Daily seed review (autonomous mode only: dry-run proposed seeds, classify primary/syndicator, retire or relocate dead/rejected seeds; inactive in supervised mode)",
+      "schedule": "45 4 * * *",
+      "skills": ["event-seed-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py review"
+    },
+    {
       "id": "performer-research",
       "name": "Performer/creator research (evidence ladder; ≤3 per run, ambiguous identities → operator review)",
       "schedule": "*/20 * * * *",
@@ -75,12 +84,30 @@
     },
     {
       "id": "business-promote",
-      "name": "Promote operator-approved business candidates (live check → enrich → ship; ≤3 per run; nothing ships without operator approval)",
+      "name": "Promote approved organisation candidates (live check → enrich → ship; ≤3 per run; supervised: operator-approved only; autonomous: agent-approved, submitted pending)",
       "schedule": "*/15 * * * *",
       "skills": ["business-discovery"],
       "deliver": "local",
       "no_agent": true,
       "prompt": "python /home/agent/.hermes/scripts/business_promote.py --limit 3"
+    },
+    {
+      "id": "org-harvest-weekly",
+      "name": "Weekly organisation harvest (autonomous mode only: sweep + verify businesses, community groups, non-profits; approve verified; inactive in supervised mode)",
+      "schedule": "0 3 * * 3",
+      "skills": ["business-discovery"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/scripts/org_harvest.py"
+    },
+    {
+      "id": "moderation-feedback",
+      "name": "Hourly moderation feedback (autonomous mode: read back published/rejected/merged outcomes of submissions, update seed trust, circuit breaker; no-op with nothing pending)",
+      "schedule": "5 * * * *",
+      "skills": ["moderation-feedback"],
+      "deliver": "local",
+      "no_agent": true,
+      "prompt": "python /home/agent/.hermes/scripts/moderation_feedback.py"
     },
     {
       "id": "entity-live-sync",

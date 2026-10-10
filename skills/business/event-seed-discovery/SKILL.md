@@ -93,3 +93,27 @@ Before moving a `manual_only` seed to automated operation, run the source-automa
 
 Nothing is auto-approved. The operator reviews proposals in the dashboard.
 This is intentional: a bad seed can create substantial review noise.
+
+## Autonomous mode: `review` (daily cron `event-seed-review`)
+
+Inactive in supervised mode. In autonomous mode:
+
+- **Proposed seeds** (feeds first, `--trials` per run, default 2) are dry-run:
+  scrape, extract, and judge the listed events as event-find would. Approved
+  only when at least one is a real upcoming in-town event; an error page
+  (`trial-not-found`), bot wall (`trial-challenge`), empty page or empty
+  listing, or nothing usable is a rejection. A 2xx alone never approves.
+- **Role**: a seed whose events mostly link to other sites is a
+  `syndicator`; one whose events link to its own site is `primary`
+  (`source_role`, so dedup keeps the organiser's copy).
+- **Trust** (`trust_score`) is refreshed from moderator outcomes, health and
+  dedup losses.
+- **Retire**: most of its submissions rejected by the moderator
+  (`seed_retirement.reject_rate` over `min_outcomes`) → `retired`. Its last
+  `dead_runs` runs all failed or listed nothing, or a health alert persisted
+  that long → first look for a moved calendar (where the seed page redirects
+  now, then a same-site search), dry-running each candidate; one that passes
+  **replaces the URL** (`previous_url` kept), otherwise the seed is retired.
+- Retirement is a status change, never a delete: `restore --seed-id N`
+  (`--previous-url` to undo a move) brings it back; `retire --seed-id N`
+  retires one by hand.

@@ -3,11 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from typing import Callable, Iterable, NamedTuple, Optional
 
-from engine import workqueue
+from engine import autonomy, workqueue
 from engine.derive_helpers import (
     entity_richness, iso_utc_now, link_event_to_entity, load_event,
     load_live_venues, match_live_venue, mint_entity_uid, mirror_live_entity,
@@ -65,12 +66,14 @@ def _venue_name(event: dict) -> str:
 
 
 def derive_venue(conn, event: dict,
-                 live_venues: Callable[[], Iterable[dict]]) -> Outcome:
+                 live_venues: Callable[[], Iterable[dict]], autonomous: bool = False) -> Outcome:
     """Bind the event to a venue: a local row already on TownLoops, else a live
     TownLoops venue (mirrored locally so ship never POSTs it again), else an
     unshipped local row, else a new shell. A guess at a live venue parks the
     event for the operator — even over an unshipped local row, which would
-    ship as the same duplicate.
+    ship as the same duplicate. In autonomous mode the guess isn't parked:
+    the event goes on unbound and ships with the venue's name only, for the
+    TownLoops moderator's curate-venue flow.
 
     Only the live *venue* list is consulted — a business with the same name is
     not a venue and can't bind an event (CMO: cuppa-business-vs-venue)."""
@@ -83,6 +86,10 @@ def derive_venue(conn, event: dict,
             entity_uid = mirror_live_entity(conn, "venue", m.venue)
             return _bind(conn, event_uid, entity_uid, "venue-matched-live",
                          f"'{venue_name}' → live venue {m.venue['slug']}")
+        if m.kind == "review" and autonomous:
+            names = [f"{c['name']} ({c['slug']})" for c in m.candidates[:5]]
+            return Outcome("venue-name-only", None,
+                           json.dumps({"venue_name": venue_name, "candidates": names}))
         if m.kind == "review":
             workqueue.park(conn, event_uid)
             names = ", ".join(f"{c['name']} ({c['slug']})" for c in m.candidates[:5])
@@ -144,6 +151,11 @@ def main() -> int:
         print(f"derived venue: {preset} for event {event_uid[:12]} (preset)")
         return 0
 
+    if not _venue_name(event) and autonomy.is_autonomous():
+        # Nothing to bind: the event ships without a venue (null beats wrong).
+        record_activity(conn, _WORKER, "no-venue-signal", event_uid,
+                        detail="no venue_raw/venue_name/hosting_group — ships without a venue")
+        return 0
     if not _venue_name(event):
         record_activity(conn, _WORKER, "no-venue-signal", event_uid,
                         detail="no venue_raw/venue_name/hosting_group",
@@ -162,7 +174,7 @@ def main() -> int:
             raise LiveLookupError(str(e)[:300]) from e
 
     try:
-        out = derive_venue(conn, event, live_venues)
+        out = derive_venue(conn, event, live_venues, autonomous=autonomy.is_autonomous())
     except LiveLookupError as e:
         msg = f"live venue lookup failed: {e}"
         record_activity(conn, _WORKER, "venue-live-lookup", event_uid, ok=False, error=msg)
@@ -178,6 +190,12 @@ def main() -> int:
                         ok=False, error="ambiguous live venue match")
         print(out.detail, file=sys.stderr)
         return 1
+
+    if out.action == "venue-name-only":
+        autonomy.record(conn, "venue", event_uid, autonomy.Decision(
+            "name-only", "ambiguous-live-venue", json.loads(out.detail)))
+        print(f"venue ambiguous for event {event_uid[:12]} — ships with the name only")
+        return 0
 
     record_activity(conn, _WORKER, out.action, event_uid, detail=out.detail)
     print(f"derived venue: {out.entity_uid} for event {event_uid[:12]}")

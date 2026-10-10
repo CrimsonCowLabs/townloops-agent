@@ -17,7 +17,8 @@ it is on the page and is not a homepage or the seed's listing page.
 
 The read is recorded on the event (`detail_read_*`), so it happens once per
 source_url, not every tick; a page that is just the seed's listing (or no
-source_url) is never fetched.
+source_url) is never fetched. The page text is cached (`cached_page`) for
+the host/people derivation (engine/event_people).
 """
 
 from __future__ import annotations
@@ -199,6 +200,16 @@ def _record(conn, event: dict, status: str, url: Optional[str], fields: dict) ->
     )
 
 
+def needs_fetch(conn: sqlite3.Connection, event: dict) -> bool:
+    """Whether reading this event costs a scrape + an LLM call (it has a
+    detail page of its own not read yet) — the rest finish at once."""
+    canon = _canon(event.get("source_url"))
+    if not canon or canon in seed_urls(conn, event):
+        return False
+    return not (event.get("detail_read_status") == "read"
+                and event.get("detail_read_url") == event.get("source_url"))
+
+
 def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
                 fetch: Optional[Callable] = None, llm: Optional[Callable] = None) -> DetailResult:
     """Read `event`'s detail page once and store what it states. A failed
@@ -231,4 +242,36 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         return DetailResult("retry", error=err)
     fields = _extract(parsed, markdown, seeds)
     _record(conn, event, "read", url, fields)
+    cache_page(event["event_uid"], markdown)
     return DetailResult("read", fields=fields)
+
+
+def _cache_dir():
+    from engine import derive_helpers
+    return derive_helpers._DB_PATH.parent / "cache" / "detail"
+
+
+def cache_page(event_uid: str, markdown: str) -> None:
+    """Keep the page text for the later derive steps (engine/event_people)."""
+    try:
+        d = _cache_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        (d / f"{event_uid}.md").write_text(markdown[:PAGE_CHARS])
+    except OSError:
+        pass
+
+
+def drop_cached_page(event_uid: str) -> None:
+    """The event shipped: its derive steps are done with the page."""
+    try:
+        (_cache_dir() / f"{event_uid}.md").unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def cached_page(event_uid: str) -> Optional[str]:
+    """The event's detail page as read-detail saw it, if it read one."""
+    try:
+        return (_cache_dir() / f"{event_uid}.md").read_text()
+    except OSError:
+        return None

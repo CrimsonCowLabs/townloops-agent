@@ -51,6 +51,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     p.add_argument("--source", help="substring match on discovered_via")
     p.add_argument("--limit", type=int, default=500)
     args = p.parse_args(argv)
+    from engine import autonomy
+    if autonomy.is_autonomous():
+        print(json.dumps(autonomy.inactive_message("operator-bulk-approve"), indent=2))
+        return 0
 
     before_cmp: Optional[str] = None
     if args.before:

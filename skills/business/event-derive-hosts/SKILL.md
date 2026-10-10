@@ -9,18 +9,26 @@ Result may legitimately be NULL — per plan adversarial pass #18, "some
 events genuinely have no extractable host" (fireworks, general
 community events).
 
-## v1: rule-based, LLM-free
+## How: one quote-checked AI pass (`engine/event_people.py`)
 
-For now this is a light rule-based pass:
-- If the event title contains recognizable community/civic keywords
-  (committee, council, board, church, library, foundation), create a
-  shell `communities` row named after the title (trimmed of the
-  meeting-noise suffix).
-- Otherwise leave `derived_host_uid` NULL and advance the state anyway.
+The event's title and description, plus its own detail page when
+event-read-detail read one (cached), go to Codex once; the answer is cached
+on the event (`extra_json.people`) and shared with event-derive-people.
 
-The heavier LLM version (given title+description+venue, extract the
-hosting org and classify business-vs-community) is deferred to v2.
-NULL results are treated as success — the orchestrator advances state.
+- The host's **name must appear in that text** (normalized) — the LLM may
+  only copy, never infer.
+- Its **kind** — `business`, `community` (club, group, association, church…)
+  or `nonprofit` — is kept only with a quote from the text that supports it,
+  or when the name itself says so ("… Foundation", "… Club", "… LLC").
+- Unverifiable → NULL host; the state still advances.
+- A non-profit is a `communities` row with `kind` 'nonprofit' (TownLoops has
+  no separate non-profit resource); a community group gets `kind` 'group'.
+- An existing local row of the same name is reused; else a shell is made for
+  event-enrich-entities to research.
+- A host event-reconcile already resolved (`derived_host_uid`) is kept.
+
+A failed AI call exits 1 (the workqueue retries); on the last attempt it
+exits 0 with no host instead of parking the event.
 
 ## Contract
 
@@ -28,7 +36,8 @@ NULL results are treated as success — the orchestrator advances state.
 derive.py --event-uid <uid>
 ```
 
-Exit 0 always (NULL host is legit). Non-zero only on DB errors.
+Exit 0 when the host is resolved or legitimately NULL; 1 to retry a failed AI
+call; 2 when the event doesn't exist.
 
 ## References
 

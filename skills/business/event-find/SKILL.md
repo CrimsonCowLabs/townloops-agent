@@ -100,3 +100,28 @@ Rerunning a seed deduplicates on `event_uid`; already approved events are not cl
 - `references/manual-source-automation-review.md` — reusable audit checklist, adapter-selection hierarchy, failure semantics, and the 2026 South Lake Tahoe manual-seed findings.
 - `references/source-tricks.md` — Wix-wrapped Google Calendar, Tribe paging, EventCalendarApp, POINT, regional-feed filtering, short links, Facebook login walls.
 - `../operator-audit-upcoming/references/upcoming-audit-playbook.md` §Off-town or redirecting source_url, §Null or vague venues — extracted events whose source resolves out of town, or whose venue is a fragment, go to operator review.
+
+## Autonomous mode
+
+With `operating_mode: autonomous` (engine/autonomy.py) the run doesn't leave
+events for the operator: after each seed is scraped, every pending event of
+that seed is judged against that seed's page —
+
+1. deterministic checks first: no/unparseable start → `no-start-time`;
+   already started → `past`; past `autonomy.horizon_days` → `beyond-horizon`;
+   news/hours/closures/deadlines → `not-an-event`; a Series the moderator keeps
+   rejecting → `series-rejected-streak`; its predicted Series already has an
+   occurrence on that town-local date → `series-duplicate`; a known town venue,
+   or a location naming the town/an alias (or a listed ZIP) → in town; a ZIP
+   outside `zip_codes` → `out-of-town`.
+2. what those can't settle goes to one Codex call per seed run that may only
+   **quote the page** (is it an event? where is it?); a quote not on the page
+   doesn't count. Unsettled → `insufficient-evidence` (dropped). A failed call
+   defers the item to the next run (`ai-unavailable`).
+
+Approved events go the way a dashboard approval does (`approved` +
+`read-detail` queued), their blanks filled from the best other copy of the
+event; dropped ones are declined with `[autonomy] <reason>`. Every decision
+is recorded (`autonomy why <id>`). Pending events of seeds no longer approved
+are judged on what they carry. Switching a town to autonomous therefore
+picks up everything waiting at `metadata-extracted` on the next run.

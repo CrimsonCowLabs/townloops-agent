@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""event-find — scrape approved event_seeds, LLM-extract upcoming events, insert as pending."""
+"""event-find — scrape approved event_seeds, LLM-extract upcoming events, insert as pending.
+
+In autonomous mode (engine/autonomy.py) each seed's pending events are then
+judged against that seed's page — approved into the workqueue or declined
+with a reason — instead of waiting for the operator. Pending events of a
+seed that is no longer approved are judged without a page."""
 
 from __future__ import annotations
 
@@ -15,7 +20,7 @@ from typing import Optional
 
 import yaml
 
-from engine import event_cancel, event_dedup, inspection, source_health
+from engine import autonomy, event_cancel, event_dedup, event_state, inspection, source_health
 from engine import lock as _lock
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
     build_extraction_prompt as _build_extraction_prompt,
@@ -80,6 +85,90 @@ def _telegram(text: str) -> None:
     _telegram_notify(text)
 
 
+def _pending_rows(conn: sqlite3.Connection, where: str, args: tuple) -> list[dict]:
+    cur = conn.cursor()
+    cur.row_factory = sqlite3.Row
+    return [dict(r) for r in cur.execute(
+        "SELECT * FROM events WHERE state = 'metadata-extracted' AND approval_status = 'pending' "
+        f"AND status = 'active' AND {where} ORDER BY date_utc, event_uid", args).fetchall()]
+
+
+def _series_checks(conn: sqlite3.Connection, s: autonomy.Settings):
+    """(series_duplicate, series_blocked) for the judgement: an event whose
+    title predicts an active Series is a duplicate when that Series already
+    has an occurrence on its town-local date, and skipped while the
+    moderator keeps rejecting the Series. Without a TownLoops client (or
+    with no Series) only the rejection check runs, on what was recorded."""
+    from engine import series
+    from engine.event_extract import town_tz_name
+    from engine.derive_helpers import parse_instant
+    from engine.live_lookup import events_between
+    from dateutil import tz as _tz
+    from datetime import datetime as _dt, time as _time, timedelta as _td
+    client, snapshot = None, []
+    if os.environ.get("TOWNLOOPS_API_KEY") and os.environ.get("TOWNLOOPS_API_URL"):
+        try:
+            from engine.townloops_api import Client
+            client = Client()
+            snapshot = series.load_snapshot(client)
+        except Exception as e:  # noqa: BLE001 — ship's live lookup still catches it
+            print(json.dumps({"series_snapshot_error": str(e)[:200]}))
+            client, snapshot = None, series.load_snapshot()
+    by_key = {series.series_key(x.get("title")): x["slug"] for x in snapshot if x.get("slug")}
+    zone = _tz.gettz(town_tz_name())
+
+    def predicted(item: dict):
+        return by_key.get(series.series_key(item.get("title")))
+
+    def duplicate(item: dict):
+        slug = predicted(item)
+        start = parse_instant(item.get("date_utc"))
+        if not (client and slug and start) or item.get("live_slug"):
+            return None
+        lo = _dt.combine(start.astimezone(zone).date(), _time.min, tzinfo=zone)
+        for row in events_between(client, lo, lo + _td(days=1) - _td(seconds=1), series=slug):
+            return row.get("slug") or "?"
+        return None
+
+    def blocked(item: dict):
+        slug = predicted(item)
+        return slug if autonomy.series_blocked(conn, slug, s) else None
+
+    return duplicate, blocked
+
+
+def _apply_judgement(conn: sqlite3.Connection, rows: list[dict], decisions: list) -> dict:
+    counts = {"approved": 0, "dropped": 0, "deferred": 0}
+    for row, d in zip(rows, decisions):
+        uid = row["event_uid"]
+        if d is None:
+            autonomy.record(conn, "event", uid, autonomy.Decision(
+                "defer", "ai-unavailable", {"note": "judged again next run"}))
+            counts["deferred"] += 1
+        elif d.verdict == "approve":
+            if event_state.approve(conn, uid, f"[autonomy] {d.reason}"):
+                filled = event_dedup.best_of_copies(conn, row)
+                if filled:
+                    d.evidence["filled_from_copies"] = filled
+                autonomy.record(conn, "event", uid, d)
+                counts["approved"] += 1
+        elif event_state.decline(conn, uid, f"[autonomy] {d.reason}"):
+            autonomy.record(conn, "event", uid, d)
+            counts["dropped"] += 1
+    conn.commit()
+    return counts
+
+
+def _judge(conn, rows: list[dict], seen: set[str], page, ctx, llm) -> dict:
+    items = [autonomy.event_item(r, on_page=r["event_uid"] in seen) for r in rows]
+    for item, r in zip(items, rows):
+        # A reconcile-staged change to a live event is that event, not a
+        # same-date duplicate of it.
+        item["live_slug"] = r.get("townloops_slug") or (
+            (autonomy.extra(r).get("reconcile") or {}).get("live_slug"))
+    return _apply_judgement(conn, rows, autonomy.judge_items(items, page, ctx, llm))
+
+
 def cmd_find(args) -> int:
     # Closed on any exit: a crash mid-write must roll back here, not hold the
     # DB lock while main() records the failure for the dashboard.
@@ -103,6 +192,18 @@ def _find(conn: sqlite3.Connection, args) -> int:
     total_seeds = 0
     total_events_seen = 0
     health = source_health.settings_from(profile)
+    mode = autonomy.settings(profile)
+    judging = mode.autonomous and not args.dry_run
+    judged = {"approved": 0, "dropped": 0, "deferred": 0}
+    ctx = None
+    if judging:
+        duplicate, blocked = _series_checks(conn, mode)
+        ctx = autonomy.judge_context(conn, profile, mode, series_duplicate=duplicate,
+                                     series_blocked=blocked)
+
+    def judge(rows, seen=frozenset(), page=None):
+        for k, v in _judge(conn, rows, set(seen), page, ctx, _codex_exec).items():
+            judged[k] += v
     health_changes: list[dict] = []
 
     def record_run(seed: dict, started: str, ok: bool, fetched: int = 0, inserted: int = 0,
@@ -159,6 +260,8 @@ def _find(conn: sqlite3.Connection, args) -> int:
             if _EMPTY_LIST_RE.search(out or ""):   # the page really lists nothing
                 record_run(seed, started, True)
                 note = "no events listed"
+                if judging:
+                    judge(_pending_rows(conn, "source = ?", (f"seed:{seed_name}",)), (), md)
             else:   # extraction failed: says nothing about the source's health
                 record_run(seed, started, True, error="codex returned no parseable JSON",
                            judge=False)
@@ -198,6 +301,8 @@ def _find(conn: sqlite3.Connection, args) -> int:
             event_cancel.record_seed_run(conn, seed_name, seen_uids, listed_dates)
 
         record_run(seed, started, True, len(events), inserted, updated)
+        if judging:
+            judge(_pending_rows(conn, "source = ?", (f"seed:{seed_name}",)), seen_uids, md)
         ended = _iso_utc_now()
         conn.execute(
             "UPDATE event_seeds SET last_scraped_at = ?, last_event_count = ?, "
@@ -211,6 +316,12 @@ def _find(conn: sqlite3.Connection, args) -> int:
             "seed": seed_name, "events_seen": len(events),
             "inserted": inserted, "updated": updated, "skipped_malformed": skipped,
         }))
+
+    if judging and args.seed_id is None:
+        # Events no approved seed will list again (a retired or rejected
+        # seed's, say) are judged on what they carry.
+        judge(_pending_rows(conn, "source NOT IN (SELECT 'seed:' || name FROM event_seeds "
+                                  "WHERE status = 'approved')", ()))
 
     vanished = {"flagged": [], "cleared": []}
     if not args.dry_run:
@@ -239,6 +350,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
         "cancel_flags_cleared": len(vanished["cleared"]),
         "source_health": [f"{c['seed']}: {c['status']}" for c in health_changes],
         "dry_run": args.dry_run,
+        **({"autonomy": judged} if judging else {}),
     }
     print(json.dumps({"summary": summary}))
     inspection.record(

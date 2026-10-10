@@ -110,6 +110,49 @@ def shipped_sibling(conn: sqlite3.Connection, event: dict) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+# Fields one copy of an event can lend another (groups fill together).
+_LENDABLE = (("description",), ("end_at", "end_at_local", "end_at_utc"),
+             ("venue_name", "venue_raw"), ("location", "location_raw"), ("source_url",),
+             ("accessibility_notes",), ("price",), ("rsvp_url",), ("image_url",))
+
+
+def best_of_copies(conn: sqlite3.Connection, event: dict) -> dict[str, str]:
+    """Fill the event's blank fields from the other copies of it (same
+    `canonical_event_uid`): each from the most trusted copy that has it —
+    a primary source before a syndicator, then the seed's trust score, then
+    the earliest found. Only NULL/empty fields are written. Returns
+    {field: donor event_uid}."""
+    canonical = event.get("canonical_event_uid")
+    if not canonical:
+        return {}
+    copies = _rows(conn, "SELECT e.*, s.trust_score AS _trust FROM events e "
+                         "LEFT JOIN event_seeds s ON e.source = 'seed:' || s.name "
+                         "WHERE e.canonical_event_uid = ? AND e.event_uid != ? "
+                         "AND e.status IN ('active', 'duplicate')",
+                   (canonical, event["event_uid"]))
+    if not copies:
+        return {}
+    copies.sort(key=lambda c: (_role_of(conn, c) != PRIMARY, -(c.get("_trust") or 0),
+                               c["first_seen_at"], c["event_uid"]))
+    filled: dict[str, str] = {}
+    sets: dict[str, object] = {}
+    for group in _LENDABLE:
+        lead = group[0]
+        if event.get(lead) not in (None, ""):
+            continue
+        donor = next((c for c in copies if c.get(lead) not in (None, "")), None)
+        if donor is None:
+            continue
+        for col in group:
+            if event.get(col) in (None, "") and donor.get(col) not in (None, ""):
+                sets[col] = donor[col]
+        filled[lead] = donor["event_uid"]
+    if sets:
+        conn.execute(f"UPDATE events SET {', '.join(f'{k} = ?' for k in sets)} "
+                     "WHERE event_uid = ?", (*sets.values(), event["event_uid"]))
+    return filled
+
+
 def same_event(a: dict, b: dict) -> bool:
     """Same local day, matching titles, and no conflicting venue or time."""
     if not a.get("date_day") or a.get("date_day") != b.get("date_day"):

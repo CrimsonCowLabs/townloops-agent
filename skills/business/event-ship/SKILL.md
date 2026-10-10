@@ -183,3 +183,31 @@ When the town is finally registered on TownLoops, an operator-triggered
 ## References
 
 - `references/recurring-series.md` — Series-shared enrichment keyed on `series_slug`, without touching per-occurrence fields; idempotent title rules.
+
+## Autonomous mode
+
+The client is an `engine/autonomy.GatedClient`:
+
+- **Gate first**: paused, circuit open or `autonomy.max_pending` reached →
+  exit 75; the drainer releases the claim without spending an attempt (it
+  doesn't even claim `ship` while the gate is shut).
+- **Fail closed**: every create must come back `pending`. A `published`
+  answer means the key can publish — the circuit opens, the operator is
+  alerted, and nothing else is submitted.
+- **Lookups count pending and rejected records**: a live match TownLoops
+  rejected means "don't submit" (declined locally, `rejected-on-townloops`); a
+  pending one is adopted and its blanks filled.
+- **New entities** are created only with `autonomy.entity_moderation: true`
+  (the TownLoops entity gate); until then the event ships with its venue's
+  name only, for the moderator's curate-venue flow. Existing live entities
+  are still adopted and filled.
+- **Changes to a published event** (event-reconcile's date/venue changes)
+  are submitted as a pending event carrying the same `source_url`, for the
+  TownLoops merge flow — never PATCHed. The moderation poll re-points the
+  local row once merged.
+- Blank fields are first filled from the best other copy of the event
+  (`event_dedup.best_of_copies`: primary source before syndicator, then seed
+  trust).
+
+Every create is recorded in `submissions` (kind, seed, Series) for the
+moderation poll.

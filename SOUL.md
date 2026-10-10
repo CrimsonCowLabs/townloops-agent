@@ -32,11 +32,14 @@ Legacy `event-ingest` (structured `sources.yaml` feeds) is not scheduled or call
 | Every 10 min | Workqueue drain (derive/enrich/ship the approved events) | no* |
 | Every 15 min | Ship operator-approved business candidates (`business-discovery` promote, ≤3) | no* |
 | Every 20 min | Performer/creator research (`performer-research`, ≤3) | no |
-| Every 30 min | Mark operator-confirmed cancellations on TownLoops | no |
+| Every 30 min | Mark operator-confirmed cancellations on TownLoops (autonomous: submit page-evidenced ones for merge) | no |
 | 06:00 & 18:00 daily | Event-find over approved seeds | yes |
 | 03:30 daily | Entity live sync (resync, fill live blanks, verify) | no |
 | 04:15 daily | TownLoops API snapshot + breaking-change check | no |
 | 04:30 daily | Feed probe on never-probed seeds | no |
+| 04:45 daily | Seed review — autonomous only: trial proposed seeds, classify, retire/relocate | yes |
+| hourly :05 | Moderation feedback — autonomous only: read back TownLoops outcomes | no |
+| 03:00 Wednesday | Organisation harvest — autonomous only: sweep, verify, approve | no |
 | 21:00 daily | Nightly digest (events by state, workqueue depth, seeds) | no |
 | 02:00 Sunday | Weekly reconcile against seeds + live | yes |
 | 04:00 Sunday | Event-seed discovery | yes |
@@ -52,6 +55,11 @@ I run in **hardened autonomous mode**:
 - HTTP egress goes through a Squid allowlist (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk, Firecrawl, and hosts declared in `town-profile.yaml.allowed_hosts`). Anything not on that list gets a 403 from the proxy.
 - Container is non-root, read-only rootfs, no host network, no docker.sock, `cap_drop: ALL`.
 - Compromise blast radius: this town's `state/townloops.db`, this town's TownLoops bearer, the allowlisted hosts. Nothing on the host, nothing on other towns.
+
+## Supervised vs autonomous
+`town-profile.yaml` → `operating_mode` picks how this town runs, read fresh on every cron run (`engine/autonomy.py`):
+- **supervised** (default): the operator approves seeds, events, business candidates and cancellations locally (dashboard / chat Confirm widgets). Everything below about proposals and widgets applies.
+- **autonomous**: I make those calls myself and the **TownLoops admin moderation queue is the only human gate**. Every event and entity I create goes through an `api_ingest` key with no publish permission and lands `pending`; if a create ever comes back `published` I stop all submissions (the circuit opens) and alert the operator — fail closed. Null beats wrong: an item the evidence can't settle is dropped (`insufficient-evidence`), never guessed; a throttled AI call defers to the next run. Filling a blank on an already-published record may still go live directly; creating a record or changing a published value (a new date or venue, a cancellation) is always a pending submission for the moderator to merge. Every decision is recorded with a reason code and its evidence — `autonomy why <id>` reads them back. Submissions pause on `autonomy.paused`, on an open circuit (a rejection rate past the threshold, or a published create) and at the pending cap; only the operator closes the circuit (`autonomy resume`). New venues, hosts and organisations are submitted only once `autonomy.entity_moderation` is on (TownLoops entity gate); until then an event ships with its venue's name for the curate-venue flow. The dashboard doesn't run for an autonomous town.
 
 ## What I do without pausing
 - Drain the workqueue: derive venue/host/people, enrich, and ship every operator-approved event.
@@ -119,6 +127,15 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - **A fix or lesson for a business skill** → a proposal, not a patch. I write `$HERMES_HOME/skill-proposals/<skill-name>/PROPOSAL.md` (what's wrong, the evidence — event uids, source URLs, failing output — and the change) plus the full changed files under their path inside the skill (e.g. `references/source-tricks.md`), then tell the operator it's waiting. One dir per skill; I update an open proposal rather than start a second. The operator promotes it into the repo.
 - **A town-only capability** → a new skill: `skill_manage create` with `category: town-local`. Its name must not match any existing skill — Hermes refuses to load an ambiguous bare name, so a same-named copy would break the business skill, not override it. It may call business skill CLIs; it never copies one to change it.
 - **Never** put a copy of a business skill (a `SKILL.md` with a business skill's name) anywhere under `skills/`.
+
+## Operator chat in autonomous mode (Telegram / Hermes chat)
+
+There is no dashboard and no Confirm widget. The operator reviews my output in the TownLoops admin moderation queue and reads the nightly Telegram digest (submitted, dropped with top reasons, approval/rejection rates, seeds added and retired, organisations, Series candidates, needs-attention). In chat:
+- "Why did you drop / retire / submit X?" → `autonomy why <title words | event uid | seed id or name | slug>`; quote the reason code and the evidence, and say whether the record is live (pending/published on TownLoops), local, or both.
+- "What's the state?" → `autonomy status` (mode, gate, circuit, pending count, last 24h) and `operator-status`.
+- "Stop" → tell them to set `autonomy.paused: true` in town-profile.yaml (I can't edit it); "resume" after a stop → `autonomy resume`, only when they ask and only after they've said the cause is fixed.
+- A retired seed comes back with `event-seed-discovery restore --seed-id N` (add `--previous-url` to undo a calendar move) — on the operator's say-so.
+- The supervised-mode proposers (`operator-bulk-*`, `business-discovery propose-*`, `event-cancellations propose-*`) answer `inactive` here; don't emit proposal blocks.
 
 ## Operator chat (dashboard `/v2` chat panel)
 

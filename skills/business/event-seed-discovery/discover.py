@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-"""event-seed-discovery — LLM proposes seed source URLs; HEAD-verified; inserted as proposed."""
+"""event-seed-discovery — LLM proposes seed source URLs; HEAD-verified; inserted as proposed.
+
+Autonomous mode adds `review` (engine/autonomy): proposed seeds are dry-run
+and approved only when the run yields at least one real upcoming in-town
+event (an error, challenge or empty page fails), seeds with a feed first;
+approved seeds are classified primary/syndicator from their events, their
+trust refreshed, and a seed the moderator mostly rejects — or one dead for
+several runs whose calendar can't be found again on its own site — is
+retired (reversible: `restore`). A moved calendar replaces the seed URL."""
 
 from __future__ import annotations
 
@@ -18,7 +26,11 @@ from urllib.parse import urlparse
 
 import yaml
 
-from engine import event_dedup, feed_probe, inspection, source_health
+from engine import autonomy, event_dedup, feed_probe, inspection, source_health
+from engine.event_extract import (
+    build_extraction_prompt, firecrawl_markdown as _trial_fetch,
+    parse_json_array as _parse_events, utc_times,
+)
 
 
 VALID_KINDS = {"chamber", "government", "tourism", "library",
@@ -296,7 +308,7 @@ def cmd_probe(args) -> int:
     before ones that were unreachable last time; `--limit` caps the run."""
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
-    q = "SELECT seed_id, name, url FROM event_seeds WHERE status != 'rejected'"
+    q = "SELECT seed_id, name, url FROM event_seeds WHERE status NOT IN ('rejected', 'retired')"
     params: list = []
     if args.seed_id is not None:
         q += " AND seed_id = ?"
@@ -383,6 +395,180 @@ def cmd_health(args) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# Autonomous review
+# --------------------------------------------------------------------------
+
+def _site_search(query: str) -> list[dict]:
+    from engine.discovery import firecrawl_search
+    return firecrawl_search(query, limit=5)
+
+
+def _set_status(conn, seed: dict, status: str, d: "autonomy.Decision") -> None:
+    conn.execute("UPDATE event_seeds SET status = ?, status_note = ?, status_changed_at = ? "
+                 "WHERE seed_id = ?", (status, f"[autonomy] {d.reason}", _iso_utc_now(),
+                                       seed["seed_id"]))
+    autonomy.record(conn, "seed", f"seed:{seed['name']}", d)
+    conn.commit()
+
+
+def _trial(conn, profile: dict, mode, name: str, url: str) -> "autonomy.Decision":
+    """Dry-run one seed URL: scrape, extract, judge what it lists."""
+    ok, md, err = _trial_fetch(url)
+    if not ok:
+        return autonomy.Decision("reject", "trial-unreachable", {"url": url, "error": err[:200]})
+    failure = autonomy.page_failure(md)
+    if failure:
+        return autonomy.judge_trial([], [], failure)
+    ok, out, err = _codex_exec(build_extraction_prompt(profile, name, url, md))
+    if not ok:
+        return autonomy.Decision("defer", "ai-unavailable", {"url": url})
+    items = []
+    for e in _parse_events(out):
+        if not (isinstance(e, dict) and e.get("title") and e.get("date")):
+            continue
+        start, end = utc_times(e.get("date"), e.get("end_at"))
+        items.append({"title": e["title"], "date": e["date"], "date_utc": start,
+                      "end_at_utc": end, "venue": e.get("venue"), "location": e.get("location"),
+                      "source_url": e.get("source_url")})
+    if not items:
+        return autonomy.judge_trial([], [], "empty-listing")
+    ctx = autonomy.judge_context(conn, profile, mode)
+    d = autonomy.judge_trial(items, autonomy.judge_items(items, md, ctx, _codex_exec), None)
+    d.evidence["url"] = url
+    return d
+
+
+def _find_moved(conn, profile: dict, mode, seed: dict) -> tuple[Optional[str], list[str]]:
+    """A working calendar URL for a dead seed on its own site: where the seed
+    page now redirects, else what a same-site search finds. Each candidate
+    must pass the same trial as a proposed seed."""
+    tried: list[str] = []
+    candidates: list[str] = []
+    ok, code, html, final_url = _scrape_page(seed["url"])
+    if ok:
+        _record_feed(conn, seed["url"], html, final_url)
+        if final_url and final_url.rstrip("/") != seed["url"].rstrip("/"):
+            candidates.append(final_url)
+    host = (urlparse(seed["url"]).hostname or "").lower()
+    if host:
+        for r in _site_search(f"site:{host.removeprefix('www.')} events calendar"):
+            u = (r.get("url") or "").strip()
+            if u and (urlparse(u).hostname or "").lower().removeprefix("www.") == \
+                    host.removeprefix("www.") and u.rstrip("/") != seed["url"].rstrip("/"):
+                candidates.append(u)
+    for url in list(dict.fromkeys(candidates))[:3]:
+        tried.append(url)
+        if conn.execute("SELECT 1 FROM event_seeds WHERE url = ? AND seed_id != ?",
+                        (url, seed["seed_id"])).fetchone():
+            continue
+        if _trial(conn, profile, mode, seed["name"], url).verdict == "approve":
+            return url, tried
+    return None, tried
+
+
+def cmd_review(args) -> int:
+    profile = _load_town_profile()
+    mode = autonomy.settings(profile)
+    if not mode.autonomous:
+        print(json.dumps(autonomy.inactive_message("event-seed-discovery review")))
+        return 0
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    out = {"trialed": 0, "approved": 0, "rejected": 0, "deferred": 0, "roles": 0,
+           "retired": 0, "relocated": 0}
+    proposed = [dict(r) for r in conn.execute(
+        "SELECT * FROM event_seeds WHERE status = 'proposed' "
+        "ORDER BY feed_url IS NULL, trial_at IS NOT NULL, trial_at, seed_id LIMIT ?",
+        (args.trials,))]
+    for seed in proposed:
+        out["trialed"] += 1
+        d = _trial(conn, profile, mode, seed["name"], seed["url"])
+        conn.execute("UPDATE event_seeds SET trial_at = ? WHERE seed_id = ?",
+                     (_iso_utc_now(), seed["seed_id"]))
+        if d.verdict == "approve":
+            _set_status(conn, seed, "approved", d)
+            out["approved"] += 1
+        elif d.verdict == "reject":
+            _set_status(conn, seed, "rejected", d)
+            out["rejected"] += 1
+        else:
+            autonomy.record(conn, "seed", f"seed:{seed['name']}", d)
+            out["deferred"] += 1
+        conn.commit()
+
+    autonomy.refresh_trust(conn)
+    for seed in [dict(r) for r in conn.execute("SELECT * FROM event_seeds WHERE status = 'approved'")]:
+        role = autonomy.classify_role(conn, seed)
+        if role.verdict in (event_dedup.PRIMARY, event_dedup.SYNDICATOR) \
+                and seed.get("source_role") != role.verdict:
+            conn.execute("UPDATE event_seeds SET source_role = ? WHERE seed_id = ?",
+                         (role.verdict, seed["seed_id"]))
+            autonomy.record(conn, "seed-role", f"seed:{seed['name']}", role)
+            out["roles"] += 1
+        d = autonomy.judge_seed(conn, seed, mode)
+        if d.verdict == "retire":
+            _set_status(conn, seed, "retired", d)
+            out["retired"] += 1
+        elif d.verdict == "check-moved" and out["relocated"] + out["retired"] < args.moves:
+            moved, tried = _find_moved(conn, profile, mode, seed)
+            if moved:
+                conn.execute(
+                    "UPDATE event_seeds SET previous_url = url, url = ?, status_note = ?, "
+                    "  status_changed_at = ?, health_status = NULL, health_note = NULL, "
+                    "  health_baseline = NULL, health_flagged_at = NULL, health_since = ? "
+                    "WHERE seed_id = ?",
+                    (moved, f"[autonomy] calendar moved from {seed['url']}", _iso_utc_now(),
+                     _iso_utc_now(), seed["seed_id"]))
+                autonomy.record(conn, "seed", f"seed:{seed['name']}", autonomy.Decision(
+                    "relocate", "calendar-moved", {**d.evidence, "from": seed["url"],
+                                                   "to": moved}))
+                conn.commit()
+                out["relocated"] += 1
+            else:
+                _set_status(conn, seed, "retired", autonomy.Decision(
+                    "retire", d.reason, {**d.evidence, "searched": tried}))
+                out["retired"] += 1
+    conn.commit()
+    conn.close()
+    inspection.record(worker="event-seed-discovery", action="skill-invoke", target="review",
+                      detail=json.dumps(out), ok=True)
+    print(json.dumps(out))
+    return 0
+
+
+def cmd_retire(args) -> int:
+    """Operator: retire a seed by hand (reversible with `restore`)."""
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM event_seeds WHERE seed_id = ?", (args.seed_id,)).fetchone()
+    if not row:
+        print(json.dumps({"error": f"no seed {args.seed_id}"}))
+        return 1
+    _set_status(conn, dict(row), "retired",
+                autonomy.Decision("retire", "operator", {"note": args.reason or ""}))
+    print(json.dumps({"seed_id": args.seed_id, "status": "retired"}))
+    return 0
+
+
+def cmd_restore(args) -> int:
+    """Undo a retirement (or a rejection): the seed is approved again, and
+    with --previous-url its URL from before a calendar move comes back."""
+    conn = sqlite3.connect(_DB_PATH)
+    conn.row_factory = sqlite3.Row
+    row = conn.execute("SELECT * FROM event_seeds WHERE seed_id = ?", (args.seed_id,)).fetchone()
+    if not row or row["status"] not in ("retired", "rejected") and not args.previous_url:
+        print(json.dumps({"error": f"seed {args.seed_id} is not retired or rejected"}))
+        return 1
+    if args.previous_url and row["previous_url"]:
+        conn.execute("UPDATE event_seeds SET url = previous_url, previous_url = url "
+                     "WHERE seed_id = ?", (args.seed_id,))
+    _set_status(conn, dict(row), "approved",
+                autonomy.Decision("restore", "operator", {"was": row["status"]}))
+    print(json.dumps({"seed_id": args.seed_id, "status": "approved"}))
+    return 0
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     p = argparse.ArgumentParser(prog="event-seed-discovery")
     sub = p.add_subparsers(dest="cmd")
@@ -405,6 +591,19 @@ def main(argv: Optional[list[str]] = None) -> int:
     h.add_argument("--ack", type=int, metavar="SEED_ID",
                    help="accept the seed's current event count as its new normal")
     h.set_defaults(func=cmd_health)
+    rv = sub.add_parser("review", help="autonomous: trial proposed seeds, classify, retire")
+    rv.add_argument("--trials", type=int, default=2, help="proposed seeds dry-run this run")
+    rv.add_argument("--moves", type=int, default=2, help="dead seeds searched for a moved calendar")
+    rv.set_defaults(func=cmd_review)
+    rt = sub.add_parser("retire", help="retire a seed (reversible)")
+    rt.add_argument("--seed-id", type=int, required=True)
+    rt.add_argument("--reason")
+    rt.set_defaults(func=cmd_retire)
+    rs = sub.add_parser("restore", help="approve a retired/rejected seed again")
+    rs.add_argument("--seed-id", type=int, required=True)
+    rs.add_argument("--previous-url", action="store_true",
+                    help="also put back the URL from before a calendar move")
+    rs.set_defaults(func=cmd_restore)
     # Default subcommand is `discover` when none given
     args = p.parse_args(argv)
     if not args.cmd:

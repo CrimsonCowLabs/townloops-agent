@@ -17,6 +17,12 @@ reuses an unshipped local one of the same name), enriches it, and ships it
 through engine/entity_ship — the same create-or-adopt + sync path event-ship
 uses. A ship that fails or an enrichment that couldn't read the site leaves
 the row `approved` for the next run.
+
+The same path promotes community-group and non-profit candidates
+(`kind`): they ship as communities, a non-profit with community kind
+'nonprofit'. In autonomous mode the agent approves verified candidates
+itself (`auto_approve`, engine/autonomy) and the client is a GatedClient, so
+what ships lands `pending` in the TownLoops moderation queue.
 """
 
 from __future__ import annotations
@@ -91,8 +97,8 @@ def _flip(conn: sqlite3.Connection, uids: Iterable[str], status: str,
     for uid in uids:
         cur = conn.execute(
             f"UPDATE discovery_candidates SET status = ?, reject_reason = ?, last_seen_at = ? "
-            f"WHERE candidate_uid = ? AND kind = ? AND status IN ({marks})",
-            (status, reason, iso_utc_now(), uid, bd.KIND, *from_statuses),
+            f"WHERE candidate_uid = ? AND status IN ({marks})",
+            (status, reason, iso_utc_now(), uid, *from_statuses),
         )
         if cur.rowcount:
             done += 1
@@ -129,17 +135,47 @@ def propose(conn: sqlite3.Connection, town_slug: str, kind: ProposalKind,
 # Promote run
 # --------------------------------------------------------------------------
 
+def entity_kind(kind: str) -> str:
+    """The local/TownLoops entity kind a candidate kind ships as."""
+    return bd.KIND if kind == bd.KIND else "community"
+
+
+def auto_approve(conn: sqlite3.Connection, town_slug: str, kind: str = bd.KIND,
+                 limit: int = 50) -> dict:
+    """Autonomous: the agent's own approval of verified candidates
+    (engine/autonomy.judge_candidate), recorded as decisions."""
+    from engine import autonomy
+    s = autonomy.settings()
+    out = {"approved": 0, "held": 0}
+    for cand in bd.list_candidates(conn, town_slug, status="verified", limit=limit, kind=kind):
+        d = autonomy.judge_candidate(cand, s)
+        if d.verdict == "submit" and approve(conn, [cand["candidate_uid"]])["approved"]:
+            autonomy.record(conn, "candidate", cand["candidate_uid"], d)
+            out["approved"] += 1
+        elif d.verdict != "submit":
+            out["held"] += 1
+    conn.commit()
+    return out
+
+
 def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
-                     enrich: Enrich, limit: int = 3) -> dict:
+                     enrich: Enrich, limit: int = 3, kind: str = bd.KIND) -> dict:
     """Promote up to `limit` approved candidates (see module doc). The live
-    business list is only read when there is something to promote."""
+    list is only read when there is something to promote."""
     out = {"processed": 0, "promoted": 0, "already_live": 0, "deferred": 0, "failed": 0,
            "withdrawn": 0,
            "shipped": [], "errors": []}
-    approved = bd.approved_queue(conn, town_slug, limit)
+    approved = bd.approved_queue(conn, town_slug, limit, kind)
     if not approved:
         return out
-    index = bd.LiveIndex.from_api(client)
+    from engine import autonomy
+    if isinstance(client, autonomy.GatedClient):
+        gate = autonomy.submission_gate(conn, autonomy.settings())
+        if gate.verdict != "submit":   # no enrichment spent on what can't ship now
+            out["held"] = gate.reason
+            return out
+    index = bd.LiveIndex.from_api(client, kind)
+    ekind = entity_kind(kind)
     for cand in approved:
         out["processed"] += 1
         uid, url = cand["candidate_uid"], cand["canonical_url"]
@@ -150,10 +186,11 @@ def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
             continue
         live = index.match(url, name)
         if live:
-            _advance(conn, uid, "already-live", live_slug=live.slug, reject_reason=live.reason)
+            status, reason = bd.live_status(live)
+            _advance(conn, uid, status, live_slug=live.slug, reject_reason=reason)
             out["already_live"] += 1
             continue
-        entity_uid = _local_business(conn, cand, name)
+        entity_uid = _local_entity(conn, cand, name, kind)
         _advance(conn, uid, "approved", research_entity_uid=entity_uid)
         try:
             status = enrich(conn, entity_uid)
@@ -169,12 +206,15 @@ def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
             # The operator declined it while it was being enriched.
             out["withdrawn"] += 1
             continue
-        slug = entity_ship.ship_entity(client, conn, bd.KIND, entity_uid)
+        if isinstance(client, autonomy.GatedClient):   # attribute the submission
+            client.context = {"discovery_source": cand.get("source_signal") or "sweep",
+                              "local_uid": entity_uid}
+        slug = entity_ship.ship_entity(client, conn, ekind, entity_uid)
         if not slug:
             out["failed"] += 1
             _failed(conn, out, uid, f"{url}: ship failed — stays approved for the next run")
             continue
-        cross_town = entity_ship.cross_town(conn, bd.KIND, entity_uid)
+        cross_town = entity_ship.cross_town(conn, ekind, entity_uid)
         _advance(conn, uid, "promoted", live_slug=slug,
                  promote_error=f"filed under town {cross_town!r}" if cross_town else None)
         if cross_town:
@@ -210,34 +250,47 @@ def _advance(conn: sqlite3.Connection, uid: str, status: str, **cols) -> None:
 
 
 def _local_business(conn: sqlite3.Connection, cand: dict, name: str) -> str:
-    """The local business for this candidate: the one an earlier run made,
-    else an unshipped local business of the same name (event mining may
-    have made it), else a new one. The candidate's page and verified
-    details — and the fields of a research draft it was imported from
-    (engine/cmo_import) — fill only blanks."""
+    return _local_entity(conn, cand, name, bd.KIND)
+
+
+def _local_entity(conn: sqlite3.Connection, cand: dict, name: str, kind: str) -> str:
+    """The local entity for this candidate: the one an earlier run made,
+    else an unshipped local one of the same name (event mining may have made
+    it), else a new one. The candidate's page and verified details — and the
+    fields of a research draft it was imported from (engine/cmo_import) —
+    fill only blanks."""
+    ekind = entity_kind(kind)
+    table = entity_ship.ENTITY_TABLES[ekind][0]
+    cols = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
     entity_uid = cand.get("research_entity_uid")
     if not entity_uid:
         unshipped = [dict(r) for r in conn.execute(
-            "SELECT * FROM businesses WHERE townloops_slug IS NULL AND source_kind != 'live'")]
+            f"SELECT * FROM {table} WHERE townloops_slug IS NULL AND source_kind != 'live'")]
         same = best_name_match(name, unshipped)
         entity_uid = same["entity_uid"] if same else mint_entity_uid(
-            bd.KIND, name, f"candidate:{cand['candidate_uid']}")
+            ekind, name, f"candidate:{cand['candidate_uid']}")
     verify = cand["verify"] or {}
     fields = {**{k: v for k, v in (verify.get("draft") or {}).items() if k in _DRAFT_FIELDS},
               _page_field(cand["canonical_url"]): cand["canonical_url"],
               **{k: verify[k] for k in ("address", "phone") if verify.get(k)}}
-    if not conn.execute("SELECT 1 FROM businesses WHERE entity_uid = ?", (entity_uid,)).fetchone():
-        insert_entity(conn, "businesses", entity_uid, {
+    if ekind == "community":
+        fields["kind"] = "nonprofit" if kind == "nonprofit" else "group"
+        if cand.get("target_category_slug"):
+            fields["category_slug"] = cand["target_category_slug"]
+    fields = {k: v for k, v in fields.items() if k in cols}
+    if not conn.execute(f"SELECT 1 FROM {table} WHERE entity_uid = ?", (entity_uid,)).fetchone():
+        insert_entity(conn, table, entity_uid, {
             "source": f"business-discovery:{cand.get('source_signal') or 'sweep'}",
             "source_kind": "discovery", "name": name,
             "source_url": cand["canonical_url"],
             "extra_json": json.dumps({"candidate_uid": cand["candidate_uid"],
                                       **({"hours": verify["hours"]} if verify.get("hours") else {})}),
         })
-    sets = ", ".join(f"{k} = COALESCE(NULLIF({k}, ''), ?)" for k in fields)
-    conn.execute(f"UPDATE businesses SET {sets} WHERE entity_uid = ?",
-                 (*fields.values(), entity_uid))
-    refresh_content_hash(conn, bd.KIND, entity_uid)
+    if fields:
+        sets = ", ".join(f"{k} = COALESCE(NULLIF({k}, ''), ?)" for k in fields)
+        conn.execute(f"UPDATE {table} SET {sets} WHERE entity_uid = ?",
+                     (*fields.values(), entity_uid))
+    refresh_content_hash(conn, ekind, entity_uid)
     conn.commit()
     return entity_uid
 

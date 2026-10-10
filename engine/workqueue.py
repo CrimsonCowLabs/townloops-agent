@@ -203,6 +203,15 @@ def fail(conn: sqlite3.Connection, queue_id: int, error: str) -> None:
     conn.commit()
 
 
+def release(conn: sqlite3.Connection, queue_id: int) -> None:
+    """Hand a claimed row back unattempted — the skill said "not now"
+    (e.g. autonomous submissions are held). No attempt is counted."""
+    conn.execute(
+        "UPDATE event_workqueue SET claimed_by = NULL, claimed_at = NULL WHERE queue_id = ?",
+        (queue_id,))
+    conn.commit()
+
+
 def is_last_attempt(conn: sqlite3.Connection, event_uid: str, action: str) -> bool:
     """True when a failure now would be the event's last attempt at `action`
     (fail() then marks it stuck) — or there is no queue row (a by-hand run)."""

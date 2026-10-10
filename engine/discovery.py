@@ -94,6 +94,13 @@ CUSTOMER_FACING_MARKERS = [
 ]
 
 
+# A community group's or non-profit's own site: how people take part.
+MEMBER_FACING_MARKERS = [
+    "join", "membership", "members", "volunteer", "donate", "our mission", "meetings",
+    "meet ", "get involved", "contact us", "about us", "events",
+]
+
+
 class FirecrawlError(RuntimeError):
     pass
 
@@ -429,9 +436,11 @@ def verify_candidate(
     town_name: str,
     region: str = "",
     aliases: list[str] | None = None,
+    kind: str = "business",
 ) -> dict:
     """Adversarial verify: scrape the candidate URL, decide whether it's a
-    real customer-facing entity in the target town.
+    real customer-facing entity in the target town (member-facing, for a
+    community group or non-profit `kind`).
 
     Return shape matches `engine.policy.is_high_confidence()` expectations:
       {
@@ -503,9 +512,12 @@ def verify_candidate(
             reasons_reject.append(f"closure marker found: {marker!r}")
             break
 
-    customer_facing = any(marker in md_lower for marker in CUSTOMER_FACING_MARKERS)
-    if not customer_facing:
-        reasons_reject.append("no customer-facing markers (menu/hours/book/shop/services)")
+    if kind == "business":
+        customer_facing = any(marker in md_lower for marker in CUSTOMER_FACING_MARKERS)
+        if not customer_facing:
+            reasons_reject.append("no customer-facing markers (menu/hours/book/shop/services)")
+    elif not any(marker in md_lower for marker in MEMBER_FACING_MARKERS):
+        reasons_reject.append("no member-facing markers (join/volunteer/donate/meetings)")
 
     addr_m = _ADDRESS_HINT_RE.search(md)
     phone_m = _PHONE_HINT_RE.search(md)
@@ -535,7 +547,8 @@ def verify_candidate(
         }
     return {
         "verified": True,
-        "reasons": ["in-town, no closure marker, customer-facing"],
+        "reasons": ["in-town, no closure marker, "
+                    + ("customer-facing" if kind == "business" else "member-facing")],
         "evidence": evidence,
         "markdown_head": md[:500],
         "title": scraped.get("title") or "",

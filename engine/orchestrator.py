@@ -22,8 +22,9 @@ from typing import Optional
 
 import requests
 
+from engine import autonomy
 from engine import db as _db
-from engine import event_groups
+from engine import event_detail, event_groups
 from engine import event_state
 from engine import inspection
 from engine import lock as _lock
@@ -54,7 +55,13 @@ _ACTION_SKILLS: dict[str, tuple[str, str]] = {
 _BATCH_SIZE = 5
 # A detail read is a Firecrawl scrape + a Codex call (up to ~100s); one per
 # tick keeps it from eating Hermes' 120s cron script budget for the rest.
+# Events with no detail page of their own finish at once and don't count
+# (engine/event_detail.needs_fetch): up to _BATCH_SIZE of them go through.
 _BATCH_SIZES = {"read-detail": 1}
+_FETCHING_ACTIONS = {"read-detail"}
+# A skill's "not now" (autonomous submissions held): the claim is released
+# without counting an attempt.
+RC_DEFERRED = 75
 
 
 def _iso_utc_now() -> str:
@@ -119,21 +126,40 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
             # Reclaim any rows orphaned by a drainer that died mid-run before
             # servicing the action loop, so they can't stall invisibly.
             reaped = workqueue.reap_stale_claims(conn)
+            mode = autonomy.settings()
+            resolved = resolve_stuck(conn, mode) if mode.autonomous else {}
             per_action: dict[str, dict] = {}
             for action, (skill, entry) in _ACTION_SKILLS.items():
-                claims = workqueue.claim(conn, action, limit=_BATCH_SIZES.get(action, _BATCH_SIZE))
+                if action == "ship" and mode.autonomous:
+                    gate = autonomy.submission_gate(conn, mode)
+                    if gate.verdict != "submit":
+                        per_action[action] = {"held": gate.reason}
+                        continue
+                fetch_cap = _BATCH_SIZES.get(action, _BATCH_SIZE)
+                claims = workqueue.claim(conn, action, limit=max(fetch_cap, _BATCH_SIZE)
+                                         if action in _FETCHING_ACTIONS else fetch_cap)
                 if not claims:
                     continue
                 completed = 0
                 failed = 0
                 skipped = 0
+                fetching = 0
                 for c in claims:
                     uid = c["event_uid"]
+                    if action in _FETCHING_ACTIONS and event_detail.needs_fetch(conn, c):
+                        fetching += 1
+                        if fetching > fetch_cap:   # next tick
+                            workqueue.release(conn, c["queue_id"])
+                            continue
                     inspection.record(
                         worker="orchestrator", action="skill-invoke",
                         target=uid, detail=f"{skill} for event {uid[:12]}",
                     )
                     rc, out, err = _invoke_skill(skill, entry, uid)
+                    if rc == RC_DEFERRED:
+                        workqueue.release(conn, c["queue_id"])
+                        skipped += 1
+                        continue
                     if rc == 127:
                         # Skill entry missing (should not happen for the mapped
                         # actions). Treated as a failed attempt: fail() increments
@@ -176,6 +202,7 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
                 "town": town,
                 "ts": _iso_utc_now(),
                 "reaped_stale_claims": reaped,
+                **({"stuck_resolved": resolved} if resolved else {}),
                 "per_action": per_action,
                 "any_work": bool(per_action) or bool(reaped),
             }
@@ -185,6 +212,46 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
         status = {"town": town, "error": "workqueue-drain lock held by another tick"}
         print(json.dumps(status))
         return status
+
+
+def resolve_stuck(conn: sqlite3.Connection, mode: autonomy.Settings,
+                  now: Optional[datetime] = None) -> dict:
+    """Autonomous: settle every `stuck-` event by policy instead of waiting
+    for an operator — retry it after a backoff, ship it with the fields it
+    has, or drop it with a reason (engine/autonomy.resolve_stuck)."""
+    counts: dict[str, int] = {}
+    rows = [dict(r) for r in conn.execute(
+        "SELECT * FROM events WHERE state LIKE 'stuck-%' ORDER BY state_updated_at").fetchall()]
+    for ev in rows:
+        d = autonomy.resolve_stuck(ev, mode, now)
+        uid, state = ev["event_uid"], ev["state"]
+        if d.verdict == "wait":
+            continue
+        if d.verdict == "retry":
+            restored = event_state.unstuck(conn, uid)
+            action = event_state.next_action_for(restored or "")
+            if action:
+                workqueue.enqueue(conn, uid, action)
+                conn.execute("UPDATE event_workqueue SET attempts = 0 "
+                             "WHERE event_uid = ? AND next_action = ?", (uid, action))
+            extra = autonomy.extra(ev)
+            extra["autonomy"] = {**(extra.get("autonomy") or {}),
+                                 "retries": d.evidence["retries"]}
+            conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
+                         (json.dumps(extra), uid))
+        elif d.verdict == "ship-as-is":
+            if event_state.attempt_advance(conn, uid, state, "entities-enriched"):
+                workqueue.enqueue(conn, uid, "ship")
+                conn.execute("UPDATE event_workqueue SET attempts = 0 "
+                             "WHERE event_uid = ? AND next_action = 'ship'", (uid,))
+        elif d.verdict == "drop":
+            event_state.decline(conn, uid, f"[autonomy] {d.reason}", from_states=(state,))
+        else:
+            continue
+        autonomy.record(conn, "stuck", uid, d)
+        counts[d.verdict] = counts.get(d.verdict, 0) + 1
+    conn.commit()
+    return counts
 
 
 # --------------------------------------------------------------------------
@@ -275,17 +342,25 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
 
     report_dir = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
+    mode = autonomy.settings()
+    auto = None
+    if mode.autonomous:
+        from engine import moderation
+        auto = moderation.digest(conn, cutoff, _series_report(report_dir))
+        md_lines += _autonomy_markdown(auto)
     report_path = report_dir / f"{today}.md"
     report_path.write_text("\n".join(md_lines))
 
     tg = (
         f"[{town}] nightly digest ({today})\n"
         f"events: {sum(events_by_state.values())} across {len(events_by_state)} states\n"
-        f"pending approval: {approvals_pending}\n"
-        f"shipped: {shipped_counts['events']} events ({shipped_counts['series']} Series, "
+        + (f"pending approval: {approvals_pending}\n" if not auto else "")
+        + f"shipped: {shipped_counts['events']} events ({shipped_counts['series']} Series, "
         f"{shipped_counts['singletons']} one-off)\n"
         f"seeds: {seeds}\n"
     )
+    if auto:
+        tg += _autonomy_telegram(auto)
     _telegram_notify(tg)
 
     return {
@@ -296,7 +371,62 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "seeds": seeds,
         "shipped": shipped_counts,
         "workqueue": wq,
+        **({"autonomy": auto} if auto else {}),
     }
+
+
+def _series_report(report_dir: Path) -> Optional[dict]:
+    """The latest series-candidates run (skills/business/series-candidates)."""
+    try:
+        return json.loads((report_dir / "series-candidates-latest.json").read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _autonomy_markdown(a: dict) -> list[str]:
+    m = a["moderation"]
+    rate = lambda v: "n/a" if v is None else f"{v:.0%}"  # noqa: E731
+    lines = ["", "## Autonomous decisions (last 24h)",
+             f"- Events submitted to TownLoops: {a['events_submitted']} "
+             f"(entities: {a['entities_submitted']}); still pending in TownLoops: "
+             f"{a['pending_in_townloops']}",
+             f"- Events approved by the agent: {a['events_approved']}; dropped: "
+             f"{a['events_dropped']}"
+             + (" — " + ", ".join(f"{r} ×{n}" for r, n in a["top_drop_reasons"])
+                if a["top_drop_reasons"] else ""),
+             f"- Moderator: {m['published']} published, {m['merged']} merged, "
+             f"{m['rejected']} rejected (approval {rate(m['approval_rate'])}, "
+             f"rejection {rate(m['rejection_rate'])})",
+             f"- Seeds added: {', '.join(a['seeds_added']) or 'none'}; retired: "
+             f"{', '.join(a['seeds_retired']) or 'none'}",
+             f"- Organisations approved for submission: {a['organisations_approved']}"]
+    lines += ["", "## Series candidates"]
+    lines += [f"- **{c.get('title')}** — {c.get('dates')} dates at "
+              f"`{c.get('venue_slug') or c.get('venue_id')}`" for c in a["series_candidates"]] \
+        or ["- (none in the latest weekly report)"]
+    if a["suspect_series"]:
+        lines += [f"- Suspect Series `{d.get('slug')}`: {d.get('venues')} venues"
+                  + (f", same-day duplicates {', '.join(d.get('dates') or [])}"
+                     if d.get("dates") else "") for d in a["suspect_series"]]
+    lines += ["", "## Needs attention"] + ([f"- {x}" for x in a["needs_attention"]]
+                                          or ["- nothing"])
+    return lines
+
+
+def _autonomy_telegram(a: dict) -> str:
+    m = a["moderation"]
+    out = (f"submitted: {a['events_submitted']} events, {a['entities_submitted']} entities "
+           f"({a['pending_in_townloops']} pending in TownLoops)\n"
+           f"dropped: {a['events_dropped']}"
+           + (" — top: " + ", ".join(f"{r} ×{n}" for r, n in a["top_drop_reasons"][:3])
+              if a["top_drop_reasons"] else "") + "\n"
+           f"moderator: {m['published'] + m['merged']} accepted, {m['rejected']} rejected\n"
+           f"seeds: +{len(a['seeds_added'])} added, {len(a['seeds_retired'])} retired\n")
+    if a["series_candidates"]:
+        out += f"Series candidates: {len(a['series_candidates'])}\n"
+    if a["needs_attention"]:
+        out += "needs attention:\n" + "\n".join(f"• {x}" for x in a["needs_attention"][:8]) + "\n"
+    return out
 
 
 # --------------------------------------------------------------------------

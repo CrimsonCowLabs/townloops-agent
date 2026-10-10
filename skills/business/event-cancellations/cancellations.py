@@ -13,6 +13,11 @@ Subcommands:
 
 list/propose-* never write. `apply` writes only what the operator confirmed
 — there is no flag to confirm; confirmation is the operator's click.
+
+In autonomous mode `apply` instead re-reads flagged events' own pages and
+submits a pending cancellation only where the page says it is cancelled or
+postponed (engine/event_cancel.submit_evidenced); the rest stay flagged for
+the nightly digest.
 """
 
 from __future__ import annotations
@@ -36,14 +41,47 @@ def _list(args) -> int:
 
 def _propose(kind):
     def run(args) -> int:
+        from engine import autonomy
+        if autonomy.is_autonomous():
+            print(json.dumps(autonomy.inactive_message(f"event-cancellations propose-{kind}"),
+                             indent=2))
+            return 0
         print(json.dumps(ec.propose(open_db(), kind, uids=args.uid, limit=args.limit),
                          indent=2, ensure_ascii=False))
         return 0
     return run
 
 
+def _apply_autonomous(conn, args) -> int:
+    from engine import autonomy
+    from engine.event_extract import firecrawl_markdown
+    from engine.townloops_api import Client
+    if not conn.execute("SELECT 1 FROM events WHERE cancel_status = 'possibly-cancelled' "
+                        "LIMIT 1").fetchone():
+        print(json.dumps({"checked": 0}))
+        return 0
+    try:
+        with _lock.acquire(_WORKER):
+            client = Client()
+            client.verify_town()
+            out = ec.submit_evidenced(conn, autonomy.GatedClient(client, conn, autonomy.settings()),
+                                      firecrawl_markdown, limit=min(args.limit, 3))
+    except _lock.LockHeld:
+        print("previous event-cancellations run still active — skipped")
+        return 0
+    if out["checked"]:
+        record_activity(conn, _WORKER, "evidence-check", "cancellations",
+                        detail=json.dumps({k: v for k, v in out.items() if k != "errors"}),
+                        ok=not out["errors"], error="; ".join(out["errors"])[:1000] or None)
+    print(json.dumps(out, indent=2))
+    return 0
+
+
 def _apply(args) -> int:
     conn = open_db()
+    from engine import autonomy
+    if autonomy.is_autonomous():
+        return _apply_autonomous(conn, args)
     if not conn.execute("SELECT 1 FROM events WHERE cancel_status = 'confirmed' LIMIT 1").fetchone():
         # The cron's usual case: no API call, no activity row.
         print(json.dumps({"cancelled": 0}))
@@ -64,7 +102,7 @@ def _apply(args) -> int:
     return 0
 
 
-def main() -> int:
+def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="event-cancellations")
     sub = ap.add_subparsers(dest="cmd", required=True)
     sub.add_parser("list")
@@ -75,7 +113,7 @@ def main() -> int:
         pp.add_argument("--limit", type=int, default=50)
     apply = sub.add_parser("apply")
     apply.add_argument("--limit", type=int, default=20)
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
     return {"list": _list, "propose-confirm": _propose("confirm"),
             "propose-dismiss": _propose("dismiss"), "apply": _apply}[args.cmd](args)
 

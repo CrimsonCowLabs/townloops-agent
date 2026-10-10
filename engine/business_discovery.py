@@ -1,5 +1,6 @@
-"""Business discovery for this town: sweep the web for local businesses,
-verify each candidate's page, and never propose one that is already live.
+"""Organisation discovery for this town: sweep the web for local businesses,
+community groups and non-profits (`KINDS`), verify each candidate's page,
+and never propose one that is already on TownLoops.
 
 The sweeps and the page verifier are the `engine/discovery.py` kernel
 (Firecrawl, no LLM). This module owns what the kernel deliberately doesn't:
@@ -17,10 +18,18 @@ Candidate statuses:
   approved      the operator said ship it — waiting for the promote run
   promoted      shipped as a business (`research_entity_uid`, `live_slug`)
 
+Every function takes the candidate `kind` ('business' by default); a
+community group and a non-profit both ship as a community (a non-profit with
+community `kind` 'nonprofit'). A live match counts whatever its TownLoops
+status: a pending one is `already-live` (already submitted), a rejected one
+is `rejected` with a `townloops` reason.
+
 A re-sweep only touches `new`/`verified` rows (they can still turn out to be
 live); whatever else is decided stays decided. An operator decline
 (`reject_reason` 'operator…') is remembered by name too: a later candidate
-under another URL whose name matches it lands as `rejected`. Never writes to
+under another URL whose name matches it lands as `rejected`; so does a
+TownLoops moderator's rejection (`reject_reason` 'townloops…',
+engine/moderation). Never writes to
 TownLoops — promoting a candidate is engine/business_promote.py, after the
 operator approves.
 """
@@ -41,8 +50,13 @@ from engine.derive_helpers import entity_richness, iso_utc_now, normalize_name
 
 
 KIND = "business"
+# Candidate kind → the TownLoops resource it ships as.
+KINDS = {"business": "businesses", "community": "communities", "nonprofit": "communities"}
 FUZZY_NAME_RATIO = 0.85
 OPERATOR_REASON = "operator"
+TOWNLOOPS_REASON = "townloops"
+# Rejections remembered by name across URLs.
+_REMEMBERED = (OPERATOR_REASON, TOWNLOOPS_REASON)
 PROPOSED = ("new", "verified")
 _PROPOSED_SQL = "(" + ", ".join(f"'{s}'" for s in PROPOSED) + ")"
 
@@ -68,6 +82,7 @@ class LiveMatch:
     slug: str
     name: str
     reason: str
+    status: Optional[str] = None     # the live row's TownLoops status, when it has one
 
 
 def _host(url: str) -> str:
@@ -102,18 +117,19 @@ class LiveIndex:
         return cls([r for r in rows if r.get("slug")], kind)
 
     @classmethod
-    def from_api(cls, client) -> "LiveIndex":
-        return cls.build(client.paginate("businesses"))
+    def from_api(cls, client, kind: str = KIND) -> "LiveIndex":
+        return cls.build(client.paginate(KINDS[kind]), "business" if kind == KIND else "community")
 
     def match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
         row = self._by_url.get(canonical_url)
         if row:
             return LiveMatch(row["slug"], row.get("name") or "",
-                             f"url matches live {self.kind} website")
+                             f"url matches live {self.kind} website", row.get("status"))
         row = self._site_match(canonical_url)
         if row:
             return LiveMatch(row["slug"], row.get("name") or "",
-                             f"under live {self.kind} website {row.get('website')}")
+                             f"under live {self.kind} website {row.get('website')}",
+                             row.get("status"))
         target = normalize_name(name or "")
         if not target:
             return None
@@ -129,7 +145,7 @@ class LiveIndex:
             return None
         return LiveMatch(best["slug"], best.get("name") or "",
                          f"name fuzzy-matches live {self.kind} {best.get('name')!r} "
-                         f"({best_rank[0]:.2f})")
+                         f"({best_rank[0]:.2f})", best.get("status"))
 
 
     def _site_match(self, canonical_url: str) -> Optional[dict]:
@@ -165,42 +181,58 @@ def name_from_title(title: Optional[str]) -> Optional[str]:
 # --------------------------------------------------------------------------
 
 def declined_match(conn: sqlite3.Connection, town_slug: str,
-                   name: Optional[str]) -> Optional[dict]:
-    """The candidate the operator declined whose name this one matches
-    (normalized, ≥0.85) — a verifier rejection doesn't count."""
+                   name: Optional[str], kind: str = KIND) -> Optional[dict]:
+    """The candidate the operator declined — or the TownLoops moderator
+    rejected — whose name this one matches (normalized, ≥0.85). A verifier
+    rejection doesn't count."""
     target = normalize_name(name or "")
     if not target:
         return None
+    # A community group and a non-profit are one TownLoops resource.
+    kinds = [k for k, r in KINDS.items() if r == KINDS.get(kind, KINDS[KIND])]
     for row in conn.execute(
-        "SELECT candidate_uid, display_name FROM discovery_candidates "
-        "WHERE town_slug = ? AND kind = ? AND status = 'rejected' "
-        "AND (reject_reason = ? OR reject_reason LIKE ?)",
-        (town_slug, KIND, OPERATOR_REASON, OPERATOR_REASON + ":%"),
+        "SELECT candidate_uid, display_name, reject_reason FROM discovery_candidates "
+        f"WHERE town_slug = ? AND kind IN ({', '.join('?' * len(kinds))}) AND status = 'rejected' "
+        "AND (reject_reason IN (?, ?) OR reject_reason LIKE ? OR reject_reason LIKE ?)",
+        (town_slug, *kinds, *_REMEMBERED, *(r + ":%" for r in _REMEMBERED)),
     ).fetchall():
         other = normalize_name(row[1] or "")
         if other and SequenceMatcher(None, target, other).ratio() >= FUZZY_NAME_RATIO:
-            return {"candidate_uid": row[0], "display_name": row[1]}
+            return {"candidate_uid": row[0], "display_name": row[1],
+                    "by": TOWNLOOPS_REASON if (row[2] or "").startswith(TOWNLOOPS_REASON)
+                    else OPERATOR_REASON}
     return None
 
 
 def declined_reason(d: dict) -> str:
-    return f"operator declined {d['display_name']!r} earlier ({d['candidate_uid'][:12]})"
+    who = "TownLoops rejected" if d.get("by") == TOWNLOOPS_REASON else "operator declined"
+    return f"{who} {d['display_name']!r} earlier ({d['candidate_uid'][:12]})"
 
 
-def candidate_uid(town_slug: str, canonical_url: str) -> str:
-    return hashlib.sha1(f"{town_slug}|{canonical_url}|{KIND}".encode("utf-8")).hexdigest()
+def candidate_uid(town_slug: str, canonical_url: str, kind: str = KIND) -> str:
+    return hashlib.sha1(f"{town_slug}|{canonical_url}|{kind}".encode("utf-8")).hexdigest()
+
+
+def live_status(m: LiveMatch) -> tuple[str, str]:
+    """(candidate status, reason) for a live match: rejected on TownLoops is
+    remembered as a rejection, anything else is already live."""
+    if m.status == "rejected":
+        return "rejected", f"{TOWNLOOPS_REASON}: rejected on TownLoops as {m.slug}"
+    return "already-live", m.reason
 
 
 def _mark_live(conn: sqlite3.Connection, uid: str, m: LiveMatch, now: str) -> None:
+    status, reason = live_status(m)
     conn.execute(
-        "UPDATE discovery_candidates SET status = 'already-live', live_slug = ?, "
+        "UPDATE discovery_candidates SET status = ?, live_slug = ?, "
         f"reject_reason = ?, last_seen_at = ? WHERE candidate_uid = ? AND status IN {_PROPOSED_SQL}",
-        (m.slug, m.reason, now, uid),
+        (status, m.slug, reason, now, uid),
     )
 
 
 def record_sweep(conn: sqlite3.Connection, town_slug: str,
-                 candidates: Iterable[discovery.Candidate], index: LiveIndex) -> dict:
+                 candidates: Iterable[discovery.Candidate], index: LiveIndex,
+                 kind: str = KIND) -> dict:
     """Store swept candidates. New URLs are inserted (`new`, or
     `already-live` when they match a live business); URLs seen before only
     refresh `last_seen_at`, except a still-proposed one that is now live.
@@ -209,27 +241,31 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
     for c in candidates:
         counts["seen"] += 1
         now = iso_utc_now()
-        uid = candidate_uid(town_slug, c.canonical_url)
+        uid = candidate_uid(town_slug, c.canonical_url, kind)
         live = index.match(c.canonical_url, c.display_name)
         existing = conn.execute(
             "SELECT status, display_name FROM discovery_candidates WHERE candidate_uid = ?",
             (uid,),
         ).fetchone()
         if existing is None:
-            declined = None if live else declined_match(conn, town_slug, c.display_name)
-            status = "already-live" if live else "rejected" if declined else "new"
-            reason = live.reason if live else declined_reason(declined) if declined else None
+            declined = None if live else declined_match(conn, town_slug, c.display_name, kind)
+            if live:
+                status, reason = live_status(live)
+            else:
+                status = "rejected" if declined else "new"
+                reason = declined_reason(declined) if declined else None
             conn.execute(
                 """INSERT INTO discovery_candidates
                      (candidate_uid, town_slug, kind, target_category_slug, canonical_url,
                       display_name, source_signal, status, live_slug, reject_reason,
                       first_seen_at, last_seen_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (uid, town_slug, KIND, c.target_category_slug, c.canonical_url,
+                (uid, town_slug, kind, c.target_category_slug, c.canonical_url,
                  c.display_name, c.source_signal, status,
                  live.slug if live else None, reason, now, now),
             )
-            counts["already_live" if live else "declined" if declined else "inserted"] += 1
+            counts["declined" if declined or status == "rejected" else
+                   "already_live" if live else "inserted"] += 1
             continue
         if existing[0] in PROPOSED:
             live = live or index.match(c.canonical_url, existing[1])
@@ -247,18 +283,20 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
     return counts
 
 
-def pending_verify(conn: sqlite3.Connection, town_slug: str, limit: int) -> list[dict]:
+def pending_verify(conn: sqlite3.Connection, town_slug: str, limit: int,
+                   kind: str = KIND) -> list[dict]:
     return _candidates(conn, """SELECT * FROM discovery_candidates
            WHERE town_slug = ? AND kind = ? AND status = 'new'
-           ORDER BY first_seen_at, rowid LIMIT ?""", (town_slug, KIND, limit))
+           ORDER BY first_seen_at, rowid LIMIT ?""", (town_slug, kind, limit))
 
 
-def approved_queue(conn: sqlite3.Connection, town_slug: str, limit: int) -> list[dict]:
+def approved_queue(conn: sqlite3.Connection, town_slug: str, limit: int,
+                   kind: str = KIND) -> list[dict]:
     """Operator-approved candidates for the promote run: fewest promote
     attempts first, so ones that keep failing don't block the rest."""
     return _candidates(conn, """SELECT * FROM discovery_candidates
            WHERE town_slug = ? AND kind = ? AND status = 'approved'
-           ORDER BY promote_attempts, last_seen_at, rowid LIMIT ?""", (town_slug, KIND, limit))
+           ORDER BY promote_attempts, last_seen_at, rowid LIMIT ?""", (town_slug, kind, limit))
 
 
 def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
@@ -270,9 +308,10 @@ def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
     checks run again with it, since live may have grown since the sweep."""
     name = candidate.get("display_name") or name_from_title(verdict.get("title"))
     live = index.match(candidate["canonical_url"], name)
-    declined = None if live else declined_match(conn, candidate["town_slug"], name)
+    declined = None if live else declined_match(conn, candidate["town_slug"], name,
+                                                candidate.get("kind") or KIND)
     if live:
-        status, live_slug, reason = "already-live", live.slug, live.reason
+        (status, reason), live_slug = live_status(live), live.slug
     elif declined:
         status, live_slug, reason = "rejected", None, declined_reason(declined)
     elif verdict.get("verified"):
@@ -293,11 +332,12 @@ def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
 
 
 def list_candidates(conn: sqlite3.Connection, town_slug: str,
-                    status: Optional[str] = None, limit: int = 50) -> list[dict]:
+                    status: Optional[str] = None, limit: int = 50,
+                    kind: str = KIND) -> list[dict]:
     """Candidates for the operator. Default: the proposed ones (verified
     first, then still-unverified); `status='all'` or one status to see the
     rest, e.g. what was deduped as `already-live`."""
-    where, params = ["town_slug = ?", "kind = ?"], [town_slug, KIND]
+    where, params = ["town_slug = ?", "kind = ?"], [town_slug, kind]
     if status is None:
         where.append(f"status IN ({', '.join('?' * len(PROPOSED))})")
         params.extend(PROPOSED)
@@ -310,11 +350,11 @@ def list_candidates(conn: sqlite3.Connection, town_slug: str,
             LIMIT ?""", (*params, limit))
 
 
-def stats(conn: sqlite3.Connection, town_slug: str) -> dict:
+def stats(conn: sqlite3.Connection, town_slug: str, kind: str = KIND) -> dict:
     return dict(conn.execute(
         "SELECT status, COUNT(*) FROM discovery_candidates "
         "WHERE town_slug = ? AND kind = ? GROUP BY status ORDER BY status",
-        (town_slug, KIND),
+        (town_slug, kind),
     ).fetchall())
 
 
@@ -335,59 +375,78 @@ def _candidates(conn: sqlite3.Connection, sql: str, params: tuple) -> list[dict]
 # Drivers
 # --------------------------------------------------------------------------
 
+def _kind_profile(profile: dict, kind: str = KIND) -> dict:
+    return ((profile.get("discovery") or {}).get(kind) or {})
+
+
 def _business_profile(profile: dict) -> dict:
-    return ((profile.get("discovery") or {}).get(KIND) or {})
+    return _kind_profile(profile, KIND)
 
 
-def query_templates(profile: dict, town_name: str, region: str) -> list[str]:
+def configured_kinds(profile: dict) -> list[str]:
+    """The kinds town-profile.yaml → `discovery` gives sweep sources for."""
+    return [k for k in KINDS if any(_kind_profile(profile, k).get(src) for src in (
+        "category_query_terms", "query_groups", "seed_directories", "facebook_terms"))]
+
+
+def query_templates(profile: dict, town_name: str, region: str, kind: str = KIND) -> list[str]:
     loc = f"{town_name}, {region}".strip(", ")
+    cfg = _kind_profile(profile, kind)
+    terms = list(cfg.get("category_query_terms") or [])
+    for group in cfg.get("query_groups") or []:
+        terms += list((group or {}).get("terms") or [])
     out: list[str] = []
-    for term in _business_profile(profile).get("category_query_terms") or []:
-        out += [f"{term} in {loc}", f"best {term} {town_name}", f"local {term} {town_name}"]
+    for term in terms:
+        if kind == KIND:
+            out += [f"{term} in {loc}", f"best {term} {town_name}", f"local {term} {town_name}"]
+        else:
+            out += [f"{term} in {loc}", f"{term} {town_name}"]
     return out
 
 
 def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
-              *, per_source: int = 25) -> dict:
+              *, per_source: int = 25, kind: str = KIND) -> dict:
     """Web search + seed directories (+ Facebook when the profile lists
     `facebook_terms`) from town-profile.yaml → `discovery.business`, deduped
     against live. The live list is read first: no Firecrawl spend when
     TownLoops can't answer."""
-    index = LiveIndex.from_api(client)
+    index = LiveIndex.from_api(client, kind)
     town_name = profile.get("name") or town_slug
     region = profile.get("region") or ""
-    cfg = _business_profile(profile)
+    cfg = _kind_profile(profile, kind)
     errors: list[str] = []
     found: list[discovery.Candidate] = []
-    templates = query_templates(profile, town_name, region)
+    templates = query_templates(profile, town_name, region, kind)
     if templates:
-        found += discovery.sweep_web_search(town_name, region, templates, kind=KIND,
+        found += discovery.sweep_web_search(town_name, region, templates, kind=kind,
                                             per_source=per_source, error_sink=errors)
     if cfg.get("seed_directories"):
-        found += discovery.sweep_directories(cfg["seed_directories"], kind=KIND,
+        found += discovery.sweep_directories(cfg["seed_directories"], kind=kind,
                                              per_source=per_source, error_sink=errors)
     if cfg.get("facebook_terms"):
-        found += discovery.sweep_facebook(town_name, cfg["facebook_terms"], kind=KIND,
+        found += discovery.sweep_facebook(town_name, cfg["facebook_terms"], kind=kind,
                                           per_source=per_source, error_sink=errors)
-    counts = record_sweep(conn, town_slug, found, index)
-    return {**counts, "live_businesses": len(index.rows), "errors": errors}
+    counts = record_sweep(conn, town_slug, found, index, kind)
+    live_key = "live_businesses" if kind == KIND else "live_communities"
+    return {**counts, live_key: len(index.rows), "errors": errors}
 
 
 def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
-               *, limit: int = 20) -> dict:
+               *, limit: int = 20, kind: str = KIND) -> dict:
     """Verify up to `limit` `new` candidates. A verifier crash (Firecrawl
     down) leaves the candidate `new` for the next run rather than rejecting it."""
-    index = LiveIndex.from_api(client)
+    index = LiveIndex.from_api(client, kind)
     town_name = profile.get("name") or town_slug
     out = {"processed": 0, "verified": 0, "rejected": 0, "already_live": 0,
            "deferred": 0, "errors": []}
-    for cand in pending_verify(conn, town_slug, limit):
+    for cand in pending_verify(conn, town_slug, limit, kind):
         out["processed"] += 1
         try:
             verdict = discovery.verify_candidate(
                 cand["canonical_url"], town_name=town_name,
                 region=profile.get("region") or "",
                 aliases=list(profile.get("name_aliases") or []),
+                **({} if kind == KIND else {"kind": kind}),
             )
         except Exception as e:
             out["deferred"] += 1

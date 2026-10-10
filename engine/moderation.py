@@ -1,0 +1,250 @@
+"""Moderation feedback: what the TownLoops moderator did with each record the
+agent submitted in autonomous mode (engine/autonomy.GatedClient records them
+in `submissions`).
+
+    pending ──GET──▶ published | rejected            (the record's `status`)
+       └──404──▶ merged  (into the published record it was folded into —
+                          the local row is re-pointed there)
+              └─▶ gone   (deleted, or merged somewhere we can't find: listed
+                          in the digest)
+
+An entity GET with no `status` field (TownLoops before the entity gate) is
+published. Outcomes are attributed to the event's seed and Series (and an
+entity's discovery source): seed trust is refreshed, a high rejection rate
+opens the circuit (engine/autonomy.check_rejection_rate), and a rejected
+discovered organisation is remembered by name so it is never proposed again.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import timedelta
+from typing import Optional
+
+from engine import autonomy
+from engine.derive_helpers import (
+    dict_rows as _rows, iso_utc_now, names_match, parse_instant,
+)
+
+
+ENTITY_TABLES = {"venues": "venues", "businesses": "businesses", "communities": "communities",
+                 "performers": "performers", "creators": "creators"}
+_WINDOW = timedelta(hours=12)
+
+
+def poll(client, conn: sqlite3.Connection, s: autonomy.Settings, *, limit: int = 100) -> dict:
+    """Check up to `limit` pending submissions, least recently checked first."""
+    from engine.live_lookup import is_not_found
+    out = {"checked": 0, "published": 0, "rejected": 0, "merged": 0, "gone": 0, "pending": 0,
+           "errors": []}
+    seeds: set[str] = set()
+    for sub in _rows(conn, "SELECT * FROM submissions WHERE status = 'pending' "
+                           "ORDER BY checked_at IS NOT NULL, checked_at, id LIMIT ?", (limit,)):
+        out["checked"] += 1
+        try:
+            live = client.get(sub["resource"], sub["slug"]) or {}
+        except Exception as e:  # noqa: BLE001
+            if not is_not_found(e):
+                out["errors"].append(f"{sub['resource']}/{sub['slug']}: {str(e)[:200]}")
+                continue
+            outcome, survivor = _after_404(client, conn, sub)
+        else:
+            outcome = live.get("status") or ("published" if sub["resource"] != "events" else None)
+            survivor = None
+        if outcome not in ("published", "rejected", "merged", "gone"):
+            conn.execute("UPDATE submissions SET checked_at = ? WHERE id = ?",
+                         (iso_utc_now(), sub["id"]))
+            out["pending"] += 1
+            continue
+        _decide(conn, sub, outcome, survivor)
+        out[outcome] += 1
+        if sub.get("seed"):
+            seeds.add(sub["seed"])
+    conn.commit()
+    if seeds:
+        autonomy.refresh_trust(conn, seeds)
+    breaker = autonomy.check_rejection_rate(conn, s)
+    conn.commit()
+    if breaker:
+        out["circuit_opened"] = breaker
+    return out
+
+
+def _decide(conn: sqlite3.Connection, sub: dict, outcome: str, survivor: Optional[str]) -> None:
+    now = iso_utc_now()
+    conn.execute("UPDATE submissions SET status = ?, decided_at = ?, checked_at = ?, "
+                 "  surviving_slug = ? WHERE id = ?", (outcome, now, now, survivor, sub["id"]))
+    evidence = {k: sub[k] for k in ("resource", "slug", "kind", "seed", "series_slug",
+                                    "discovery_source", "target_slug") if sub.get(k)}
+    if survivor:
+        evidence["surviving_slug"] = survivor
+    autonomy.record(conn, "submission", sub["local_uid"] or sub["slug"],
+                    autonomy.Decision(outcome, f"moderator-{outcome}", evidence))
+    if sub["resource"] == "events":
+        if outcome == "merged" and survivor:
+            _repoint_event(conn, sub, survivor)
+        return
+    table = ENTITY_TABLES.get(sub["resource"])
+    if table and outcome == "merged" and survivor:
+        conn.execute(f"UPDATE {table} SET townloops_slug = ? WHERE townloops_slug = ?",
+                     (survivor, sub["slug"]))
+    if table and outcome == "rejected":
+        _remember_rejection(conn, table, sub)
+
+
+def _repoint_event(conn: sqlite3.Connection, sub: dict, survivor: str) -> None:
+    """The local event now lives as `survivor`. A change folded into the
+    published event also retires the old-date row that still mapped there."""
+    uid = sub["local_uid"]
+    if not uid:
+        return
+    conn.execute("UPDATE events SET townloops_slug = ? WHERE event_uid = ?", (survivor, uid))
+    if sub.get("kind") in ("change", "cancellation"):
+        conn.execute(
+            "UPDATE events SET status = 'superseded', townloops_slug = NULL WHERE "
+            "townloops_slug = ? AND event_uid != ? AND status != 'superseded'", (survivor, uid))
+
+
+def _after_404(client, conn: sqlite3.Connection, sub: dict) -> tuple[str, Optional[str]]:
+    """A submission gone from TownLoops: merged into the record we can find
+    it folded into, else gone."""
+    if sub["resource"] == "events":
+        if sub.get("target_slug"):
+            # Both a merge and a delete 404; only a target that now shows
+            # what we sent was merged into.
+            return ("merged", sub["target_slug"]) if _change_landed(client, conn, sub) \
+                else ("gone", None)
+        survivor = _event_survivor(client, conn, sub)
+    else:
+        survivor = _entity_survivor(client, conn, sub)
+    return ("merged", survivor) if survivor else ("gone", None)
+
+
+def _change_landed(client, conn: sqlite3.Connection, sub: dict) -> bool:
+    from engine.live_lookup import find_live_entity
+    try:
+        target = find_live_entity(client, "events", sub["target_slug"]) or {}
+    except Exception:  # noqa: BLE001 — unanswered: not decided as merged
+        return False
+    if sub.get("kind") == "cancellation":
+        return (target.get("title") or "").lower().startswith("cancelled") \
+            or "cancelled" in (target.get("tags") or [])
+    row = conn.execute("SELECT date_utc FROM events WHERE event_uid = ?",
+                       (sub.get("local_uid"),)).fetchone()
+    mine, theirs = parse_instant(row[0]) if row else None, parse_instant(target.get("start_at"))
+    return bool(mine and theirs and mine == theirs)
+
+
+def _event_survivor(client, conn: sqlite3.Connection, sub: dict) -> Optional[str]:
+    from engine.live_lookup import events_between
+    row = conn.execute("SELECT title, name, date_utc, source_url FROM events WHERE event_uid = ?",
+                       (sub["local_uid"],)).fetchone() if sub.get("local_uid") else None
+    start = parse_instant(row[2]) if row else None
+    if not start:
+        return None
+    title, url = row[0] or row[1], (row[3] or "").rstrip("/")
+    hits = [r for r in events_between(client, start - _WINDOW, start + _WINDOW, status="published")
+            if r.get("slug") != sub["slug"] and (
+                (url and (r.get("source_url") or "").rstrip("/") == url)
+                or names_match(title, r.get("title")))]
+    return hits[0]["slug"] if len(hits) == 1 else None
+
+
+def _entity_survivor(client, conn: sqlite3.Connection, sub: dict) -> Optional[str]:
+    table = ENTITY_TABLES.get(sub["resource"])
+    row = conn.execute(f"SELECT name FROM {table} WHERE townloops_slug = ?",
+                       (sub["slug"],)).fetchone() if table else None
+    if not row or not row[0]:
+        return None
+    hits = [r for r in client.paginate(sub["resource"])
+            if r.get("slug") != sub["slug"] and r.get("status", "published") == "published"
+            and names_match(row[0], r.get("name"))]
+    return hits[0]["slug"] if len(hits) == 1 else None
+
+
+def _remember_rejection(conn: sqlite3.Connection, table: str, sub: dict) -> None:
+    """A rejected discovered organisation: its candidate is rejected with a
+    `townloops` reason, which discovery matches by name from then on."""
+    from engine import business_discovery as bd
+    row = conn.execute(f"SELECT name, extra_json FROM {table} WHERE townloops_slug = ?",
+                       (sub["slug"],)).fetchone()
+    if not row:
+        return
+    try:
+        cand = (json.loads(row[1] or "{}") or {}).get("candidate_uid")
+    except (json.JSONDecodeError, AttributeError):
+        cand = None
+    reason = f"{bd.TOWNLOOPS_REASON}: moderator rejected {sub['slug']}"
+    if cand:
+        conn.execute("UPDATE discovery_candidates SET status = 'rejected', reject_reason = ? "
+                     "WHERE candidate_uid = ?", (reason, cand))
+
+
+def outcomes_since(conn: sqlite3.Connection, since: str) -> dict:
+    """Digest numbers: what was submitted and decided since `since`."""
+    submitted = dict(conn.execute(
+        "SELECT resource, COUNT(*) FROM submissions WHERE submitted_at >= ? GROUP BY resource",
+        (since,)).fetchall())
+    decided = dict(conn.execute(
+        "SELECT status, COUNT(*) FROM submissions WHERE decided_at >= ? AND status != 'pending' "
+        "GROUP BY status", (since,)).fetchall())
+    return {"submitted": submitted, "decided": decided,
+            "pending": autonomy.pending_count(conn)}
+
+
+def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] = None) -> dict:
+    """The nightly digest's autonomous section, from the decision log and
+    `submissions`: what was submitted, dropped (top reasons), decided by the
+    moderator, done to seeds and organisations, and what needs the operator."""
+    from collections import Counter
+    log = autonomy.decisions(conn, since=since, limit=100_000)
+    by = Counter((d["subject"], d["verdict"]) for d in log)
+    drops = Counter(d["reason"] for d in log if d["subject"] == "event" and d["verdict"] == "drop")
+    o = outcomes_since(conn, since)
+    decided = o["decided"]
+    accepted = decided.get("published", 0) + decided.get("merged", 0)
+    n = accepted + decided.get("rejected", 0)
+    seeds = [d for d in log if d["subject"] == "seed"]
+    attention: list[str] = []
+    c = autonomy.circuit(conn)
+    if c:
+        attention.append(f"submissions stopped: {c.get('reason')} (since {c.get('at')}) — "
+                         "`autonomy resume` once fixed")
+    for r in _rows(conn, "SELECT resource, slug FROM submissions WHERE status = 'gone' "
+                         "AND decided_at >= ?", (since,)):
+        attention.append(f"{r['resource']} {r['slug']} left the queue but no surviving "
+                         "record was found — check whether it was merged or deleted")
+    for r in _rows(conn, "SELECT COALESCE(title, name) AS title, date_local, townloops_slug, "
+                         "cancel_note FROM events WHERE cancel_status = 'possibly-cancelled' "
+                         "ORDER BY date_utc"):
+        attention.append(f"possibly cancelled (not acted on): {r['title']} {r['date_local'] or ''}"
+                         f" ({r['townloops_slug']}) — {r['cancel_note']}")
+    for d in log:
+        if d["subject"] == "seed" and d["verdict"] == "relocate":
+            attention.append(f"seed {d['target'].removeprefix('seed:')} moved: "
+                             f"{d['evidence'].get('from')} → {d['evidence'].get('to')}")
+    stuck = conn.execute("SELECT COUNT(*) FROM events WHERE state LIKE 'stuck-%'").fetchone()[0]
+    if stuck:
+        attention.append(f"{stuck} event(s) stuck, waiting out a retry backoff")
+    report = series_report or {}
+    return {
+        "events_submitted": o["submitted"].get("events", 0),
+        "entities_submitted": sum(v for k, v in o["submitted"].items() if k != "events"),
+        "events_approved": by[("event", "approve")],
+        "events_dropped": sum(drops.values()),
+        "top_drop_reasons": drops.most_common(5),
+        "moderation": {"published": decided.get("published", 0),
+                       "merged": decided.get("merged", 0),
+                       "rejected": decided.get("rejected", 0), "gone": decided.get("gone", 0),
+                       "approval_rate": round(accepted / n, 2) if n else None,
+                       "rejection_rate": round(decided.get("rejected", 0) / n, 2) if n else None},
+        "pending_in_townloops": o["pending"],
+        "seeds_added": [d["target"].removeprefix("seed:") for d in seeds if d["verdict"] == "approve"],
+        "seeds_retired": [f"{d['target'].removeprefix('seed:')} ({d['reason']})" for d in seeds
+                          if d["verdict"] == "retire"],
+        "organisations_approved": by[("candidate", "submit")],
+        "series_candidates": report.get("clusters") or [],
+        "suspect_series": (report.get("multi_venue") or []) + (report.get("duplicate_dates") or []),
+        "needs_attention": attention,
+    }

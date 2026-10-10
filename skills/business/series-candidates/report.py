@@ -20,6 +20,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import asdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -71,6 +72,12 @@ def run(client, conn, days_back: int, days_ahead: int,
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"series-candidates-{now.date().isoformat()}.md"
     path.write_text(_markdown(town, report, f"from {days_back} days back to {days_ahead} ahead"))
+    # For the nightly digest's Series section (engine/orchestrator.summary).
+    (out_dir / "series-candidates-latest.json").write_text(json.dumps({
+        "generated_at": now.isoformat(timespec="seconds"),
+        "clusters": [asdict(c) for c in report.clusters],
+        "multi_venue": [asdict(d) for d in report.multi_venue],
+        "duplicate_dates": [asdict(d) for d in report.duplicate_dates]}, indent=1))
     return path, report
 
 

@@ -37,3 +37,8 @@ Filters (at least one of `--before` / `--source` REQUIRED — bare form refused 
 ```
 
 Hermes wraps this into a natural-language reply for the operator AND ends its message with a fenced JSON block containing `proposal` — the chat worker extracts the block into `chat_messages.tool_call_json` so the panel renders a Confirm/Cancel widget.
+
+## Autonomous mode
+
+Inactive: answers `{"inactive": true, …}` — the agent drops events itself
+and TownLoops moderation is the review step (`autonomy why <id>` explains a call).

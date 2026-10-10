@@ -118,3 +118,26 @@ promote.
   cron (`business-promote`) but spends nothing unless something is approved.
   sweep, verify and promote hold the `business-discovery` flock.
 - Firecrawl calls share `engine.policy.firecrawl_bucket`.
+
+## Kinds and autonomous mode
+
+Every subcommand takes `--kind business|community|nonprofit` (default
+business; `promote` defaults to all). Community groups and non-profits sweep
+`discovery.community` / `discovery.nonprofit` in town-profile.yaml
+(`category_query_terms`, `query_groups`, `seed_directories`,
+`facebook_terms`), verify against member-facing markers (join, volunteer,
+donate, meetings…), and ship as communities — a non-profit with community
+`kind` 'nonprofit'.
+
+Live dedup counts every TownLoops status: a pending match is `already-live`
+(already submitted), a rejected one is `rejected` with a `townloops` reason.
+A moderator rejection (engine/moderation) is remembered **by name**, like an
+operator decline: the same organisation under another URL is never proposed
+again.
+
+In autonomous mode `harvest` (weekly cron `org-harvest-weekly`) sweeps and
+verifies every configured kind and approves verified candidates itself
+(`autonomy.judge_candidate` — only once `autonomy.entity_moderation` is on);
+the `business-promote` cron then submits them through the gated client, so
+they land `pending` in the TownLoops moderation queue. `propose-*` answer
+`inactive`.

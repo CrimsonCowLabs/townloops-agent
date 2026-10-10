@@ -61,3 +61,13 @@ the title and tag.
 | `cancelled` | marked cancelled on TownLoops (or already gone) |
 | `apply-failed` | the live marking didn't land; `cancel_note` says why |
 | `dismissed` | operator says it's still on; never flagged again |
+
+## Autonomous mode
+
+No confirm step and no live title PATCH. `apply` (same cron) re-reads up to
+three flagged events' own pages (each at most daily); only when the page
+**explicitly** says cancelled or postponed is a pending "Cancelled: <title>"
+copy (with the `cancelled` tag and the same `source_url`) submitted for the
+TownLoops merge flow (`cancel_status` 'submitted'). A flag with no such
+statement is never acted on — it is listed in the nightly digest. `propose-*`
+answer `inactive`.

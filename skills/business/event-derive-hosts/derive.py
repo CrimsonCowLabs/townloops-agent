@@ -1,64 +1,53 @@
 #!/usr/bin/env python3
-"""event-derive-hosts — rule-based host identification. NULL is legit."""
+"""event-derive-hosts — the organisation hosting an event (a business, a
+community group or a non-profit), from one quote-checked AI pass over the
+event's own text (engine/event_people). NULL is legit: a name the text
+doesn't carry, or a kind it doesn't support, means no host.
+
+A failed AI call retries through the workqueue and, on the last attempt,
+goes on with no host rather than parking the event."""
 
 from __future__ import annotations
 
-import re
 import sys
 
+from engine import event_detail, event_people, workqueue
 from engine.derive_helpers import (
-    iso_utc_now, link_event_to_entity, load_event, mint_entity_uid,
+    insert_entity, link_event_to_entity, load_event, mint_entity_uid,
     normalize_name, open_db, parse_event_uid_arg, record_activity,
 )
 
 
 _WORKER = "event-derive-hosts"
-
-# Keywords that strongly suggest the event's title *is* the hosting
-# community/civic body (rather than being an event AT some other venue).
-_COMMUNITY_KEYWORDS = re.compile(
-    r"\b(committee|council|board|foundation|library|church|parish|"
-    r"congregation|society|association|club|coalition|"
-    r"neighborhood|community|hoa)\b",
-    re.IGNORECASE,
-)
-_MEETING_NOISE = re.compile(
-    r"\s*(?:—|-|:)?\s*(meeting|monthly meeting|regular meeting|session|"
-    r"gathering|assembly)\s*$",
-    re.IGNORECASE,
-)
+_ACTION = "extract-hosts"
+_TABLES = {"business": "businesses", "community": "communities"}
 
 
-def _trim_meeting_suffix(title: str) -> str:
-    return _MEETING_NOISE.sub("", (title or "").strip()).strip()
-
-
-def _find_community_by_name(conn, name: str):
+def _find_by_name(conn, table: str, name: str):
     n = normalize_name(name)
-    if not n:
-        return None
-    for r in conn.execute("SELECT entity_uid, name FROM communities").fetchall():
+    for r in conn.execute(f"SELECT entity_uid, name FROM {table}").fetchall():
         if normalize_name(r["name"]) == n:
             return dict(r)
     return None
 
 
-def _insert_shell_community(conn, event_uid: str, name: str) -> str:
-    from hashlib import sha1 as _sha1
-    entity_uid = mint_entity_uid("community", name, event_uid)
-    now = iso_utc_now()
-    content_hash = _sha1(f"{name}|civic".encode()).hexdigest()
-    conn.execute(
-        "INSERT OR IGNORE INTO communities("
-        "  entity_uid, source, source_kind, name, kind, "
-        "  first_seen_at, last_seen_at, content_hash, last_modified_at, "
-        "  derived_from_event_uid, derivation_confidence, linked_event_count"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-        (entity_uid, f"derived:event:{event_uid[:12]}", "derived",
-         name.strip(), "civic",
-         now, now, content_hash, now, event_uid, 70),
-    )
-    return entity_uid
+def _host_entity(conn, event_uid: str, host: dict) -> tuple[str, str, bool]:
+    """(entity kind, entity uid, created) for the verified host: a local row
+    of the same name, else a new shell — a non-profit is a community with
+    kind 'nonprofit'."""
+    kind = "business" if host["kind"] == "business" else "community"
+    table = _TABLES[kind]
+    existing = _find_by_name(conn, table, host["name"])
+    if existing:
+        return kind, existing["entity_uid"], False
+    entity_uid = mint_entity_uid(kind, host["name"], event_uid)
+    fields = {"source": f"derived:event:{event_uid[:12]}", "source_kind": "derived",
+              "name": host["name"], "derived_from_event_uid": event_uid,
+              "derivation_confidence": 80}
+    if kind == "community":
+        fields["kind"] = "nonprofit" if host["kind"] == "nonprofit" else "group"
+    insert_entity(conn, table, entity_uid, fields)
+    return kind, entity_uid, True
 
 
 def main() -> int:
@@ -71,9 +60,9 @@ def main() -> int:
         return 2
 
     # event-reconcile may have already resolved the host business/community
-    # from the source page's organizer field — honor it over the title rule.
+    # from the source page's organizer field — honor it.
     preset, preset_kind = event.get("derived_host_uid"), event.get("derived_host_kind")
-    preset_table = {"business": "businesses", "community": "communities"}.get(preset_kind or "")
+    preset_table = _TABLES.get(preset_kind or "")
     if preset and preset_table and conn.execute(
         f"SELECT 1 FROM {preset_table} WHERE entity_uid = ?", (preset,),
     ).fetchone():
@@ -83,35 +72,29 @@ def main() -> int:
         print(f"derived host ({preset_kind}): {preset} for event {event_uid[:12]} (preset)")
         return 0
 
-    title = event.get("title") or event.get("name") or ""
-    m = _COMMUNITY_KEYWORDS.search(title)
-    if not m:
+    found = event_people.derive(conn, event, event_detail.cached_page(event_uid))
+    if found is None:
+        if workqueue.is_last_attempt(conn, event_uid, _ACTION):
+            record_activity(conn, _WORKER, "no-host-signal", event_uid,
+                            detail="AI pass unavailable on the last attempt — no host",
+                            ok=False, error="ai-unavailable")
+            return 0
+        print(f"event {event_uid[:12]}: host AI pass failed — retried", file=sys.stderr)
+        return 1
+    host = found["host"]
+    if not host:
         record_activity(conn, _WORKER, "no-host-signal", event_uid,
-                        detail=f"title '{title[:60]}' has no civic keyword")
-        print(f"no host derivable from title; advancing NULL")
+                        detail="the event's text names no verifiable host")
+        print("no host derivable; advancing NULL")
         return 0
 
-    host_name = _trim_meeting_suffix(title)
-    if not host_name:
-        return 0
-
-    existing = _find_community_by_name(conn, host_name)
-    if existing:
-        entity_uid = existing["entity_uid"]
-        record_activity(conn, _WORKER, "host-matched", event_uid,
-                        detail=f"matched community '{host_name}' → {entity_uid[:12]}")
-    else:
-        entity_uid = _insert_shell_community(conn, event_uid, host_name)
-        record_activity(conn, _WORKER, "host-created", event_uid,
-                        detail=f"created shell community '{host_name}' → {entity_uid[:12]}")
-
-    conn.execute(
-        "UPDATE events SET derived_host_uid = ?, derived_host_kind = 'community' "
-        "WHERE event_uid = ?",
-        (entity_uid, event_uid),
-    )
-    link_event_to_entity(conn, event_uid, "community", entity_uid, role="host")
-    print(f"derived host (community): {entity_uid} for event {event_uid[:12]}")
+    kind, entity_uid, created = _host_entity(conn, event_uid, host)
+    record_activity(conn, _WORKER, "host-created" if created else "host-matched", event_uid,
+                    detail=f"{host['kind']} '{host['name']}' → {entity_uid[:12]}")
+    conn.execute("UPDATE events SET derived_host_uid = ?, derived_host_kind = ? "
+                 "WHERE event_uid = ?", (entity_uid, kind, event_uid))
+    link_event_to_entity(conn, event_uid, kind, entity_uid, role="host")
+    print(f"derived host ({host['kind']}): {entity_uid} for event {event_uid[:12]}")
     return 0
 
 

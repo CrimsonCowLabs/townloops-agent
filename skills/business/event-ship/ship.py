@@ -13,6 +13,16 @@ activity; the local title is never changed). The Series it will join makes
 the live lookup's strongest check — an occurrence of it on the same
 town-local date is this event. After shipping, the Series TownLoops reports
 is mirrored locally and blank Series-shared fields fill from siblings.
+
+Autonomous mode (engine/autonomy.py): the client is a GatedClient — a create
+waits (rc 75, the workqueue releases the claim without spending an attempt)
+while submissions are paused, the circuit is open or the pending cap is
+reached, and must come back `pending`. A live match TownLoops rejected means
+"don't submit" (the event is declined locally); a pending one is adopted
+and filled. A date/venue change to a published event is submitted as a
+pending event carrying its source_url, for the TownLoops merge flow, never
+PATCHed. Blank fields are first filled from the best other copy of the event
+(engine/event_dedup.best_of_copies).
 """
 
 from __future__ import annotations
@@ -21,8 +31,9 @@ import os
 import sys
 from typing import Any, Optional
 
+from engine import autonomy
 from engine import categories as cats
-from engine import event_dedup, event_tickets
+from engine import event_dedup, event_detail, event_state, event_tickets
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, record_activity,
 )
@@ -31,6 +42,11 @@ from engine.event_extract import town_tz_name, utc_times
 
 
 _WORKER = "event-ship"
+# Exit code for "not now": the workqueue releases the claim without counting
+# an attempt (engine/orchestrator).
+RC_DEFERRED = 75
+# _ship_event's answer when TownLoops already rejected this event.
+_DECLINED = object()
 
 # Ordering matters — venue first, then hosts, then people. Event last.
 _SHIP_ORDER = ("venue", "business", "community", "performer", "creator")
@@ -225,13 +241,27 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         _park_for_review(conn, event_uid, "find-live-event",
                          f"{why}: {slugs} — duplicate for the operator")
         return None
+    if found.row and isinstance(client, autonomy.GatedClient) \
+            and found.row.get("status") == "rejected":
+        return _decline_rejected(conn, event_uid, found)
     if found.row:
+        if isinstance(client, autonomy.GatedClient) and found.row.get("status") == "pending":
+            # Adopting a pending record (ours from an earlier run, or another
+            # submitter's): follow it like our own submission.
+            autonomy.record_submission(conn, "events", found.row["slug"],
+                                       **{**client.context, "local_uid": event_uid,
+                                          "series_slug": decision.series_slug})
         return _fill_live_event(client, conn, event, found.row, payload)
 
     idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:event:{event_uid[:16]}"
+    if isinstance(client, autonomy.GatedClient):
+        client.context.update(kind="new", local_uid=event_uid,
+                              series_slug=decision.series_slug)
     try:
         result = client.create("events", payload, idempotency_key=idem)
     except Exception as e:
+        if isinstance(e, autonomy.SubmissionsHeld):
+            raise
         msg = str(e)
         if is_conflict(e):
             # Created since the lookup (another worker): reconcile to it.
@@ -252,6 +282,54 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
     slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
     if isinstance(result, dict) and not _repair_dropped_fields(client, conn, event, slug, payload, result):
         return None
+    return slug
+
+
+def _decline_rejected(conn, event_uid: str, found) -> object:
+    """The moderator already rejected this event on TownLoops: never submit
+    it again."""
+    d = autonomy.Decision("drop", "rejected-on-townloops",
+                          {"live_slug": found.row.get("slug"), "matched_by": found.matched_by})
+    if event_state.decline(conn, event_uid, f"[autonomy] {d.reason}",
+                           from_states=("entities-enriched",)):
+        autonomy.record(conn, "event", event_uid, d)
+    print(f"event {event_uid[:12]}: TownLoops rejected {found.row.get('slug')} — not resubmitted")
+    return _DECLINED
+
+
+def _submit_change(client, conn, event: dict, meta: dict,
+                   venue_slug: Optional[str]) -> Optional[str]:
+    """Autonomous: a source-side date/venue change to a live event goes to
+    the moderator as a pending event with the same source_url, for the
+    TownLoops merge flow — the published event is never PATCHed. Returns the
+    pending event's slug."""
+    changes = meta.get("changes") or {}
+    if not ({"start_at", "venue"} & changes.keys()):
+        return meta["live_slug"]
+    payload = _event_payload(event)
+    venue_id = _resolve_venue_id(client, conn, event, venue_slug)
+    if venue_id:
+        payload["venue_id"] = venue_id
+    payload["slug"] = _slug_for("event", event["event_uid"])
+    client.context.update(kind="change", target_slug=meta["live_slug"],
+                          local_uid=event["event_uid"])
+    idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{event['event_uid'][:16]}"
+    try:
+        result = client.create("events", payload, idempotency_key=idem)
+    except autonomy.SubmissionsHeld:
+        raise
+    except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry
+        from engine.live_lookup import is_conflict
+        if not is_conflict(e):
+            record_activity(conn, _WORKER, "submit-change", event["event_uid"], ok=False,
+                            error=str(e)[:1000])
+            print(f"submit change for {meta['live_slug']} failed: {str(e)[:200]}", file=sys.stderr)
+            return None
+        result = {"slug": payload["slug"]}
+    slug = (result or {}).get("slug") or payload["slug"]
+    autonomy.record(conn, "change", event["event_uid"], autonomy.Decision(
+        "submit", "published-value-changed",
+        {"changes": sorted(changes), "target_slug": meta["live_slug"], "pending_slug": slug}))
     return slug
 
 
@@ -551,6 +629,14 @@ def main() -> int:
         print(f"event not found: {event_uid}", file=sys.stderr)
         return 2
 
+    mode = autonomy.settings()
+    if mode.autonomous:
+        filled = event_dedup.best_of_copies(conn, event)
+        if filled:
+            record_activity(conn, _WORKER, "best-of-copies", event_uid,
+                            detail=", ".join(f"{k} from {v[:12]}" for k, v in filled.items()))
+            event = load_event(conn, event_uid)
+
     if not _ensure_utc_times(conn, event):
         # rc 1 → workqueue retries, then marks the event stuck for the operator.
         msg = f"no UTC start time (date={event.get('date')!r}) — not shipped"
@@ -586,6 +672,24 @@ def main() -> int:
         print(f"TownLoops env incomplete ({e}); marked local-only", file=sys.stderr)
         return 0
 
+    if mode.autonomous:
+        gate = autonomy.submission_gate(conn, mode)
+        if gate.verdict != "submit":
+            print(f"event {event_uid[:12]}: submissions held ({gate.reason}) — not now")
+            return RC_DEFERRED
+        client = autonomy.GatedClient(client, conn, mode)
+        seed = (event.get("source") or "").removeprefix("seed:") or None
+        client.context = {"seed": seed, "discovery_source": f"event:{seed}" if seed else None}
+    try:
+        return _ship(client, conn, event)
+    except autonomy.SubmissionsHeld as e:
+        print(f"event {event_uid[:12]}: submissions held ({e.reason}) — not now")
+        return RC_DEFERRED
+
+
+def _ship(client, conn, event: dict) -> int:
+    event_uid = event["event_uid"]
+
     # 1) Ship derived entities in order (venue → business → community →
     #    performer → creator).
     links = conn.execute(
@@ -614,17 +718,22 @@ def main() -> int:
     # 2) Ship the event itself — PATCH the live row if event-reconcile staged
     #    this as a change to an existing TownLoops event, else create.
     change = _reconcile_change(event)
-    if change:
+    if change and isinstance(client, autonomy.GatedClient):
+        event_slug = _submit_change(client, conn, event, change, venue_slug)
+    elif change:
         event_slug = _patch_live_event(client, conn, event, change, venue_slug=venue_slug)
         if event_slug:
             _supersede_older_copies(conn, event_uid, event_slug)
     else:
         event_slug = _ship_event(client, conn, event, venue_slug)
+    if event_slug is _DECLINED:
+        return 0
     if not event_slug:
         return 1
 
     _mark_shipped(conn, event_uid, event_slug, disabled=False)
     _after_ship_series(client, conn, event_uid, event_slug)
+    event_detail.drop_cached_page(event_uid)
     print(f"shipped event {event_uid[:12]} → {event_slug}")
     return 0
 

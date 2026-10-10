@@ -31,3 +31,8 @@ Filters (at least one required):
   "preview": [{"event_uid": "…", "title": "…", "date": "…", "source": "…"}, …]
 }
 ```
+
+## Autonomous mode
+
+Inactive: answers `{"inactive": true, …}` — the agent approves events itself
+and TownLoops moderation is the review step (`autonomy why <id>` explains a call).

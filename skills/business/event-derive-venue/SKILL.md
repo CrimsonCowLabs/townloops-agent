@@ -65,3 +65,10 @@ share the pre-existing row (the normalize lookup runs first).
 - `../event-derive-hosts/references/entity-classification.md` — a live business does not bind as a venue; rooms inside a property are venues, not businesses.
 - `../operator-audit-upcoming/references/upcoming-audit-playbook.md` §Null or vague venues — truncated or ambiguous venue clues go to review, never a guessed binding.
 - `references/duplicate-entities.md` — a duplicate live venue is evidence for the operator (events by slug *and* id, local references), never a delete.
+
+## Autonomous mode
+
+A guess at a live venue (`review`) doesn't park the event: it goes on
+unbound and ships with the venue's name only, for the TownLoops moderator's
+curate-venue flow (`venue:name-only` decision, reason `ambiguous-live-venue`).
+An event with no venue signal at all ships without a venue.

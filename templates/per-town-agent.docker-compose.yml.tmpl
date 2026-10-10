@@ -7,6 +7,11 @@
 # docker-compose.override.yml, not in this file — e.g. a LAN dashboard port
 # (`!override` replaces the list instead of adding a second binding):
 #   services: {dashboard: {ports: !override ["0.0.0.0:8090:8090"]}}
+# An autonomous town (town-profile.yaml `operating_mode: autonomous`) doesn't
+# run the dashboard — the TownLoops admin moderation queue is its only review
+# step. Put the dashboard behind a profile no one enables, in that town's
+# docker-compose.override.yml, then `docker compose up -d --remove-orphans`:
+#   services: {dashboard: {profiles: ["supervised-dashboard"]}}
 #
 # Prerequisites (both from templates/_shared/):
 #   - firecrawl stack up (creates external network `firecrawl-shared-net`)
