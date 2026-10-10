@@ -28,18 +28,34 @@ event as `apply-failed` for the operator instead of being retried.
 
 Autonomous mode (engine/autonomy) has no confirm step and never PATCHes a
 published title: `submit_evidenced` re-reads a flagged event's own page, and
-only when the page itself says it is cancelled or postponed submits a
+only when the page itself says it is cancelled or postponed (when
+source_url is the seed's listing, a line naming the event) submits a
 pending "Cancelled: " copy carrying its source_url, for the TownLoops merge
 flow (`cancel_status` 'submitted'). A flag with no such statement stays
 flagged and is listed in the nightly digest — never acted on.
+
+Still listed, but cancelled: a seed can keep listing an event its listing
+(or the event's own page) says is cancelled or postponed. event-find checks
+each listed event's extracted title/description for such a statement and
+keeps it only if the statement is on the scraped listing (`listing_statement`,
+quote-checked); `record_listing` then flags the live copy `possibly-cancelled`
+— the same operator confirm / autonomous own-page re-read as a vanished
+event — and declines copies not shipped yet (`decline_cancelled`, which
+read-detail also uses when the event's own page says so). The marker comes
+off the title first (`strip_status`), so the listing still matches its row.
+A flag the listing holds isn't cleared by `flag_vanished` while the seed
+keeps listing the event; it clears when the listing stops saying so.
 """
 
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Iterable, Literal, Optional
 
+from engine import event_state
 from engine.derive_helpers import dict_rows as _rows, iso_utc_now
 
 
@@ -113,7 +129,7 @@ def flag_vanished(conn: sqlite3.Connection, threshold: int = DEFAULT_MISS_THRESH
                         "  cancel_flagged_at = ?, cancel_note = ? WHERE event_uid = ?",
                         (iso_utc_now(), note, m["event_uid"]))
                     flagged.append(m["event_uid"])
-        else:
+        elif not any("cancel_listing" in _extra(m) for m in members):
             for m in shipped:
                 if m["cancel_status"] in _FLAGGED:
                     conn.execute(
@@ -121,6 +137,103 @@ def flag_vanished(conn: sqlite3.Connection, threshold: int = DEFAULT_MISS_THRESH
                         "  cancel_note = NULL WHERE event_uid = ?", (m["event_uid"],))
                     cleared.append(m["event_uid"])
     return {"flagged": flagged, "cleared": cleared}
+
+
+# --------------------------------------------------------------------------
+# Still listed, but the listing or the event's own page says cancelled
+# --------------------------------------------------------------------------
+
+_STATUS = r"(?:cancell?ed|postponed)"
+# "CANCELLED: X", "Postponed - X", "[Cancelled] X", "X (Cancelled)", "X — POSTPONED".
+# A bare leading word ("Cancelled Plans Comedy Hour") is part of the title.
+_TITLE_MARKER = re.compile(
+    rf"^\W*{_STATUS}\b\s*[\])]?\s*[:\-–—|!]+\s*|^\s*[\[(]\s*{_STATUS}\s*[\])]\s*[:\-–—|]*\s*"
+    rf"|\s*[\[(]\s*{_STATUS}\s*[\])]\s*$|\s*[:\-–—|]+\s*{_STATUS}\s*!?\s*$",
+    re.IGNORECASE)
+# Not shipped yet: declining it is enough.
+_PRE_SHIP = ("metadata-extracted", *event_state.IN_FLIGHT_STATES)
+_QUOTE_MAX = 300
+
+
+def strip_status(title: str) -> str:
+    """`title` without a cancelled/postponed marker, so a listing that marks
+    an event still matches the row it listed before."""
+    return _TITLE_MARKER.sub("", title or "").strip() or title
+
+
+def listing_statement(evt: dict, page: str) -> Optional[str]:
+    """The sentence in which a listing says this extracted event is cancelled
+    or postponed — from its title or description, and only if the scraped
+    listing `page` carries it (engine/page_extract quote check). None when
+    it says no such thing."""
+    from engine import autonomy
+    from engine.page_extract import join_quotes
+    title = evt.get("title") or ""
+    text = "\n".join(x for x in (title, evt.get("description") or "") if x)
+    d = autonomy.cancellation_evidence(text, strip_status(title))
+    if d.verdict != "submit":
+        return None
+    return join_quotes([d.evidence["quote"]], page or "", lambda q: True, _QUOTE_MAX)
+
+
+def record_listing(conn: sqlite3.Connection, uid: str, quote: Optional[str],
+                   seed_name: str) -> Optional[str]:
+    """What a seed's run said about its listed row `uid`: `quote` is the
+    listing's cancellation statement (listing_statement), or None. A
+    statement flags the event's live copy `possibly-cancelled` and declines
+    its copies not shipped yet ('flagged' / 'declined'); its absence lifts an
+    earlier statement ('cleared' — flag_vanished then clears the flag).
+    Caller commits."""
+    rows = _rows(conn, "SELECT * FROM events WHERE event_uid = ?", (uid,))
+    if not rows:
+        return None
+    row, extra = rows[0], _extra(rows[0])
+    if quote is None:
+        if extra.pop("cancel_listing", None) is None:
+            return None
+        conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
+                     (json.dumps(extra), uid))
+        return "cleared"
+    extra["cancel_listing"] = {"seed": seed_name, "quote": quote, "at": iso_utc_now()}
+    conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?", (json.dumps(extra), uid))
+    g = row["canonical_event_uid"] or uid
+    members = _rows(conn, "SELECT * FROM events WHERE (canonical_event_uid = ? OR event_uid = ?) "
+                          "AND status != 'superseded'", (g, g))
+    note = f'listed as cancelled by {seed_name}: "{quote}"'
+    out = None
+    for m in members:
+        if m["townloops_slug"]:
+            if m["status"] == "duplicate":   # retired onto a sibling's live slug
+                continue
+            if conn.execute(
+                    "UPDATE events SET cancel_status = 'possibly-cancelled', cancel_flagged_at = ?, "
+                    "  cancel_note = ? WHERE event_uid = ? AND cancel_status IS NULL",
+                    (iso_utc_now(), note[:1000], m["event_uid"])).rowcount:
+                out = "flagged"
+        elif decline_cancelled(conn, m["event_uid"], quote, f"{seed_name}'s listing",
+                               "listed-cancelled"):
+            out = out or "declined"
+    return out
+
+
+def decline_cancelled(conn: sqlite3.Connection, uid: str, quote: str, where: str,
+                      reason: str) -> bool:
+    """Decline an event not shipped yet because `where` says it is cancelled
+    or postponed (`quote`). In autonomous mode the drop is a recorded
+    decision. Caller commits."""
+    from engine import autonomy
+    if not event_state.decline(conn, uid, f'cancelled: {where} says "{quote}"',
+                               from_states=_PRE_SHIP):
+        return False
+    if autonomy.is_autonomous():
+        autonomy.record(conn, "event", uid, autonomy.Decision(
+            "drop", reason, {"quote": quote, "where": where}))
+    return True
+
+
+def _extra(row: dict) -> dict:
+    from engine import autonomy
+    return autonomy.extra(row)
 
 
 # --------------------------------------------------------------------------
@@ -267,7 +380,8 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
         conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?", (json.dumps(extra), uid))
         conn.commit()
         ok, page, err = fetch(row["source_url"])
-        d = autonomy.cancellation_evidence(page if ok else None, row["title"] or row["name"])
+        d = autonomy.cancellation_evidence(page if ok else None, row["title"] or row["name"],
+                                           own_page=not _is_listing(conn, row))
         if d.verdict != "submit":
             out["no_statement"] += 1
             autonomy.record(conn, "cancellation", uid, d)
@@ -295,6 +409,13 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
              f"{d.evidence['quote'][:200]}")
         out["submitted"] += 1
     return out
+
+
+def _is_listing(conn: sqlite3.Connection, row: dict) -> bool:
+    """The event's source_url is its seed's listing of many events, not a
+    page of its own."""
+    from engine.event_detail import _canon, seed_urls
+    return _canon(row.get("source_url")) in seed_urls(conn, row)
 
 
 def _set(conn: sqlite3.Connection, uid: str, status: str, note: str) -> None:

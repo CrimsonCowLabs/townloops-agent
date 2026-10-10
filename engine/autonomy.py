@@ -649,10 +649,13 @@ _STATUS_LINE = re.compile(
     r"(?:cancell?ed|postponed|called off)", re.IGNORECASE)
 
 
-def cancellation_evidence(page: Optional[str], title: Optional[str]) -> Decision:
+def cancellation_evidence(page: Optional[str], title: Optional[str],
+                          own_page: bool = True) -> Decision:
     """Whether an event's own page explicitly says it is cancelled or
     postponed: a line of the page that says so (and, when it carries the
-    title, names this event). A vanished listing alone never is."""
+    title, names this event). A vanished listing alone never is. A page
+    that isn't the event's own (`own_page=False`: a seed's listing of many
+    events) counts only a line that names the event."""
     if not page:
         return Decision("hold", "no-page", {})
     tokens = {t for t in normalize_name(title or "").split() if len(t) > 3}
@@ -660,7 +663,7 @@ def cancellation_evidence(page: Optional[str], title: Optional[str]) -> Decision
         if not _CANCELLED.search(line) or _HYPOTHETICAL.search(line):
             continue
         words = set(normalize_name(line).split())
-        if _STATUS_LINE.search(line) or (tokens and tokens <= words):
+        if (own_page and _STATUS_LINE.search(line)) or (tokens and tokens <= words):
             return Decision("submit", "page-states-cancelled", {"quote": line.strip()[:300]})
     return Decision("hold", "no-explicit-statement", {})
 

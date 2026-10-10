@@ -284,9 +284,19 @@ def _find(conn: sqlite3.Connection, args) -> int:
                 continue
             if args.dry_run:
                 continue
+            # "CANCELLED: X" on the listing: the marker comes off so it is still
+            # row X, which is flagged (live) or declined (not shipped yet).
+            said = event_cancel.listing_statement(evt, md)
+            if said:
+                evt = {**evt, "title": event_cancel.strip_status(evt["title"])}
             action = _upsert_event(conn, seed_name, evt)
-            seen_uids.append(_event_uid(seed_name, evt["title"], evt["date"]))
+            uid = _event_uid(seed_name, evt["title"], evt["date"])
+            seen_uids.append(uid)
             listed_dates.append(evt["date"])
+            listed = event_cancel.record_listing(conn, uid, said, seed_name)
+            if listed in ("flagged", "declined"):
+                inspection.record(worker="event-find", action=f"listed-cancelled-{listed}",
+                                  target=uid, detail=f"{seed_name}: {said}")
             if action == "inserted":
                 inserted += 1
             elif action == "updated":

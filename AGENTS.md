@@ -89,7 +89,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `live_lookup.py` (find a live record before creating one),
     `event_dedup.py` (cross-seed dedup: `canonical_event_uid` on every new event via `upsert_event`;
     one copy stays pending, the rest are declined `status='duplicate'`; primary beats syndicator seeds),
-    `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`; operator-confirmed only,
+    `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`, and still-listed events the
+    listing marks cancelled/postponed — quote-checked; live → flagged, not shipped → declined; operator-confirmed only,
     marked live as `Cancelled: ` title + `cancelled` tag by the `event-cancellations` skill),
     `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
     Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
@@ -204,7 +205,8 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   date is `new`, never a reschedule). `events.series_slug/series_id` are written only from TownLoops responses.
 - **One canonical event per real event; cancellations are operator-gated.** `event_uid` is per seed;
   `canonical_event_uid` (engine/event_dedup) groups copies across seeds, and event-ship never creates
-  a copy whose sibling is already live. An event missing from all its sources is only *flagged*
+  a copy whose sibling is already live. An event missing from all its sources, or still listed but marked
+  cancelled on the listing (quote-checked; not-yet-shipped copies are just declined), is only *flagged*
   (`events.cancel_status`); it's marked cancelled on TownLoops only after the operator confirms
   (`confirm_cancellations` widget → `event-cancellations apply`). Never wire auto-cancel.
 - **Source-health alerts fire on transitions only.** `engine/source_health.record_run` is the one

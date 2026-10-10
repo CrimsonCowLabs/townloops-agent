@@ -40,7 +40,10 @@ second run while one is going exits 0 and records `skipped-overlap`.
    `[dedup]` note. A primary source's copy beats a syndicator's (`event-seed-discovery set-role`),
    and a copy the operator already decided or that is live is never displaced.
 6. Count the run against the seed's upcoming rows for cancellation detection
-   (engine/event_cancel.py — see the `event-cancellations` skill).
+   (engine/event_cancel.py — see the `event-cancellations` skill). An event whose
+   extracted title or description says it is cancelled or postponed — and the listing
+   carries that sentence — keeps its row (the `CANCELLED:` marker comes off the title);
+   its live copy is flagged `possibly-cancelled`, a copy not shipped yet is declined.
 7. Record the run (events listed, inserted, updated) in `source_runs` and judge the seed's
    health (engine/source_health.py — see below).
 8. Update `event_seeds.last_scraped_at` and `last_event_count`.

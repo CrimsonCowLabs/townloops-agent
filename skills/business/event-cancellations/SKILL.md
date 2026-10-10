@@ -1,6 +1,6 @@
 ---
 name: event-cancellations
-description: Live events that vanished from all their sources — list them, propose confirm/dismiss for the operator, and mark operator-confirmed ones cancelled on TownLoops.
+description: Live events that vanished from all their sources or that their listing marks cancelled — list them, propose confirm/dismiss for the operator, and mark operator-confirmed ones cancelled on TownLoops.
 ---
 
 # event-cancellations
@@ -25,6 +25,19 @@ skill is the operator's side of it. Nothing is cancelled automatically.
 
 A flag can also mean the event moved to another date or was renamed past
 recognition — check the source before confirming.
+
+## Still listed, but marked cancelled
+
+A seed may keep listing an event it marks cancelled or postponed
+("CANCELLED: Jazz Night", "this event has been postponed"). event-find keeps
+such a statement only if the listing page carries it (quote check), takes
+the marker off the title so it still matches its row, and then:
+
+- **live** — flags it `possibly-cancelled` (`cancel_note`: `listed as
+  cancelled by <seed>: "<quote>"`), the same as a vanished event. The flag
+  holds while the listing keeps saying so and clears when it stops.
+- **not shipped yet** — declines it with the quote as the note. read-detail
+  does the same when the event's own page says so.
 
 ## CLI
 
@@ -66,7 +79,8 @@ the title and tag.
 
 No confirm step and no live title PATCH. `apply` (same cron) re-reads up to
 three flagged events' own pages (each at most daily); only when the page
-**explicitly** says cancelled or postponed is a pending "Cancelled: <title>"
+**explicitly** says cancelled or postponed (when the event's `source_url` is
+the seed's listing, a line that names the event) is a pending "Cancelled: <title>"
 copy (with the `cancelled` tag and the same `source_url`) submitted for the
 TownLoops merge flow (`cancel_status` 'submitted'). A flag with no such
 statement is never acted on — it is listed in the nightly digest. `propose-*`

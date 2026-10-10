@@ -176,8 +176,11 @@ def drain_workqueue(conn: Optional[sqlite3.Connection] = None) -> dict:
                             "SELECT state FROM events WHERE event_uid = ?",
                             (uid,),
                         ).fetchone()
-                        if current_state and next_state:
-                            from_state = current_state["state"]
+                        # Only from the state this action serves: a skill that
+                        # declined the event (read-detail on a cancelled page)
+                        # has the last word.
+                        from_state = current_state["state"] if current_state else None
+                        if next_state and event_state.next_action_for(from_state or "") == action:
                             if event_state.attempt_advance(
                                 conn, uid, from_state, next_state,
                             ):
