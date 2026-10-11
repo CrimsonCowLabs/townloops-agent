@@ -97,6 +97,8 @@ def test_every_docker_script_job_runs_a_wrapper():
     ("event_seed_discovery.py", [], ["discover", "--limit", "15"]),
     ("event_seed_discovery.py", ["probe", "--limit", "4"], ["probe", "--limit", "4"]),
     ("event_cancellations.py", [], ["apply"]),
+    ("event_seed_probe.py", [], ["probe", "--limit", "4"]),
+    ("event_seed_review.py", [], ["review"]),
     ("event_cancellations.py", ["apply", "--limit", "5"], ["apply", "--limit", "5"]),
 ])
 def test_exec_wrappers_default_or_pass_args_through(script, argv, expected, tmp_state_dir, tmp_path,
