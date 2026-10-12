@@ -136,6 +136,15 @@ def test_a_facebook_page_ships_as_the_facebook_link_not_the_website(fresh_db, ap
     assert post["facebook"].endswith("facebook.com/brandnewbakery")
 
 
+def test_a_listing_page_candidate_ships_without_a_website(fresh_db, api):
+    uid = _seed(fresh_db, "https://www.restaurantji.com/ca/south-lake-tahoe/brand-new-bakery-/",
+                "Brand New Bakery")
+    bp.approve(fresh_db, [uid])
+    bp.promote_approved(fresh_db, api, "slt", enrich=_enrich_filling())
+    [post] = api.creates()
+    assert "website" not in post
+
+
 def test_a_failed_ship_stays_approved_and_the_retry_ships_once(fresh_db, api):
     uid = _seed(fresh_db, "https://brand-new.example/", "Brand New Bakery")
     bp.approve(fresh_db, [uid])

@@ -274,6 +274,10 @@ SITES = {
     "https://valhalla.example/": "theater.html",
     "https://valhalla.example/accessibility": "theater-access.html",
     "https://artscenter.example/": "boilerplate.html",
+    "https://cascadekitchens.example/": "listing-og-url.html",
+    # a listing page that would read fine — and must still never be the website
+    ("https://www.restaurantji.com/ca/south-lake-tahoe/"
+     "cascade-kitchens-food-hall-and-bar-/"): "listing-og-url.html",
 }
 
 
@@ -457,6 +461,57 @@ class TestEnrichEntity:
         assert row["address"] == "3040 US-50, Meyers, CA"
         assert row["image_path"] == "https://scontent.fbcdn.example/v/sierra-strings-profile.jpg"
         assert row["website"] is None
+
+    # Seen on SLT: "Cascade Kitchens Food Hall & Bar" got its restaurantji
+    # page as its website.
+    RESTAURANTJI = ("https://www.restaurantji.com/ca/south-lake-tahoe/"
+                    "cascade-kitchens-food-hall-and-bar-/")
+
+    def test_a_listing_page_is_never_the_website(self, conn, web):
+        web["search"] = [{"url": self.RESTAURANTJI,
+                          "title": "Cascade Kitchens Food Hall & Bar - South Lake Tahoe, CA"}]
+        uid = _entity(conn, "business", "Cascade Kitchens Food Hall & Bar")
+        out = ee.enrich_entity(conn, "business", uid, "South Lake Tahoe", ee.Budget(5))
+        assert out.status == "not-found"
+        assert _row(conn, "business", uid)["website"] is None
+        assert self.RESTAURANTJI not in web["fetched"]
+
+    def test_the_own_site_wins_over_a_listing_page_found_alongside_it(self, conn, web):
+        web["search"] = [{"url": "https://www.yelp.com/biz/cuppa-tahoe", "title": "Cuppa Tahoe - Yelp"},
+                         {"url": "https://www.restaurantji.com/ca/south-lake-tahoe/cuppa-tahoe-/",
+                          "title": "Cuppa Tahoe, South Lake Tahoe - Menu"},
+                         {"url": "https://cuppa.example/", "title": "Cuppa Tahoe - Coffee"}]
+        uid = _entity(conn, "business", "Cuppa Tahoe")
+        ee.enrich_entity(conn, "business", uid, "South Lake Tahoe", ee.Budget(5))
+        assert _row(conn, "business", uid)["website"] == "https://cuppa.example/"
+        assert web["fetched"] == ["https://cuppa.example/"]
+
+    @pytest.mark.parametrize("kind", ["venue", "business", "community"])
+    def test_a_site_pointing_og_url_at_a_listing_keeps_its_own_url(self, conn, web, kind):
+        web["search"] = [{"url": "https://cascadekitchens.example/",
+                          "title": "Cascade Kitchens Food Hall & Bar"}]
+        uid = _entity(conn, kind, "Cascade Kitchens Food Hall & Bar")
+        ee.enrich_entity(conn, kind, uid, "South Lake Tahoe", ee.Budget(5))
+        row = _row(conn, kind, uid)
+        assert row["website"] == "https://cascadekitchens.example/"
+        assert row["description"] == "A food hall and bar in South Lake Tahoe."
+
+    def test_a_stored_listing_website_is_searched_past_not_read(self, conn, web):
+        web["search"] = [{"url": "https://cascadekitchens.example/",
+                          "title": "Cascade Kitchens Food Hall & Bar"}]
+        uid = _entity(conn, "business", "Cascade Kitchens Food Hall & Bar", website=self.RESTAURANTJI)
+        out = ee.enrich_entity(conn, "business", uid, "South Lake Tahoe", ee.Budget(5))
+        row = _row(conn, "business", uid)
+        assert out.status == "enriched"
+        assert web["fetched"] == ["https://cascadekitchens.example/"]
+        assert row["description"] == "A food hall and bar in South Lake Tahoe."
+        assert row["website"] == self.RESTAURANTJI      # fill-blanks: the stored value stays
+
+    def test_research_entity_never_returns_a_listing_website(self, web):
+        web["search"] = [{"url": self.RESTAURANTJI,
+                          "title": "Cascade Kitchens Food Hall & Bar - South Lake Tahoe, CA"}]
+        assert "website" not in ee.research_entity(
+            "Cascade Kitchens Food Hall & Bar", None, "South Lake Tahoe", ee.Budget(5), "business")
 
     def test_existing_values_are_never_overwritten(self, conn, web):
         uid = _entity(conn, "venue", "Lakeview Commons", website="https://city.example/lakeview",

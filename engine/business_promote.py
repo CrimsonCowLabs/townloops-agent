@@ -35,7 +35,7 @@ from typing import Callable, Iterable, Literal, Optional
 from urllib.parse import urlparse
 
 from engine import business_discovery as bd
-from engine import entity_ship
+from engine import entity_ship, listing_hosts
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid,
 )
@@ -276,8 +276,11 @@ def _local_entity(conn: sqlite3.Connection, cand: dict, name: str, kind: str) ->
         entity_uid = same["entity_uid"] if same else mint_entity_uid(
             ekind, name, f"candidate:{cand['candidate_uid']}")
     verify = cand["verify"] or {}
-    fields = {**{k: v for k, v in (verify.get("draft") or {}).items() if k in _DRAFT_FIELDS},
-              _page_field(cand["canonical_url"]): cand["canonical_url"],
+    page = _page_field(cand["canonical_url"])
+    draft = {k: v for k, v in (verify.get("draft") or {}).items() if k in _DRAFT_FIELDS
+             and not (k == "website" and listing_hosts.is_listing_url(v))}
+    fields = {**draft,
+              **({page: cand["canonical_url"]} if page else {}),
               **{k: verify[k] for k in ("address", "phone") if verify.get(k)}}
     if ekind == "community":
         fields["kind"] = "nonprofit" if kind == "nonprofit" else "group"
@@ -301,6 +304,10 @@ def _local_entity(conn: sqlite3.Connection, cand: dict, name: str, kind: str) ->
     return entity_uid
 
 
-def _page_field(url: str) -> str:
+def _page_field(url: str) -> Optional[str]:
+    """The field the candidate's page fills: its social link, else its
+    website — none for a listing page (engine.listing_hosts)."""
+    if listing_hosts.is_listing_url(url):
+        return None
     host = (urlparse(url).hostname or "").lower().removeprefix("www.").removeprefix("m.")
     return _SOCIAL_HOSTS.get(host, "website")

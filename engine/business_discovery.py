@@ -48,7 +48,7 @@ from difflib import SequenceMatcher
 from typing import Iterable, Optional
 from urllib.parse import urlparse
 
-from engine import discovery
+from engine import discovery, listing_hosts
 from engine.derive_helpers import entity_richness, iso_utc_now, normalize_name
 
 
@@ -64,11 +64,11 @@ PROPOSED = ("new", "verified")
 _PROPOSED_SQL = "(" + ", ".join(f"'{s}'" for s in PROPOSED) + ")"
 
 # Hosts many businesses share: a website here identifies a business only by
-# its exact page, never by the host.
+# its exact page, never by the host. Listing hosts (engine.listing_hosts)
+# are shared too — see _shared_host.
 SHARED_HOSTS = {
     "facebook.com", "instagram.com", "tiktok.com", "x.com", "twitter.com",
     "youtube.com", "linktr.ee", "sites.google.com", "google.com",
-    "eventbrite.com", "yelp.com", "tripadvisor.com",
 }
 
 _GENERIC_TITLE_PARTS = {"home", "homepage", "home page", "welcome", "official site",
@@ -86,6 +86,10 @@ class LiveMatch:
     name: str
     reason: str
     status: Optional[str] = None     # the live row's TownLoops status, when it has one
+
+
+def _shared_host(host: str) -> bool:
+    return host in SHARED_HOSTS or listing_hosts.is_listing_host(host)
 
 
 def _host(url: str) -> str:
@@ -116,7 +120,7 @@ class LiveIndex:
             canon = discovery.canonicalize_url(site)
             self._by_url[canon] = r
             host = _host(canon)
-            if host and host not in SHARED_HOSTS:
+            if host and not _shared_host(host):
                 self._by_site[(host, urlparse(canon).path or "/")] = r
 
     @classmethod
@@ -175,7 +179,7 @@ class LiveIndex:
         the page sits under the website's path. A chain's per-location
         website (`aleworx.com/stateline`) covers only that location's pages."""
         host = _host(canonical_url)
-        if host in SHARED_HOSTS:
+        if _shared_host(host):
             return None
         path = urlparse(canonical_url).path or "/"
         best, best_len = None, -1

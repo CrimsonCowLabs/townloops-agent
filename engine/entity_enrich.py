@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import urlparse
 
-from engine import entity_classify, page_extract
+from engine import entity_classify, listing_hosts, page_extract
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity,
     names_match, normalize_name,
@@ -164,7 +164,8 @@ class Resolution:
 
 
 def _pick_site(name: str, results: list[dict]) -> Optional[str]:
-    """First search hit that is plausibly the entity's own site."""
+    """First search hit that is plausibly the entity's own site — never a
+    listing page (host_blocked covers engine.listing_hosts)."""
     from engine.discovery import host_blocked
     compact = normalize_name(name).replace(" ", "")
     for r in results:
@@ -203,11 +204,6 @@ _ACCESS_LINKS = (
 _NOT_A_PAGE = re.compile(r"\.(?:pdf|docx?|jpe?g|png|gif|webp|mp4|zip)$", re.IGNORECASE)
 
 
-def _bare_host(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
-    return host[4:] if host.startswith("www.") else host
-
-
 def access_page(links: list[tuple[str, str]], site_url: str) -> Optional[str]:
     """The site's own accessibility page among `links` ((url, anchor text)
     from the page at `site_url`), else its visit page, else its FAQ; None
@@ -219,7 +215,8 @@ def access_page(links: list[tuple[str, str]], site_url: str) -> Optional[str]:
     for url, text in links:
         p = urlparse(url.split("#")[0])
         path = p.path.rstrip("/")
-        if (_bare_host(url) != _bare_host(site_url) or path == root
+        if (listing_hosts.bare_host(url) != listing_hosts.bare_host(site_url)
+                or path == root
                 or (root and not path.startswith(root + "/"))
                 or _NOT_A_PAGE.search(p.path)):
             continue
@@ -252,6 +249,9 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
     the site's own accessibility/visit/FAQ page (access_page) is added too,
     if the budget has a call left — it only feeds PAGE_FIELDS."""
     from engine import discovery, research
+    if url and listing_hosts.is_listing_url(url):
+        # A listing page on file is not the entity's site — look for that.
+        url = None
     if not url:
         if not budget.take():
             return Lookup(exhausted=True)
@@ -294,11 +294,12 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
             else:
                 # Not deferred: a dead link would re-read the site forever.
                 unread.append(f"could not read access page {extra}")
-    raw.setdefault("website", url)
-    if _is_facebook(raw["website"]):
+    website = _own_website(raw.pop("website", None), url)
+    if website and _is_facebook(website):
         # A Facebook page is the entity's facebook, not its website.
         raw.setdefault("facebook", url)
-        del raw["website"]
+    elif website:
+        raw["website"] = website
     payload, errors = validate_payload(kind or "venue", raw)
     errors += unread
     text = "\n\n".join(texts)
@@ -312,6 +313,16 @@ def _lookup(name: str, url: Optional[str], town: str, budget: Budget,
                   text=text)
 
 
+def _own_website(page_url: Optional[str], url: str) -> Optional[str]:
+    """The website a read of `url` gives: the page's own canonical URL, else
+    `url` — never a listing page (engine.listing_hosts). A listing page can
+    be read as evidence; its URL is not the entity's website."""
+    for candidate in (page_url, url):
+        if candidate and not listing_hosts.is_listing_url(candidate):
+            return candidate
+    return None
+
+
 def _research(row: dict, kind: str, town: str, budget: Budget,
               llm: Optional[entity_classify.LLM]) -> Lookup:
     """Look the entity up, then have `llm` read its PAGE_FIELDS that are
@@ -319,7 +330,9 @@ def _research(row: dict, kind: str, town: str, budget: Budget,
     was throttled marks the lookup `page_deferred`. With no `llm`,
     PAGE_FIELDS are not read."""
     wanted = {k: h for k, h in PAGE_FIELDS.get(kind, {}).items() if not row.get(k)}
-    found = _lookup(row["name"], row.get("website") or row.get("facebook"), town, budget, kind,
+    known = next((u for u in (row.get("website"), row.get("facebook"))
+                  if u and not listing_hosts.is_listing_url(u)), None)
+    found = _lookup(row["name"], known, town, budget, kind,
                     read_access_page="accessibility_notes" in wanted and llm is not None)
     if found.exhausted or not wanted or not found.text or llm is None:
         return found
@@ -458,17 +471,16 @@ def fill_blanks(conn: sqlite3.Connection, kind: str, entity_uid: str, payload: d
 
 
 # Hosts many unrelated entities share — the same host there is not the
-# same property.
+# same property. Listing hosts (engine.listing_hosts) are shared too.
 _SHARED_HOSTS = ("facebook.com", "instagram.com", "linktr.ee", "sites.google.com",
-                 "eventbrite.com", "wixsite.com", "squarespace.com", "godaddysites.com",
-                 "yelp.com", "tripadvisor.com", "google.com")
+                 "wixsite.com", "squarespace.com", "godaddysites.com", "google.com")
 
 
 def _site(url: Optional[str]) -> str:
     """The property's own host for `url`, or "" for shared platforms."""
-    host = (urlparse(url or "").hostname or "").lower()
-    host = host[4:] if host.startswith("www.") else host
-    if any(host == h or host.endswith("." + h) for h in _SHARED_HOSTS):
+    host = listing_hosts.bare_host(url or "")
+    if (any(host == h or host.endswith("." + h) for h in _SHARED_HOSTS)
+            or listing_hosts.is_listing_host(host)):
         return ""
     return host
 

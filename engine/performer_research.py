@@ -35,7 +35,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable, Literal, Optional
 from urllib.parse import urljoin, urlparse
 
-from engine import research
+from engine import listing_hosts, research
+from engine.listing_hosts import bare_host as _host
 from engine.derive_helpers import iso_utc_now, normalize_name, parse_extra_json
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
 
@@ -73,12 +74,6 @@ _LINK_FIELDS = {
     "twitter.com": "twitter", "x.com": "twitter", "linkedin.com": "linkedin",
     "spotify.com": "spotify_url", "youtube.com": "youtube", "youtu.be": "youtube",
 }
-# Ticketing / listing / aggregator hosts: their pages name the performer
-# and the town, but they are a booking, not the performer.
-_LISTING_HOSTS = ("ticketmaster.", "livenation.", "eventbrite.", "axs.com", "songkick.",
-                  "bandsintown.", "seatgeek.", "stubhub.", "vividseats.", "jambase.",
-                  "allevents.", "eventful.", "extrachill.", "ticketweb.", "etix.", "dice.fm",
-                  "showclix.", "tixr.", "seetickets.")
 _EVENT_PATH = re.compile(
     r"/(?:events?|e|tickets?|shows?|concerts?|calendar|tour-dates|whats-on)(?:/|$)", re.IGNORECASE)
 # What a profile (not a post, event or video) looks like on each platform.
@@ -159,11 +154,6 @@ def event_evidence(conn: sqlite3.Connection, kind: str, entity_uid: str) -> Evid
     return ev
 
 
-def _host(url: str) -> str:
-    host = (urlparse(url).hostname or "").lower()
-    return host[4:] if host.startswith("www.") else host
-
-
 def _platform(url: str) -> Optional[str]:
     host = _host(url)
     for h, fld in _LINK_FIELDS.items():
@@ -200,7 +190,9 @@ def is_presence(name: str, url: str, *, bridged: bool, exclude_hosts: set[str] =
     event path — a site the venue linked to (`bridged`) or whose host
     carries the name."""
     host, path = _host(url), urlparse(url).path or "/"
-    if host in exclude_hosts or any(h in host for h in _LISTING_HOSTS):
+    # Ticketing / listing hosts name the performer and the town, but they
+    # are a booking, not the performer.
+    if host in exclude_hosts or listing_hosts.is_listing_host(host):
         return False
     platform = _platform(url)
     if platform:
@@ -542,6 +534,8 @@ def resolve(conn: sqlite3.Connection, kind: str, entity_uid: str,
     if cand is None:
         raise ValueError(f"{accept_url} is not a recorded candidate for {entity_uid}")
     fields, _ = validate_payload(kind, cand.get("fields") or {})
+    if listing_hosts.is_listing_url(fields.get("website")):
+        del fields["website"]       # a draft's listing page is not its website
     filled = fill_blanks(conn, kind, entity_uid, fields, "enriched")
     has_text = any(k in fields for k in ("description", "bio"))
     _record(conn, kind, entity_uid, {**rec, "status": "operator-verified", "filled": filled,

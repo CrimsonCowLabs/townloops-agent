@@ -209,6 +209,18 @@ def test_community_draft_is_reviewable_and_drops_its_logo(fresh_db):
     assert row["image_path"] is None
 
 
+def test_accepting_a_draft_never_fills_a_listing_website(fresh_db):
+    _run(fresh_db, drafts=[_draft("https://tahoegardenclub.example/", "community",
+                                  {"name": "Tahoe Garden Club", "description": "Gardeners.",
+                                   "website": "https://www.yelp.com/biz/tahoe-garden-club",
+                                   "kind": "group"})])
+    row = _row(fresh_db, "communities", "Tahoe Garden Club")
+    pr.resolve(fresh_db, "community", row["entity_uid"], accept_url="https://tahoegardenclub.example/")
+    row = _row(fresh_db, "communities", "Tahoe Garden Club")
+    assert row["description"] == "Gardeners."
+    assert row["website"] is None
+
+
 def test_draft_already_live_is_skipped_and_reported(fresh_db):
     api = FakeAPI(entities={
         "performers": [{"slug": "wolf-jett-band", "name": "Wolf Jett Band",

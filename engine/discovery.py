@@ -29,7 +29,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 from engine.ingest_core import DEFAULT_TZ
-from engine import firecrawl_env
+from engine import firecrawl_env, listing_hosts
 from engine.policy import firecrawl_bucket
 
 
@@ -42,12 +42,10 @@ TRACKING_PARAMS = {
     "fbclid", "gclid", "mc_cid", "mc_eid", "_ga", "_gl",
 }
 
+# Directory/listing/aggregator hosts (yelp, tripadvisor, maps, ...) are
+# engine.listing_hosts — host_blocked checks both.
 HOST_BLOCKLIST_SUBSTRINGS = [
-    "yelp.com", "tripadvisor.com", "tripadvisor.",
-    "mapquest.com", "wikipedia.org", "wikivoyage.org", "wikitravel.org",
-    "reddit.com", "pinterest.com",
-    "instagram.com/explore", "linkedin.com/pub",
-    "youtube.com/results", "google.com/maps", "bing.com/maps",
+    "instagram.com/explore", "linkedin.com/pub", "youtube.com/results",
 ]
 
 # `.gov` was in the CMO blocklist because government sites weren't in scope for
@@ -129,7 +127,7 @@ def canonicalize_url(url: str) -> str:
 
 def host_blocked(url: str, allow_gov: bool = False) -> bool:
     host = urlparse(url).netloc.lower()
-    if any(bad in host for bad in HOST_BLOCKLIST_SUBSTRINGS):
+    if any(bad in host for bad in HOST_BLOCKLIST_SUBSTRINGS) or listing_hosts.is_listing_url(url):
         return True
     if not allow_gov and any(host.endswith(sfx) or (sfx in host) for sfx in GOV_HOST_SUFFIXES):
         return True

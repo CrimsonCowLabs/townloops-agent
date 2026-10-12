@@ -33,6 +33,11 @@ class TestHostBlocked:
         from engine import discovery
         assert discovery.host_blocked("https://www.yelp.com/biz/foo")
 
+    def test_listing_hosts_blocked(self):
+        from engine import discovery
+        assert discovery.host_blocked(
+            "https://www.restaurantji.com/ca/south-lake-tahoe/cascade-kitchens-food-hall-and-bar-/")
+
     def test_gov_blocked_by_default(self):
         from engine import discovery
         assert discovery.host_blocked("https://cityof.gov")
