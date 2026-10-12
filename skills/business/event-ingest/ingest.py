@@ -29,7 +29,7 @@ import sys
 import time
 import uuid
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -1451,8 +1451,35 @@ def _townloops_paginate(base: str, town: str, endpoint: str, api_key: str) -> li
     return out
 
 
+def _remote_local_day(start_at: str) -> str:
+    """The TOWN-LOCAL calendar day of a TownLoops `start_at`.
+
+    TownLoops stores and returns `start_at` in UTC. Our `events.date_day`
+    column is town-local. Slicing the UTC string gives the same answer for
+    a daytime event and a different one for anything from ~17:00 local
+    onward, so the two must be put in the same frame before comparing.
+
+    Degrades to the raw 10-char slice if the timestamp won't parse: resync
+    is a recovery tool, and one malformed remote row must not abort a run.
+    """
+    raw = (start_at or "")[:10]
+    dt = _parse_dt(start_at, tz_=timezone.utc) if start_at else None
+    if dt is None:
+        return raw
+    if dt.tzinfo is None:
+        # The API contract is UTC; say so rather than inheriting PT.
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(PT).date().isoformat()
+
+
 def _match_event_key(title: str, start_at: str) -> tuple:
-    return (_norm(title), (start_at or "")[:10])
+    """Remote-side match key: normalized title + town-local date.
+
+    Mirrors the local key `(_norm(row["name"]), row["date_day"])` exactly —
+    if you change one, change the other, or evening events stop matching and
+    their `townloops_slug` silently goes stale.
+    """
+    return (_norm(title), _remote_local_day(start_at))
 
 
 def _delete_townloops_row(base: str, town: str, kind: str, slug: str, api_key: str) -> int:
