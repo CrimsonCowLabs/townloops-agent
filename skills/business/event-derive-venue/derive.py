@@ -10,9 +10,9 @@ from typing import Callable, Iterable, NamedTuple, Optional
 
 from engine import autonomy, workqueue
 from engine.derive_helpers import (
-    entity_richness, iso_utc_now, link_event_to_entity, load_event,
-    load_live_venues, match_live_venue, mint_entity_uid, mirror_live_entity,
-    normalize_name, open_db, parse_event_uid_arg, record_activity,
+    entity_richness, fetch_live_venues, iso_utc_now, link_event_to_entity,
+    load_event, load_live_venues, match_live_venue, mint_entity_uid,
+    mirror_live_entity, normalize_name, open_db, parse_event_uid_arg, record_activity,
 )
 
 
@@ -122,14 +122,6 @@ class LiveLookupError(Exception):
     pass
 
 
-def _fetch_live_venues() -> list[dict]:
-    """This town's live venues (the venues endpoint only — not businesses)."""
-    from engine.townloops_api import Client
-    client = Client()
-    client.verify_town()
-    return list(client.paginate("venues"))
-
-
 def main() -> int:
     event_uid = parse_event_uid_arg()
     conn = open_db()
@@ -169,7 +161,7 @@ def main() -> int:
         if not os.environ.get("TOWNLOOPS_API_KEY"):
             return []
         try:
-            return load_live_venues(_fetch_live_venues)
+            return load_live_venues(fetch_live_venues)
         except Exception as e:  # noqa: BLE001 — API/network down: retry, don't guess
             raise LiveLookupError(str(e)[:300]) from e
 

@@ -260,6 +260,14 @@ LIVE_VENUE_CACHE = _DB_PATH.parent / "cache" / "live-venues.json"
 LIVE_VENUE_TTL_SECONDS = 600
 
 
+def fetch_live_venues() -> list[dict]:
+    """This town's live venues (the venues endpoint only — not businesses)."""
+    from engine.townloops_api import Client
+    client = Client()
+    client.verify_town()
+    return list(client.paginate("venues"))
+
+
 def load_live_venues(fetch, cache_path: Path = LIVE_VENUE_CACHE,
                      ttl_seconds: int = LIVE_VENUE_TTL_SECONDS,
                      now: Optional[float] = None) -> list[dict]:

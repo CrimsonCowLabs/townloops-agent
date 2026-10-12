@@ -16,6 +16,17 @@ Distilled from the CMO's `farmers-market-community-vs-organizer`,
   group people follow: farmers markets, concert series, weekly meetups, clubs,
   nonprofits and civic bodies without a business-facing operation.
 
+## A venue is never the host
+
+An organizer or host named like the event's own venue, or any local or live
+venue, is that venue — the event gets no host business or community; its
+venue link already carries it. A suffix variant is the same place: "Cascade
+Kitchens Food Hall & Bar" organizing "Plates at Cascade Kitchens" is venue
+`cascade-kitchens`, not a new business. A name that adds a club or non-profit
+word to the venue's ("… College Foundation") is an organisation of its own.
+Enforced by `engine/event_people.host_venue` in event-derive-hosts and
+event-reconcile; the skip is logged as `host-is-venue` with the matched venue.
+
 ## Organizer vs the series it runs
 
 Ask: *what do attendees identify with and return to?*

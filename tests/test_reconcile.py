@@ -224,7 +224,7 @@ class TestStageAndEnrich:
         mod, conn = skill
         live = FakeLive(venues=VENUES)
         [c] = _classified(live, [{"title": "Pumpkin Carving", "date": "2026-10-20T15:00:00",
-                                  "venue": "Pumpkin Patch Co", "organizer": "Pumpkin Patch Co",
+                                  "venue": "Pumpkin Patch Co", "organizer": "Harvest Growers LLC",
                                   "organizer_kind": "business",
                                   "source_url": "https://pumpkinpatch.example/carving"}])
         uid, action = mod._stage(conn, "Seed", c, "run-1")
@@ -242,8 +242,45 @@ class TestStageAndEnrich:
         assert venue["enrichment_status"] == "enriched" and venue["phone"] == "555-0100"
         assert row["derived_host_kind"] == "business"
         biz = conn.execute("SELECT * FROM businesses WHERE entity_uid = ?", (row["derived_host_uid"],)).fetchone()
-        assert biz["image_path"] and biz["website"] == "https://pumpkinpatch.example"
+        assert biz["name"] == "Harvest Growers LLC"  # not the venue: a host of its own
         assert len(report["created"]["venue"]) == 1
+
+    def test_organizer_that_is_the_venue_gets_no_host(self, skill):
+        """Issue #4: "Plates at Cascade Kitchens" shipped a business for its
+        organizer although live venue cascade-kitchens is the venue."""
+        mod, conn = skill
+        cascade = {"id": 41, "slug": "cascade-kitchens", "name": "Cascade Kitchens"}
+        live = FakeLive(venues=[*VENUES, cascade])
+        [c] = _classified(live, [{"title": "Plates at Cascade Kitchens", "date": "2026-10-20T18:00:00",
+                                  "venue": "Cascade Kitchens",
+                                  "organizer": "Cascade Kitchens Food Hall & Bar",
+                                  "organizer_kind": "business"}])
+        uid, _ = mod._stage(conn, "Seed", c, "run-1")
+        mod.enrich(conn, live, {}, [uid], max_lookups=5)
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        v = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (row["derived_venue_uid"],)).fetchone()
+        assert v["townloops_slug"] == "cascade-kitchens"
+        assert row["derived_host_uid"] is None and row["derived_host_kind"] is None
+        assert conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == 0
+        [detail] = [r[0] for r in conn.execute(
+            "SELECT detail FROM agent_activity WHERE action = 'host-is-venue'")]
+        assert "Cascade Kitchens" in detail
+
+    def test_organizer_matching_another_live_venue_gets_no_host(self, skill):
+        mod, conn = skill
+        cascade = {"id": 41, "slug": "cascade-kitchens", "name": "Cascade Kitchens"}
+        live = FakeLive(venues=[*VENUES, cascade])
+        [c] = _classified(live, [{"title": "Chef Pop-up", "date": "2026-10-20T18:00:00",
+                                  "organizer": "Cascade Kitchens Food Hall & Bar",
+                                  "organizer_kind": "business"}])
+        uid, _ = mod._stage(conn, "Seed", c, "run-1")
+        mod.enrich(conn, live, {}, [uid], max_lookups=5)
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        assert row["derived_host_uid"] is None
+        assert conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == 0
+        [detail] = [r[0] for r in conn.execute(
+            "SELECT detail FROM agent_activity WHERE action = 'host-is-venue'")]
+        assert "cascade-kitchens" in detail
 
     def test_new_community_host_gets_meeting_info_from_its_site(self, skill):
         mod, conn = skill

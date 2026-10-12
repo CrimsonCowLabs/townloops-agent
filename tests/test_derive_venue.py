@@ -185,7 +185,7 @@ class TestDeriveVenue:
         monkeypatch.setattr("engine.townloops_api.Client", Client)
         monkeypatch.setenv("TOWNLOOPS_API_KEY", "k")
         ev = _approved_event(conn, "Cuppa Tahoe")
-        out = mod.derive_venue(conn, ev, mod._fetch_live_venues)
+        out = mod.derive_venue(conn, ev, mod.fetch_live_venues)
         assert out.action == "venue-created"
         v = _venue_of(conn, ev["event_uid"])
         assert v["source_kind"] == "derived" and v["townloops_slug"] is None

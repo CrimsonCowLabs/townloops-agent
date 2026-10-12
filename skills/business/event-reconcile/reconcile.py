@@ -24,7 +24,7 @@ from typing import Optional
 import yaml
 from dateutil import tz as _tz
 
-from engine import entity_classify, entity_enrich, inspection, series_sync
+from engine import entity_classify, entity_enrich, event_people, inspection, series_sync
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import (
@@ -323,15 +323,23 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
         conn.execute("UPDATE events SET derived_venue_uid = ? WHERE event_uid = ? AND derived_venue_uid IS NULL",
                      (vuid, uid))
 
-    # Host business / community.
+    # Host business / community — never a venue (the venue link carries it).
     org, org_kind = meta.get("organizer"), meta.get("organizer_kind")
     if org and org_kind in ("business", "community") and not event.get("derived_host_uid"):
-        huid = _resolve_and_tally(conn, org_kind, org, event, live, town, budget, report, llm)
-        conn.execute(
-            "UPDATE events SET derived_host_uid = ?, derived_host_kind = ? "
-            "WHERE event_uid = ? AND derived_host_uid IS NULL",
-            (huid, org_kind, uid),
-        )
+        bound = conn.execute("SELECT derived_venue_uid FROM events WHERE event_uid = ?",
+                             (uid,)).fetchone()[0]
+        is_venue = event_people.host_venue(conn, org, {**event, "derived_venue_uid": bound},
+                                           lambda: live.entities["venue"])
+        if is_venue:
+            record_activity(conn, _WORKER, "host-is-venue", uid,
+                            detail=f"{org_kind} '{org}' is {is_venue} — no host")
+        else:
+            huid = _resolve_and_tally(conn, org_kind, org, event, live, town, budget, report, llm)
+            conn.execute(
+                "UPDATE events SET derived_host_uid = ?, derived_host_kind = ? "
+                "WHERE event_uid = ? AND derived_host_uid IS NULL",
+                (huid, org_kind, uid),
+            )
     record_activity(conn, _WORKER, "enriched", uid, detail=f"venue={venue[:40]} host={org or '-'}")
 
 

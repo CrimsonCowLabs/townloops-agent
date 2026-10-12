@@ -22,7 +22,7 @@ import re
 import sqlite3
 from typing import Optional
 
-from engine.derive_helpers import parse_extra_json
+from engine.derive_helpers import names_match, normalize_name, parse_extra_json
 from engine.event_extract import codex_exec
 from engine.page_extract import find_quote, normalize, parse_object
 
@@ -46,6 +46,40 @@ def _kind_from_words(text: str) -> Optional[str]:
                           ("business", _BUSINESS)):
         if pattern.search(text or ""):
             return kind
+    return None
+
+
+def host_venue(conn: sqlite3.Connection, name: str, event: dict,
+               live_venues) -> Optional[str]:
+    """The venue a host name really is, as a log phrase, or None. A venue is
+    never an event's host business or community — the venue link carries it.
+
+    Checked in order — the event's own venue, every local venue, then the
+    live TownLoops venues (`live_venues()`, fetched only if needed) — with
+    the shared entity-name match (derive_helpers.names_match), so a suffix
+    variant ("Cascade Kitchens Food Hall & Bar") is its venue. A name that
+    adds a club/non-profit word to a venue's ("… College Foundation") is an
+    organisation of its own."""
+    def same(venue_name: Optional[str]) -> bool:
+        if not names_match(name, venue_name):
+            return False
+        extra = set(normalize_name(name).split()) - set(normalize_name(venue_name).split())
+        return _kind_from_words(" ".join(extra)) not in ("community", "nonprofit")
+
+    own = [event.get("venue_raw"), event.get("venue_name")]
+    if event.get("derived_venue_uid"):
+        row = conn.execute("SELECT name FROM venues WHERE entity_uid = ?",
+                           (event["derived_venue_uid"],)).fetchone()
+        own.append(row[0] if row else None)
+    for v in own:
+        if v and same(v):
+            return f"the event's own venue '{v}'"
+    for v_name, slug in conn.execute("SELECT name, townloops_slug FROM venues").fetchall():
+        if same(v_name):
+            return f"local venue '{v_name}'" + (f" ({slug})" if slug else "")
+    for v in live_venues():
+        if same(v.get("name")):
+            return f"live venue {v.get('slug')} '{v.get('name')}'"
     return None
 
 

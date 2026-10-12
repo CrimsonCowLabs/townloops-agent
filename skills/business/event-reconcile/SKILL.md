@@ -53,7 +53,9 @@ everything lands in the local DB for the operator.
      Firecrawl search, then address/phone/socials/description/`image_path`
      filled (fill blanks only). A lookup the budget cut short leaves the shell
      `pending` (researched next run, "research deferred" in the report); only a
-     search that ran and found nothing records `not-found`;
+     search that ran and found nothing records `not-found`. An organizer that
+     is the event's own venue or any local or live venue gets no host
+     (`host-is-venue` — a venue is never a host business or community);
    - a live entity with no image gets a locally staged `image_path` and
      nothing else (`enrichment_status='image-proposed'`), listed in the
      report. One whose site shows no image is `image-not-found` and is looked
