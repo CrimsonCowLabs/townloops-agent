@@ -775,6 +775,47 @@ class TestDirectFromSweden:
         assert row["spotify_url"] == "https://open.spotify.com/artist/4abc"
         assert row["twitter"] is None
 
+    @pytest.mark.parametrize("url", [
+        "https://www.instagram.com/explore/", "https://www.instagram.com/reels/",
+        "https://www.instagram.com/reel", "https://www.instagram.com/p/",
+        "https://www.facebook.com/permalink.php", "https://www.facebook.com/login",
+        "https://www.facebook.com/login/", "https://www.facebook.com/reel",
+        "https://twitter.com/i", "https://x.com/i/", "https://x.com/explore",
+    ])
+    def test_site_pages_are_not_profiles(self, url):
+        assert not pr._is_profile(url)
+
+    @pytest.mark.parametrize("url", [
+        "https://www.instagram.com/explorer_band/", "https://www.instagram.com/pete.s",
+        "https://www.facebook.com/loginband", "https://x.com/ian", "https://twitter.com/explorers",
+    ])
+    def test_profiles_named_like_site_pages_still_count(self, url):
+        assert pr._is_profile(url)
+
+    @pytest.mark.parametrize("a, b", [
+        ("https://x.com/sos_abba", "https://twitter.com/SOS_ABBA/"),
+        ("https://m.facebook.com/sosdirectfromsweden", "https://www.facebook.com/sosdirectfromsweden"),
+        ("https://m.youtube.com/@sos", "https://www.youtube.com/@sos"),
+    ])
+    def test_one_profile_on_alias_hosts_is_one_key(self, a, b):
+        assert pr._profile_key(a) == pr._profile_key(b)
+
+    def test_one_profile_on_alias_hosts_is_not_a_conflict(self, conn):
+        alias = ("<a href='https://x.com/sos_abba'>X</a>"
+                 "<a href='https://twitter.com/SOS_ABBA?ref=footer'>Twitter</a>"
+                 "<a href='https://m.facebook.com/sosdirectfromsweden'>Facebook (mobile)</a>")
+        self._run(conn, {self.SITE: self._home(self.TOUR + self._socials(alias))})
+        row = _row(conn)
+        assert row["twitter"] == "https://x.com/sos_abba"
+        assert row["facebook"] == self.FB
+
+    def test_accepting_a_reviewed_site_applies_its_links(self, conn):
+        tour = "<li>October 27, 2026 — at Yoshi’s<br>Yoshi’s, Oakland, CA, USA</li>"
+        self._run(conn, {self.SITE: self._home(tour + self._socials())})
+        pr.resolve(conn, "performer", "p1", accept_url=self.SITE)
+        row = _row(conn)
+        assert (row["instagram"], row["facebook"], row["youtube"]) == (self.IG, self.FB, self.YT)
+
 
 class TestDefaultFetch:
     def test_firecrawl_fallback_keeps_the_head(self, monkeypatch):

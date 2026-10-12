@@ -83,7 +83,8 @@ spotify_url, tiktok, twitter, linkedin) from its links to them — anchors on
 the page and JSON-LD `sameAs`. Only profile paths count (no post, event,
 video or share link). Two different profiles for one platform fill neither
 (one may be a member's or a venue's). An unverified candidate's links are
-only recorded on it for review.
+only recorded on it for review; `resolve --accept` on that candidate applies
+them (the operator's accept is the verification).
 
 ## Operator review
 

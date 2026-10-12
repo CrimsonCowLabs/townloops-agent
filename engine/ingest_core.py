@@ -536,7 +536,7 @@ def _detail_links_from_html(html_text: str, base_url: str, selector: str, cap: i
 # =====================================================================
 
 
-def _walk_jsonld(blob) -> Iterable[dict]:
+def walk_jsonld(blob) -> Iterable[dict]:
     if isinstance(blob, dict):
         yield blob
         # The general "for v in blob.values()" loop below already recurses
@@ -548,10 +548,10 @@ def _walk_jsonld(blob) -> Iterable[dict]:
         # 2026-07-09; consolidated to a single traversal.
         for v in blob.values():
             if isinstance(v, (list, dict)):
-                yield from _walk_jsonld(v)
+                yield from walk_jsonld(v)
     elif isinstance(blob, list):
         for item in blob:
-            yield from _walk_jsonld(item)
+            yield from walk_jsonld(item)
 
 
 def _jsonld_to_event(item: dict, source: dict, page_url: str) -> Event | None:
@@ -667,7 +667,7 @@ def _extract_jsonld_from_html(html_text: str, source: dict, page_url: str) -> li
             blob = json.loads(tag.string or "")
         except (json.JSONDecodeError, TypeError):
             continue
-        for item in _walk_jsonld(blob):
+        for item in walk_jsonld(blob):
             t = item.get("@type")
             if t == "Event" or (isinstance(t, list) and "Event" in t):
                 ev = _jsonld_to_event(item, source, page_url)

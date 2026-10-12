@@ -67,7 +67,7 @@ from engine.ingest_core import (  # noqa: E402
     _detail_links_from_html,
     DEFAULT_MAX_DETAIL_FETCHES,
     # Phase 2: JSON-LD + selector helpers
-    _walk_jsonld, _jsonld_to_event, _extract_jsonld_from_html,
+    walk_jsonld, _jsonld_to_event, _extract_jsonld_from_html,
     _text, _attr_or_text, _extract_selectors_from_html,
     # Phase 2: top-level parsers + registry
     parse_ical, parse_jsonld, parse_rss, parse_selectors, parse_web,

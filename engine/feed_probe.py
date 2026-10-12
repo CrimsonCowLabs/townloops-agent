@@ -15,7 +15,7 @@ import re
 from typing import Optional
 from urllib.parse import parse_qs, quote, urljoin, urlparse
 
-from engine.ingest_core import _walk_jsonld
+from engine.ingest_core import walk_jsonld
 
 _LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'([\w:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
@@ -129,7 +129,7 @@ def _jsonld(html: str, page_url: str) -> list[dict]:
             blob = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        for node in _walk_jsonld(blob):
+        for node in walk_jsonld(blob):
             types = node.get("@type")
             types = types if isinstance(types, list) else [types]
             # Event and its schema.org subtypes (MusicEvent, SocialEvent, …)

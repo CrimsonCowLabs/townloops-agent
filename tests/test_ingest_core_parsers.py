@@ -10,37 +10,37 @@ import pytest
 
 
 # =====================================================================
-# _walk_jsonld
+# walk_jsonld
 # =====================================================================
 
 
 class TestWalkJsonld:
     def test_flat_dict(self):
-        from engine.ingest_core import _walk_jsonld
-        assert list(_walk_jsonld({"@type": "X", "name": "foo"})) == [
+        from engine.ingest_core import walk_jsonld
+        assert list(walk_jsonld({"@type": "X", "name": "foo"})) == [
             {"@type": "X", "name": "foo"}
         ]
 
     def test_top_level_list(self):
-        from engine.ingest_core import _walk_jsonld
+        from engine.ingest_core import walk_jsonld
         blob = [{"@type": "A"}, {"@type": "B"}]
-        items = list(_walk_jsonld(blob))
+        items = list(walk_jsonld(blob))
         # Order is preserved.
         assert items[0]["@type"] == "A"
         assert items[1]["@type"] == "B"
 
     def test_graph_traversed(self):
-        from engine.ingest_core import _walk_jsonld
+        from engine.ingest_core import walk_jsonld
         blob = {"@type": "Root", "@graph": [{"@type": "A"}, {"@type": "B"}]}
-        types = [item.get("@type") for item in _walk_jsonld(blob)]
+        types = [item.get("@type") for item in walk_jsonld(blob)]
         assert "Root" in types
         assert "A" in types
         assert "B" in types
 
     def test_nested_dict_values_traversed(self):
-        from engine.ingest_core import _walk_jsonld
+        from engine.ingest_core import walk_jsonld
         blob = {"@type": "Outer", "inner": {"@type": "Inner"}}
-        types = [item.get("@type") for item in _walk_jsonld(blob)]
+        types = [item.get("@type") for item in walk_jsonld(blob)]
         assert "Outer" in types
         assert "Inner" in types
 

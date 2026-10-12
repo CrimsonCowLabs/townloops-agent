@@ -22,10 +22,11 @@ public profile to the local booking:
 Outcomes: `verified` fills blank fields — an own site also gives its links
 to the act's platform profiles (anchors and JSON-LD sameAs, one profile per
 platform or none); `probable` (name + role, no locality bridge) and
-`ambiguous` (several fits, or only a name) go to the operator (`enrichment_status = 'needs-review'`); `unresolved` is
-`not-found`; `deferred` (budget out, pages unreadable — a bot challenge, a
-block page or an empty shell is unread, never a page that fails to name
-the act) stays `pending` for a later run. Description/bio is only ever
+`ambiguous` (several fits, or only a name) go to the operator
+(`enrichment_status = 'needs-review'`); `unresolved` is `not-found`;
+`deferred` (budget out, pages unreadable — a bot challenge, a block page
+or an empty shell is unread, never a page that fails to name the act)
+stays `pending` for a later run. Description/bio is only ever
 verbatim text from the identified profile — null beats invented copy.
 Never writes to TownLoops; filled fields reach live through
 engine/entity_sync.
@@ -45,6 +46,7 @@ from engine import autonomy, listing_hosts, research
 from engine.listing_hosts import bare_host as _host
 from engine.derive_helpers import iso_utc_now, normalize_name, parse_extra_json
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
+from engine.ingest_core import walk_jsonld
 
 KINDS = ("performer", "creator")
 # The review queue also holds the CMO's imported community drafts
@@ -82,12 +84,13 @@ _LINK_FIELDS = {
 }
 _EVENT_PATH = re.compile(
     r"/(?:events?|e|tickets?|shows?|concerts?|calendar|tour-dates|whats-on)(?:/|$)", re.IGNORECASE)
-# What a profile (not a post, event, video or share link) looks like on each platform.
+# What a profile (not a post, event, video, share link or site page) looks
+# like on each platform.
 _PROFILE_PATH = {
-    "instagram": r"/[\w.]+/?", "tiktok": r"/@[\w.]+/?",
-    "twitter": r"/(?!share\b|intent\b|home\b|search\b|hashtag\b)\w+/?",
-    "facebook": r"/(?!events\b|groups\b|share\b|sharer\b|watch\b|photo|story|profile\.php)"
-                r"[\w.\-]+/?",
+    "instagram": r"/(?!(?:explore|reels?|p)(?:/|$))[\w.]+/?", "tiktok": r"/@[\w.]+/?",
+    "twitter": r"/(?!share\b|intent\b|home\b|search\b|hashtag\b|explore\b|i\b)\w+/?",
+    "facebook": r"/(?!events\b|groups\b|share\b|sharer\b|watch\b|reels?\b|login\b|photo|story"
+                r"|profile\.php|permalink\.php)[\w.\-]+/?",
     "spotify_url": r"/artist/\w+/?",
     "youtube": r"/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+|user/[\w.\-]+)/?",
     "linkedin": r"/in/[\w\-]+/?",
@@ -181,14 +184,22 @@ def _platform(url: str) -> Optional[str]:
 
 
 def _is_profile(url: str) -> bool:
-    """A platform profile — not a post, event, video or share link."""
+    """A platform profile — not a post, event, video, share link or site page."""
     platform = _platform(url)
     return bool(platform) and bool(re.fullmatch(_PROFILE_PATH[platform], urlparse(url).path or "/"))
 
 
+def _profile_url(url: str) -> Optional[str]:
+    """`url` as a stored profile link — query and fragment dropped — or
+    None when it is not a platform profile."""
+    p = urlparse(url)
+    return f"{p.scheme}://{p.netloc}{p.path}" if _is_profile(url) else None
+
+
 def _profile_key(url: str) -> tuple[str, str]:
-    """One profile whatever its scheme, www, query, trailing slash or case."""
-    return _host(url), urlparse(url).path.rstrip("/").lower()
+    """One profile whatever its scheme, host alias (www, m., x.com for
+    twitter.com), query, trailing slash or case."""
+    return _platform(url) or _host(url), urlparse(url).path.rstrip("/").lower()
 
 
 def _has_phrase(phrase: str, text: str) -> bool:
@@ -277,30 +288,18 @@ def _shows_links(html: str, page_url: str) -> list[str]:
     return out
 
 
-def _same_as(node) -> list[str]:
-    """Every JSON-LD `sameAs` link under `node`."""
-    if isinstance(node, list):
-        return [u for n in node for u in _same_as(n)]
-    if not isinstance(node, dict):
-        return []
-    same = node.get("sameAs")
-    out = [same] if isinstance(same, str) else [u for u in same or () if isinstance(u, str)]
-    return out + [u for v in node.values() for u in _same_as(v)]
-
-
-def _site_profiles(html: str, page_url: str) -> dict:
+def _site_profiles(html: str, page_url: str) -> dict[str, str]:
     """An act's own site's links to its platform profiles — anchors and
     JSON-LD sameAs — as {field: url}, query and fragment dropped. A post,
     event, video or share link is not a profile. Two different profiles for
     one platform (a member's, a venue's) give neither — never a guess."""
     links = [u for u, _ in research.page_links(html, page_url)]
-    links += _same_as(research.ld_json_blocks(html))
+    for node in walk_jsonld(research.ld_json_blocks(html)):
+        same = node.get("sameAs")
+        links += [same] if isinstance(same, str) else [u for u in same or () if isinstance(u, str)]
     found: dict[str, dict] = {}
-    for url in links:
-        p = urlparse(url)
-        url = f"{p.scheme}://{p.netloc}{p.path}"
-        if _is_profile(url):
-            found.setdefault(_platform(url), {}).setdefault(_profile_key(url), url)
+    for url in filter(None, map(_profile_url, links)):
+        found.setdefault(_platform(url), {}).setdefault(_profile_key(url), url)
     return {fld: next(iter(urls.values())) for fld, urls in found.items() if len(urls) == 1}
 
 

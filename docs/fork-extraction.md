@@ -5,7 +5,7 @@
 **Fork extraction complete as of 2026-07-09.** Two phases moved the drift-prone kernel into `engine/ingest_core.py`:
 
 - **Phase 1 (2026-07-08)** — dataclasses (`Event`/`Venue`/`Business`/`Community`/`Performer`/`Creator`/`MinedEntity`), `ENTITY_REG`, pure utils (`_clean`/`_truncate`/`_norm`), venue heuristics, timezone helpers with `AGENT_TZ`-backed `DEFAULT_TZ`, identity + content hashing.
-- **Phase 2 (2026-07-09)** — the parser layer: `_http_get`, `_firecrawl_endpoint`, `_firecrawl_scrape`, `_detail_links_from_html`, `_walk_jsonld`, `_jsonld_to_event`, `_extract_jsonld_from_html`, `_text`, `_attr_or_text`, `_extract_selectors_from_html`, `parse_ical`, `parse_jsonld`, `parse_rss`, `parse_selectors`, `parse_web`, the `PARSERS` registry, and the enrichment overlay (`_extract_enrichment_field`, `_fetch_for_enrichment`, `_apply_enrichments`).
+- **Phase 2 (2026-07-09)** — the parser layer: `_http_get`, `_firecrawl_endpoint`, `_firecrawl_scrape`, `_detail_links_from_html`, `walk_jsonld`, `_jsonld_to_event`, `_extract_jsonld_from_html`, `_text`, `_attr_or_text`, `_extract_selectors_from_html`, `parse_ical`, `parse_jsonld`, `parse_rss`, `parse_selectors`, `parse_web`, the `PARSERS` registry, and the enrichment overlay (`_extract_enrichment_field`, `_fetch_for_enrichment`, `_apply_enrichments`).
 
 `ingest.py` went from 2627 → 1737 lines (−890, 34%). `ingest_core.py` is 1051 lines. This doc explains what's shared, what's not, and how SLT can eventually adopt the shared core.
 
@@ -20,7 +20,7 @@ Everything a source-schema or parser change would touch:
 - **Timezone helpers**: `_now_pt`, `_iso_now`, `_iso`, `_parse_dt`. Backed by module-level `DEFAULT_TZ` (env `AGENT_TZ`, falls back to `America/Los_Angeles`).
 - **Identity + content hashing**: `_event_uid`, `_content_hash`, `_entity_uid`, `_entity_content_hash`.
 - **HTTP fetch layer**: `_http_get`, `_firecrawl_endpoint`, `_firecrawl_scrape`, `_detail_links_from_html`. Constants `FIRECRAWL_CLOUD_BASE`, `DEFAULT_MAX_DETAIL_FETCHES`.
-- **JSON-LD walker + Event synthesis**: `_walk_jsonld`, `_jsonld_to_event`, `_extract_jsonld_from_html`.
+- **JSON-LD walker + Event synthesis**: `walk_jsonld`, `_jsonld_to_event`, `_extract_jsonld_from_html`.
 - **CSS-selector helpers**: `_text`, `_attr_or_text`, `_extract_selectors_from_html`.
 - **Top-level parsers**: `parse_ical`, `parse_jsonld`, `parse_rss`, `parse_selectors`, `parse_web`.
 - **`PARSERS` registry** — `{ical, jsonld, rss, selectors, web} → callable`.
@@ -64,7 +64,7 @@ from engine.ingest_core import (
     _http_get, _firecrawl_endpoint, _firecrawl_scrape,
     _detail_links_from_html,
     FIRECRAWL_CLOUD_BASE, DEFAULT_MAX_DETAIL_FETCHES,
-    _walk_jsonld, _jsonld_to_event, _extract_jsonld_from_html,
+    walk_jsonld, _jsonld_to_event, _extract_jsonld_from_html,
     _text, _attr_or_text, _extract_selectors_from_html,
     parse_ical, parse_jsonld, parse_rss, parse_selectors, parse_web,
     PARSERS,
@@ -89,7 +89,7 @@ For each of the following, verify events.py behaves identically after the change
 3. **Import the extracted surface** (copy the block above verbatim)
 4. **Delete**:
    - Phase 1 kernel: the seven dataclasses, `ENTITY_REG`/`ENTITY_KINDS`, `_now_pt`/`_iso_now`/`_iso`/`_parse_dt`, `_clean`/`_truncate`/`_norm`, `_venue_from_location`/`_extract_venue_from_description`/`_should_replace_venue`, `_event_uid`/`_content_hash`/`_entity_uid`/`_entity_content_hash`, `_HTML_TAG_RE`/`_VENUE_FROM_DESC_RE_1`/`_VENUE_FROM_DESC_RE_2`.
-   - Phase 2 parser layer: `_http_get`, `_firecrawl_endpoint`, `_firecrawl_scrape`, `_detail_links_from_html`, `_walk_jsonld`, `_jsonld_to_event`, `_extract_jsonld_from_html`, `_text`, `_attr_or_text`, `_extract_selectors_from_html`, all five `parse_*` parsers, the `PARSERS` registry, `_extract_enrichment_field`, `_fetch_for_enrichment`, `_apply_enrichments`.
+   - Phase 2 parser layer: `_http_get`, `_firecrawl_endpoint`, `_firecrawl_scrape`, `_detail_links_from_html`, `_walk_jsonld` (now `walk_jsonld` in the core — rename its callers), `_jsonld_to_event`, `_extract_jsonld_from_html`, `_text`, `_attr_or_text`, `_extract_selectors_from_html`, all five `parse_*` parsers, the `PARSERS` registry, `_extract_enrichment_field`, `_fetch_for_enrichment`, `_apply_enrichments`.
    - Constants `FIRECRAWL_CLOUD_BASE` and `DEFAULT_MAX_DETAIL_FETCHES`.
 5. **Keep** — SLT-specific `PT` fallback isn't needed; `DEFAULT_TZ as PT` yields the same object because both sides read `AGENT_TZ`. If SLT wants to hardcode PT regardless, do `PT = tz.gettz("America/Los_Angeles")` AFTER the import, overriding.
 6. **Run SLT's existing verification**: `events.py fetch --dry-run` against a few sources. Row counts, dedupe keys, uids should be byte-identical.
