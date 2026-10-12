@@ -207,6 +207,16 @@ class Town:
             assert mod.main(["review", *argv]) == 0
         return json.loads(out.getvalue().strip().splitlines()[-1])
 
+    def live_sync(self) -> dict:
+        """entity-live-sync's nightly run (entity sync, release pass, Series)."""
+        mod = load(SKILLS / "entity-live-sync" / "sync.py", "town_entity_live_sync")
+        self.mp.setattr(sys, "argv", ["sync.py", "run"])
+        self.conn.commit()   # it opens its own connection
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            assert mod.main() == 0
+        return json.loads(out.getvalue().strip().splitlines()[-1])
+
     def _scrape(self, url: str):
         """event-seed-discovery's rawHtml scrape: (ok, code, html, final url)."""
         final = self.redirects.get(url, url)

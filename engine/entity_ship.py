@@ -13,7 +13,7 @@ import os
 import sys
 from typing import Optional
 
-from engine.derive_helpers import iso_utc_now, parse_extra_json
+from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
 
 
 ENTITY_TABLES = {
@@ -23,6 +23,15 @@ ENTITY_TABLES = {
     "performer": ("performers", "performers"),
     "creator": ("creators", "creators"),
 }
+
+
+class AwaitingResearch(RuntimeError):
+    """A bare performer/creator research hasn't verified: not created live
+    (engine/performer_research.awaits_research). A hold, not a failure."""
+
+    def __init__(self, kind: str, status: Optional[str]):
+        self.reason = f"awaiting research: {status or 'pending'}"
+        super().__init__(f"{kind} {self.reason}")
 
 
 def slug_for(kind: str, entity_uid: str) -> str:
@@ -96,10 +105,13 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     live values kept, live blanks filled, GET-verified. A row we shipped
     before that is gone from live is flagged for the operator, not
     re-created. A create the submission gate holds (autonomous mode) raises
-    autonomy.SubmissionsHeld — a hold, not a failure; the caller decides."""
+    autonomy.SubmissionsHeld, and a never-shipped bare performer/creator
+    research hasn't verified raises AwaitingResearch before any lookup —
+    holds, not failures; the caller decides."""
     from engine import entity_sync
     from engine.autonomy import SubmissionsHeld
     from engine.live_lookup import find_live_entity, is_conflict
+    from engine.performer_research import awaits_research
     table, resource = ENTITY_TABLES[kind]
     row = conn.execute(
         f"SELECT * FROM {table} WHERE entity_uid = ?", (entity_uid,),
@@ -113,6 +125,8 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     if row["townloops_slug"] and entity_sync.is_cross_town(dict(row)):
         # Filed under another town: our town-scoped GET 404s; nothing to do.
         return row["townloops_slug"]
+    if not row["pushed_at"] and awaits_research(kind, dict(row)):
+        raise AwaitingResearch(kind, row["enrichment_status"])
     proposed_slug = row["townloops_slug"] or slug_for(kind, entity_uid)
     created = False
     try:
@@ -152,6 +166,65 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         if res.status == "error":
             print(f"  sync {kind} {entity_uid[:12]} → {slug}: {res.detail}", file=sys.stderr)
     return slug
+
+
+def ship_released(client, conn, limit: int = 25,
+                  kinds: Optional[tuple[str, ...]] = None) -> dict[str, int]:
+    """Ship the performers/creators event-ship held back for research
+    (AwaitingResearch) that research — or the operator — has since
+    released, when an event they're linked to is already live (an event
+    not live yet ships them itself, before it). Each goes through
+    ship_entity; its local event links stand. A failed one is stamped
+    like a failed sync (entity_sync.note_error) and retried after the rest.
+    In autonomous mode `client` is a GatedClient: a held gate stops the
+    pass until the next run. `kinds` narrows it (others are ignored).
+    Returns a count per outcome (shipped / failed / held)."""
+    from collections import Counter
+    from engine import entity_sync
+    from engine.autonomy import SubmissionsHeld
+    from engine.performer_research import KINDS, awaits_research
+    kinds = tuple(k for k in KINDS if kinds is None or k in kinds)
+    if not kinds:
+        return {}
+    client.verify_town()
+    counts: Counter[str] = Counter()
+    for kind in kinds:
+        table, _ = ENTITY_TABLES[kind]
+        rows = conn.execute(
+            f"SELECT t.*, group_concat(DISTINCT e.townloops_slug) AS live_events "
+            f"FROM {table} t "
+            "JOIN linked_events l ON l.entity_kind = ? AND l.entity_uid = t.entity_uid "
+            "JOIN events e ON e.event_uid = l.event_uid "
+            "WHERE t.pushed_at IS NULL AND COALESCE(t.source_kind, '') != 'live' "
+            "  AND e.pushed_at IS NOT NULL AND e.townloops_slug IS NOT NULL "
+            f"GROUP BY t.entity_uid ORDER BY {entity_sync.failed_last('t')}",
+            (kind,)).fetchall()
+        for row in rows:
+            if limit <= 0:
+                return dict(counts)
+            if awaits_research(kind, dict(row)):
+                continue
+            limit -= 1
+            uid = row["entity_uid"]
+            try:
+                slug = ship_entity(client, conn, kind, uid)
+            except SubmissionsHeld as e:
+                counts["held"] += 1
+                print(f"  ship {kind} {uid[:12]}: submissions held ({e.reason})",
+                      file=sys.stderr)
+                return dict(counts)
+            except Exception as e:  # noqa: BLE001 — counted as failed, retried later
+                print(f"  ship {kind} {uid[:12]} failed: {str(e)[:120]}", file=sys.stderr)
+                slug = None
+            if not slug:
+                entity_sync.note_error(conn, kind, uid)
+            counts["shipped" if slug else "failed"] += 1
+            record_activity(conn, "entity-sync", f"ship-{kind}", f"{kind}:{uid}",
+                            detail=f"research resolved → {slug or 'FAIL'}; "
+                                   f"its live events: {row['live_events']}",
+                            ok=slug is not None, error=None if slug else "ship failed")
+            conn.commit()
+    return dict(counts)
 
 
 def cross_town(conn, kind: str, entity_uid: str) -> Optional[str]:

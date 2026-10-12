@@ -2,6 +2,10 @@
 """entity-live-sync — bring local entity changes (enrichment) to the live
 TownLoops rows they belong to. Logic: engine/entity_sync.py.
 
+Then the release pass (engine/entity_ship.ship_released): performers/creators
+event-ship held back for research that research or the operator has since
+released are created live when one of their events is already live.
+
 Then the Series pass (engine/series_sync.py): re-read which TownLoops Series
 each shipped event is in, and fill blank Series-shared fields on the upcoming
 occurrences this agent shipped from their siblings.
@@ -21,7 +25,7 @@ import json
 import os
 import sys
 
-from engine import entity_sync, series_sync
+from engine import autonomy, entity_ship, entity_sync, series_sync
 from engine import lock as _lock
 from engine.derive_helpers import open_db
 
@@ -41,12 +45,19 @@ def _run(args) -> int:
             counts = entity_sync.sweep(client, conn, limit=args.limit,
                                        kinds=tuple(args.kind or entity_sync.RESOURCES))
             conn.commit()
+            # Performers/creators event-ship held for research that research
+            # (or the operator) has since released — creates, so gated.
+            released = entity_ship.ship_released(autonomy.gated(client, conn), conn,
+                                                 limit=args.limit,
+                                                 kinds=tuple(args.kind or entity_sync.RESOURCES))
+            conn.commit()
             series_counts = series_sync.sweep(client, conn, limit=args.limit)
     except _lock.LockHeld:
         print("workqueue drain running — sync skipped this time")
         return 0
     conn.commit()
-    print(json.dumps({**(counts or {"synced": 0}), "series": series_counts}))
+    print(json.dumps({**(counts or {"synced": 0}), "released": released,
+                      "series": series_counts}))
     return 0
 
 

@@ -153,14 +153,31 @@ def _save_pulled(conn: sqlite3.Connection, kind: str, row: dict, pulled: list[st
 
 def _error(conn: sqlite3.Connection, kind: str, row: dict, msg: str,
            pulled: list[str] | None = None) -> SyncResult:
-    """Transient failure: retried by the next sweep, after the rows that
-    haven't failed lately (`sync_error_at`), so a stubborn row can't starve
-    them."""
-    extra = parse_extra_json(row.get("extra_json"))
-    extra["sync_error_at"] = iso_utc_now()
-    conn.execute(f"UPDATE {RESOURCES[kind]} SET extra_json = ? WHERE entity_uid = ?",
-                 (json.dumps(extra), row["entity_uid"]))
+    """Transient failure: retried by the next sweep (see note_error)."""
+    note_error(conn, kind, row["entity_uid"])
     return SyncResult("error", pulled or [], detail=msg)
+
+
+def note_error(conn: sqlite3.Connection, kind: str, entity_uid: str) -> None:
+    """Stamp a transient failure (`extra_json.sync_error_at`): passes that
+    order by `failed_last()` retry the row after those that haven't failed
+    lately, so a stubborn row can't starve them. A successful sync clears
+    it."""
+    table = RESOURCES[kind]
+    r = conn.execute(f"SELECT extra_json FROM {table} WHERE entity_uid = ?",
+                     (entity_uid,)).fetchone()
+    extra = parse_extra_json(r[0] if r else None)
+    extra["sync_error_at"] = iso_utc_now()
+    conn.execute(f"UPDATE {table} SET extra_json = ? WHERE entity_uid = ?",
+                 (json.dumps(extra), entity_uid))
+
+
+def failed_last(alias: str = "") -> str:
+    """ORDER BY terms: rows without a recent `sync_error_at` first, oldest
+    failure next, then by entity_uid. `alias` qualifies the columns."""
+    p = f"{alias}." if alias else ""
+    return (f"COALESCE(json_extract(CASE WHEN json_valid({p}extra_json) THEN {p}extra_json END, "
+            f"'$.sync_error_at'), ''), {p}entity_uid")
 
 
 def flag_for_operator(conn: sqlite3.Connection, kind: str, row: dict,
@@ -198,9 +215,7 @@ def sweep(client, conn: sqlite3.Connection, limit: int = 25,
             "  AND NOT (json_valid(COALESCE(extra_json, '{}')) "
             "           AND (json_extract(COALESCE(extra_json, '{}'), '$.live_sync') IS NOT NULL "
             "                OR json_extract(COALESCE(extra_json, '{}'), '$.cross_town') IS NOT NULL)) "
-            "ORDER BY COALESCE(json_extract(CASE WHEN json_valid(extra_json) THEN extra_json END, "
-            "                               '$.sync_error_at'), ''), entity_uid "
-            "LIMIT ?", (limit,))]
+            f"ORDER BY {failed_last()} LIMIT ?", (limit,))]
         for uid in uids:
             status = sync_entity(client, conn, kind, uid).status
             counts[status] = counts.get(status, 0) + 1

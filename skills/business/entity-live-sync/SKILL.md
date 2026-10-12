@@ -42,6 +42,17 @@ flagged, `extra_json.sync_error_at` is stamped, and the next run retries it
 after the rows that haven't failed lately (so stubborn rows can't starve the
 rest). The sweep calls `verify_town()` first.
 
+## Release pass
+
+After the entity sweep (`engine/entity_ship.ship_released`): performers and
+creators event-ship held back as bare and unverified that research or the
+operator (`performers.py resolve --accept`) has since released are created
+through the usual entity ship path when one of their linked events is live —
+through `GatedClient` in autonomous mode (a shut gate stops the pass). Each is
+a `ship-performer`/`ship-creator` activity naming its live events. A failed
+one is stamped `sync_error_at` and retried after the rest; `--kind` narrows
+the pass like the sweep (no performer/creator kind → no release pass).
+
 ## Series pass
 
 After the entity sweep, under the same lock (`engine/series_sync.py`):

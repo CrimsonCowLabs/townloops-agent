@@ -187,7 +187,26 @@ class TestHostsAndPeople:
         town.run()
         [community] = posts(town, "communities")
         assert (community["name"], community["kind"]) == ("Lake Tahoe Rotary Club", "group")
-        assert [p["name"] for p in posts(town, "performers")] == ["the Mountain Ramblers"]
+        # Only a name so far: linked locally, held back from TownLoops until
+        # performer research verifies it (issue #8) — the event ships anyway.
+        assert town.submitted_titles() == ["Benefit Concert"]
+        assert posts(town, "performers") == []
+        [perf] = town.conn.execute("SELECT p.entity_uid, p.name FROM performers p "
+                                   "JOIN linked_events l ON l.entity_uid = p.entity_uid")
+        assert perf["name"] == "the Mountain Ramblers"
+
+        from engine import performer_research as pr
+        pr.apply_finding(town.conn, "performer", perf["entity_uid"], pr.Finding(
+            "verified", {"website": "https://ramblers.example"}, why="venue link"))
+        town.set_profile(town.profile, paused=True)
+        assert town.live_sync()["released"] == {"held": 1}       # gate shut: waits
+        assert posts(town, "performers") == []
+        town.set_profile(town.profile, paused=False)
+        assert town.live_sync()["released"] == {"shipped": 1}
+        [created] = posts(town, "performers")
+        assert created["name"] == "the Mountain Ramblers"
+        assert town.conn.execute("SELECT status FROM submissions WHERE resource = 'performers'"
+                                 ).fetchone()[0] == "pending"
 
     def test_a_host_the_text_does_not_name_is_null(self, town):
         town.seed("Arena", ARENA)

@@ -528,6 +528,27 @@ def apply_finding(conn: sqlite3.Connection, kind: str, entity_uid: str,
     return filled
 
 
+# What says who a performer/creator is beyond the name: their own site, a
+# profile, their own words. An image alone identifies no one.
+_IDENTITY_FIELDS = {kind: tuple(f for f in SPECS[kind].fillable
+                                if f not in ("image_path", "image_alt"))
+                    for kind in KINDS}
+
+
+def awaits_research(kind: str, row: dict) -> bool:
+    """Whether this performer/creator must not be created on TownLoops yet:
+    it is only a name and research hasn't verified it — pending, deferred,
+    not-found or in review. Verified (by research or an operator accepting
+    a candidate: `enriched`) or carrying its own metadata, it ships; live
+    mirrors and other kinds never wait. event-ship holds a waiting row back
+    (the event ships without it); entity-live-sync ships it once released."""
+    if kind not in KINDS or row.get("source_kind") == "live":
+        return False
+    if row.get("enrichment_status") == "enriched":
+        return False
+    return not any(row.get(f) for f in _IDENTITY_FIELDS[kind])
+
+
 def next_batch(conn: sqlite3.Connection, limit: int) -> list[tuple[str, str]]:
     """Pending performers/creators: never-attempted ones first, most booked
     first; then attempted ones, longest since the last attempt first (so

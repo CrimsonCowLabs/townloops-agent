@@ -209,7 +209,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Performer/creator identity is never inferred from a name.** They're researched only by the
   `performer-research` batch (event-enrich-entities skips them); a profile is attached only when a venue page
   links it or its metadata names the town/a linked venue *and* the role. Bios are the profile's own text or
-  null — never template copy. Don't route performers back through `entity_enrich`'s name search.
+  null — never template copy. Don't route performers back through `entity_enrich`'s name search. A bare one
+  (name only) research hasn't verified is never created live (`performer_research.awaits_research`, checked in
+  `entity_ship.ship_entity`): the event ships without it, and `entity-live-sync` ships it once released.
 - **Series are read-only; `series_slug` is the recurrence key.** Membership comes only from TownLoops'
   auto-link at create (title key vs active Series) or a curator, so the agent controls only the title it
   ships (`series.decide_title`). Live lookup order is slug → same-town-local-date occurrence of the predicted

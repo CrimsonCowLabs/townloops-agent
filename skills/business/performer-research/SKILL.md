@@ -109,4 +109,8 @@ Firecrawl QPS bucket. Never-researched entities go first, most-booked
 first; after that, deferred ones take turns, longest-waiting first.
 
 Never writes to TownLoops. Filled fields refresh `content_hash`, so an
-already-shipped performer gets them live via `entity-live-sync`.
+already-shipped performer gets them live via `entity-live-sync`. A bare
+performer/creator (name only) not yet `enriched` — pending, deferred,
+not-found or in review — is held back from TownLoops by event-ship; once
+verified (or accepted with `resolve --accept`) `entity-live-sync` creates it
+when one of its events is live (`engine/performer_research.awaits_research`).

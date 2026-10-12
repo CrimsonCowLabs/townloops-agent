@@ -39,7 +39,9 @@ from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
     seed_name_of,
 )
-from engine.entity_ship import ship_entity as _ship_entity, slug_for as _slug_for
+from engine.entity_ship import (
+    AwaitingResearch, ship_entity as _ship_entity, slug_for as _slug_for,
+)
 from engine.event_extract import town_tz_name, utc_times
 from engine.workqueue import RC_DEFERRED
 
@@ -797,9 +799,11 @@ def _ship(client, conn, event: dict) -> int:
         for lk in by_kind[kind]:
             try:
                 slug = _ship_entity(client, conn, kind, lk["entity_uid"])
-            except autonomy.SubmissionsHeld as e:
-                # Not submitted now (e.g. no entity moderation yet): the event
-                # still ships, naming its venue; the entity waits.
+            except (autonomy.SubmissionsHeld, AwaitingResearch) as e:
+                # Not submitted now (no entity moderation yet, or a bare
+                # performer research hasn't verified): the event still ships,
+                # naming its venue; the entity waits. A released performer
+                # of a live event ships on entity-live-sync.
                 record_activity(conn, _WORKER, f"ship-{kind}", event_uid,
                                 detail=f"{lk['entity_uid'][:12]} held ({e.reason})")
                 continue

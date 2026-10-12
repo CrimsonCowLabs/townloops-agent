@@ -6,7 +6,9 @@ Workqueue action: **ship**. Runs for events in
 POSTs derived entities FIRST, then the event, to TownLoops. Ordering
 matters — the event references its venue by live `venue_id`, so the venue
 must exist first. Per plan adversarial pass #19: venue → host → performers →
-creators → event.
+creators → event. A bare performer/creator research hasn't verified is held
+(`ship-performer` activity "held (awaiting research: …)") and the event ships
+without it; `entity-live-sync` creates it once research releases it.
 
 ## Contract
 
