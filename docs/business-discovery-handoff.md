@@ -41,6 +41,11 @@ Each run fetches the town's live businesses and marks a candidate
 - its name is ≥0.85 similar to a live business's name (normalized, as in the
   CMO's `already_in_townloops`).
 
+The same two checks run against the town's live venues, for every kind: a
+place that is a venue on TownLoops (Cascade Kitchens, a food hall) is never
+proposed as a business or community. Its reason reads "matches live venue
+<slug>: …" and the dashboard row shows `live venue: <slug>`.
+
 The check runs at sweep and again at verify (live may have grown, and a
 directory candidate only gets a name from its page title at verify).
 `already-live` and `rejected` candidates are never proposed again. A
@@ -84,7 +89,8 @@ Nothing a sweep finds reaches TownLoops until the operator approves it
 2. **Promote run** — `discover.py promote` (cron `business-promote`, every
    15 min via the detached `scripts/business_promote.py`; ≤3 per run; no API
    call when nothing is approved) takes only `approved` rows:
-   - checks live again (website / ≥0.85 name) → `already-live` if it's there now;
+   - checks live again (website / ≥0.85 name, businesses/communities and venues) →
+     `already-live` if it's there now;
    - makes the local business (or reuses an unshipped local business of the
      same name) from the candidate page (`website`, or `facebook`/`instagram`/
      `tiktok` for a social page) and the verified address/phone;

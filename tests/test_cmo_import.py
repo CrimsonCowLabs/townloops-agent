@@ -98,6 +98,23 @@ def test_verified_candidates_are_proposed_and_live_ones_reported(fresh_db):
     assert [r["live_slug"] for r in live] == ["tahoe-art-league"]
 
 
+def test_a_live_venue_is_never_proposed_as_a_business_or_community(fresh_db):
+    api = FakeAPI(entities={"venues": [
+        {"slug": "cascade-kitchens", "name": "Cascade Kitchens",
+         "website": "https://cascadekitchens.com/"}]})
+    report = _run(fresh_db, api,
+                  candidates=[_cand("https://cascadekitchens.com/vendors", "Cascade Kitchens")],
+                  drafts=[_draft("https://example.org/ck", "community",
+                                 {"name": "Cascade Kitchens", "kind": "group"})])
+
+    assert [(i["name"], i["live_slug"]) for i in report["candidates"]["already_live"]] == \
+        [("Cascade Kitchens", "cascade-kitchens")]
+    assert [(i["name"], i["live_slug"]) for i in report["drafts"]["already_live"]] == \
+        [("Cascade Kitchens", "cascade-kitchens")]
+    assert bd.list_candidates(fresh_db, "slt") == []
+    assert _row(fresh_db, "communities", "Cascade Kitchens") is None
+
+
 def test_rerunning_the_import_creates_nothing_new(fresh_db):
     cands = [_cand("https://www.alibialeworks.com/", "Alibi Ale Works")]
     drafts = [WOLF, LAKEVIEW, ONCOURSE]

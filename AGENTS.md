@@ -69,7 +69,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     town-scoped `Idempotency-Key`, and `verify_town()` (fail-closed cross-town guard).
   - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
     `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
-    same website/under its path, or name ≥0.85 → `already-live`), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
+    same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
     `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py` (also the one
     `extra_json` parser `parse_extra_json`, and `seed_ref`/`seed_name_of` for the `seed:<name>` reference),

@@ -84,10 +84,16 @@ def run_import(conn: sqlite3.Connection, client, town_slug: str, *,
     records `imported`, `skipped` (imported before), `already_live` and
     `not_imported` (with why), plus `summary` counts. Doesn't commit."""
     indexes: dict[str, bd.LiveIndex] = {}
+    venues: list[dict] = []
 
     def live(kind: str) -> bd.LiveIndex:
         if kind not in indexes:
-            indexes[kind] = bd.LiveIndex.build(client.paginate(SPECS[kind].table), kind=kind)
+            # A live venue is never a business or community either.
+            if kind in (bd.KIND, "community") and not venues:
+                venues.extend(client.paginate("venues"))
+            indexes[kind] = bd.LiveIndex.build(
+                client.paginate(SPECS[kind].table), kind=kind,
+                venues=venues if kind in (bd.KIND, "community") else None)
         return indexes[kind]
 
     report = {"candidates": {k: [] for k in _OUTCOMES}, "drafts": {k: [] for k in _OUTCOMES}}

@@ -8,13 +8,16 @@ the candidate store (`discovery_candidates`, kind 'business') and the dedup
 against TownLoops, ported from the CMO's `townloops-business-discovery`
 (`build_existing_index` / `already_in_townloops`): a candidate whose website
 is a live business's website, or whose name is ≥0.85 similar to a live
-business's name, is stored as `already-live` with that business's slug.
+business's name, is stored as `already-live` with that business's slug. The
+same checks run against the town's live venues (a food hall like Cascade
+Kitchens is a venue, never a business or community): a venue match is
+`already-live` too, its reason naming the venue slug.
 
 Candidate statuses:
   new           swept, waiting for verify
   verified      page checks out — proposed to the operator
   rejected      the verifier (or the operator) said no; never re-proposed
-  already-live  matches a live business; never re-proposed
+  already-live  matches a live business (or venue); never re-proposed
   approved      the operator said ship it — waiting for the promote run
   promoted      shipped as a business (`research_entity_uid`, `live_slug`)
 
@@ -95,11 +98,15 @@ def _host(url: str) -> str:
 
 class LiveIndex:
     """The town's live businesses, indexed for candidate dedup. Works for
-    any live entity list; `kind` names it in match reasons."""
+    any live entity list; `kind` names it in match reasons. `venues`, when
+    given, is checked after the rows themselves: a candidate that is a live
+    venue is never proposed either."""
 
-    def __init__(self, rows: list[dict], kind: str = KIND):
+    def __init__(self, rows: list[dict], kind: str = KIND,
+                 venues: Optional["LiveIndex"] = None):
         self.rows = rows
         self.kind = kind
+        self.venues = venues
         self._by_url: dict[str, dict] = {}
         self._by_site: dict[tuple[str, str], dict] = {}   # (host, path) → row
         for r in sorted(rows, key=entity_richness):   # richest row wins a shared key
@@ -113,14 +120,29 @@ class LiveIndex:
                 self._by_site[(host, urlparse(canon).path or "/")] = r
 
     @classmethod
-    def build(cls, rows: Iterable[dict], kind: str = KIND) -> "LiveIndex":
-        return cls([r for r in rows if r.get("slug")], kind)
+    def build(cls, rows: Iterable[dict], kind: str = KIND,
+              venues: Optional[Iterable[dict]] = None) -> "LiveIndex":
+        # A venue TownLoops rejected isn't a live venue.
+        vindex = None if venues is None else cls(
+            [v for v in venues if v.get("slug") and v.get("status") != "rejected"], "venue")
+        return cls([r for r in rows if r.get("slug")], kind, vindex)
 
     @classmethod
     def from_api(cls, client, kind: str = KIND) -> "LiveIndex":
-        return cls.build(client.paginate(KINDS[kind]), "business" if kind == KIND else "community")
+        return cls.build(client.paginate(KINDS[kind]), "business" if kind == KIND else "community",
+                         venues=client.paginate("venues"))
 
     def match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
+        m = self._match(canonical_url, name)
+        if m or self.venues is None:
+            return m
+        v = self.venues._match(canonical_url, name)
+        if v is None:
+            return None
+        # Always `already-live`: a venue's own status says nothing about this candidate.
+        return LiveMatch(v.slug, v.name, f"matches live venue {v.slug}: {v.reason}")
+
+    def _match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
         row = self._by_url.get(canonical_url)
         if row:
             return LiveMatch(row["slug"], row.get("name") or "",
@@ -234,7 +256,7 @@ def record_sweep(conn: sqlite3.Connection, town_slug: str,
                  candidates: Iterable[discovery.Candidate], index: LiveIndex,
                  kind: str = KIND) -> dict:
     """Store swept candidates. New URLs are inserted (`new`, or
-    `already-live` when they match a live business); URLs seen before only
+    `already-live` when they match a live business or venue); URLs seen before only
     refresh `last_seen_at`, except a still-proposed one that is now live.
     A new URL whose name matches an operator decline is stored `rejected`."""
     counts = {"seen": 0, "inserted": 0, "already_live": 0, "declined": 0, "updated": 0}
@@ -428,7 +450,8 @@ def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
                                           per_source=per_source, error_sink=errors)
     counts = record_sweep(conn, town_slug, found, index, kind)
     live_key = "live_businesses" if kind == KIND else "live_communities"
-    return {**counts, live_key: len(index.rows), "errors": errors}
+    return {**counts, live_key: len(index.rows),
+            "live_venues": len(index.venues.rows) if index.venues else 0, "errors": errors}
 
 
 def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,

@@ -1,7 +1,7 @@
 <tr id="cand-{{ row.candidate_uid }}" class="status-{{ row.status }}">
   <td>{{ row.kind }}</td>
   <td><span class="pill pill-{{ row.status }}">{{ row.status }}</span>
-    {% if row.live_slug %}<br><small class="muted" title="{{ row.reject_reason or '' }}">live: <code>{{ row.live_slug }}</code></small>{% endif %}</td>
+    {% if row.live_slug %}<br><small class="muted" title="{{ row.reject_reason or '' }}">{{ 'live venue' if (row.reject_reason or '').startswith('matches live venue') else 'live' }}: <code>{{ row.live_slug }}</code></small>{% endif %}</td>
   <td>{{ row.display_name or "—" }}</td>
   <td><a href="{{ row.canonical_url }}" target="_blank" rel="noopener">{{ row.canonical_url|truncate(60) }}</a></td>
   <td><code class="src">{{ row.source_signal or "—" }}</code></td>

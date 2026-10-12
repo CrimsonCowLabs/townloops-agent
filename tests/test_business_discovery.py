@@ -238,3 +238,75 @@ def test_run_verify_leaves_a_candidate_pending_when_the_verifier_crashes(fresh_d
     assert out == {"processed": 1, "verified": 0, "rejected": 0, "already_live": 0,
                    "deferred": 1, "errors": ["https://boom.example/: RuntimeError: firecrawl down"]}
     assert _rows(fresh_db)["https://boom.example/"]["status"] == "new"
+
+
+# ---------------------------------------------------------------- live venues
+
+VENUES = [
+    {"slug": "cascade-kitchens", "name": "Cascade Kitchens",
+     "website": "https://www.cascadekitchens.com/"},
+    {"slug": "old-mill-hall", "name": "Old Mill Hall", "website": None, "status": "rejected"},
+]
+
+
+def _sweep_with_venues(fresh_db, monkeypatch, kind, cands):
+    monkeypatch.setattr(discovery, "sweep_web_search", lambda *a, **k: list(cands))
+    api = FakeAPI(venues=VENUES, entities={"businesses": LIVE, "communities": []})
+    profile = {"name": "South Lake Tahoe", "region": "California",
+               "discovery": {kind: {"category_query_terms": ["things"]}}}
+    return api, bd.run_sweep(fresh_db, api, profile, "slt", per_source=5, kind=kind)
+
+
+@pytest.mark.parametrize("kind", ["business", "community", "nonprofit"])
+def test_sweep_dedups_against_live_venues_by_website(fresh_db, monkeypatch, kind):
+    api, out = _sweep_with_venues(fresh_db, monkeypatch, kind, [
+        _cand("https://cascadekitchens.com/vendors/taco-stall", "Taco Stall")])
+    assert out["already_live"] == 1 and out["inserted"] == 0
+    assert ("LIST", "venues") in [c[:2] for c in api.calls]
+    row = _rows(fresh_db)["https://cascadekitchens.com/vendors/taco-stall"]
+    assert (row["status"], row["live_slug"]) == ("already-live", "cascade-kitchens")
+    assert "live venue cascade-kitchens" in row["reject_reason"]
+    assert bd.list_candidates(fresh_db, "slt", kind=kind) == []
+
+
+@pytest.mark.parametrize("kind", ["business", "community", "nonprofit"])
+def test_sweep_dedups_against_live_venues_by_name(fresh_db, monkeypatch, kind):
+    _, out = _sweep_with_venues(fresh_db, monkeypatch, kind, [
+        _cand("https://facebook.com/cascadekitchenstahoe", "Cascade Kitchens!")])
+    assert out["already_live"] == 1
+    row = _rows(fresh_db)["https://facebook.com/cascadekitchenstahoe"]
+    assert (row["status"], row["live_slug"]) == ("already-live", "cascade-kitchens")
+    assert "live venue cascade-kitchens" in row["reject_reason"]
+
+
+@pytest.mark.parametrize("kind", ["business", "community", "nonprofit"])
+def test_sweep_proposes_a_candidate_matching_no_venue(fresh_db, monkeypatch, kind):
+    _, out = _sweep_with_venues(fresh_db, monkeypatch, kind, [
+        _cand("https://brand-new.example/", "Brand New Collective"),
+        _cand("https://oldmill.example/", "Old Mill Hall")])   # a rejected venue isn't live
+    assert out["inserted"] == 2 and out["already_live"] == 0
+    assert {r["status"] for r in _rows(fresh_db).values()} == {"new"}
+
+
+def test_own_kind_match_wins_over_a_venue_match():
+    idx = bd.LiveIndex.build(LIVE, venues=[{"slug": "cuppa-venue", "name": "Cuppa Tahoe",
+                                            "website": None}])
+    assert idx.match("https://elsewhere.example/", "Cuppa Tahoe").slug == "cuppa-tahoe"
+
+
+def test_resweep_flips_a_pending_candidate_that_matches_a_venue(fresh_db):
+    c = [_cand("https://cascade.example/", "Cascade Kitchens")]
+    bd.record_sweep(fresh_db, "slt", c, _index())
+    bd.record_sweep(fresh_db, "slt", c, bd.LiveIndex.build(LIVE, venues=VENUES))
+    row = _rows(fresh_db)["https://cascade.example/"]
+    assert (row["status"], row["live_slug"]) == ("already-live", "cascade-kitchens")
+    assert "live venue cascade-kitchens" in row["reject_reason"]
+
+
+def test_verify_never_proposes_a_venue_match(fresh_db):
+    bd.record_sweep(fresh_db, "slt", [_cand("https://cascade.example/", None, "directory:x")], _index())
+    row = bd.pending_verify(fresh_db, "slt", limit=1)[0]
+    verdict = {"verified": True, "reasons": [], "title": "Cascade Kitchens | Home"}
+    idx = bd.LiveIndex.build(LIVE, venues=VENUES)
+    assert bd.record_verdict(fresh_db, row, verdict, idx) == "already-live"
+    assert _rows(fresh_db)["https://cascade.example/"]["live_slug"] == "cascade-kitchens"

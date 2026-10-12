@@ -318,3 +318,16 @@ def test_declining_one_row_declines_its_same_name_twins(fresh_db):
     assert _cand(fresh_db, fb)["status"] == "rejected"
     assert _cand(fresh_db, other)["status"] == "verified"
     assert bp.propose(fresh_db, "slt", "promote")["proposal"]["uids"] == [other]
+
+
+def test_an_approved_candidate_matching_a_live_venue_is_never_promoted(fresh_db):
+    uid = _seed(fresh_db, "https://cascade.example/", "Cascade Kitchens")
+    bp.approve(fresh_db, [uid])
+    api = FakeAPI(entities={"businesses": LIVE},
+                  venues=[{"slug": "cascade-kitchens", "name": "Cascade Kitchens", "website": None}])
+    out = bp.promote_approved(fresh_db, api, "slt", enrich=_enrich_filling())
+    assert out["already_live"] == 1 and out["promoted"] == 0
+    assert api.creates() == []
+    cand = _cand(fresh_db, uid)
+    assert (cand["status"], cand["live_slug"]) == ("already-live", "cascade-kitchens")
+    assert "live venue cascade-kitchens" in cand["reject_reason"]

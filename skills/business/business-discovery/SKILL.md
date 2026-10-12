@@ -35,8 +35,12 @@ is for the ones that never host a listed event.
      match on the exact page), or
    - its name is ≥0.85 similar (normalized) to a live business name.
 
-   A match is stored as `already-live` with `live_slug` and the reason, and
-   is never proposed again.
+   The same checks run against the town's live **venues** (a food hall like
+   Cascade Kitchens is a venue, never a business or community), for every kind.
+
+   A match is stored as `already-live` with `live_slug` and the reason (a
+   venue match reads "matches live venue <slug>: …"), and is never proposed
+   or promoted.
 
 ## Candidate statuses
 
@@ -45,7 +49,7 @@ is for the ones that never host a listed event.
 | `new` | swept, not yet verified |
 | `verified` | page checks out — proposed to the operator |
 | `rejected` | verifier (or operator) said no; the reason is in `reject_reason` |
-| `already-live` | matches a live business (`live_slug`) |
+| `already-live` | matches a live business, community or venue (`live_slug`) |
 | `approved` | the operator approved it — the next `promote` run ships it |
 | `promoted` | shipped as a business (`research_entity_uid`, `live_slug`) |
 
