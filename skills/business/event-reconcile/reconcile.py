@@ -24,11 +24,12 @@ from typing import Optional
 import yaml
 from dateutil import tz as _tz
 
-from engine import entity_classify, entity_enrich, event_people, inspection, series_sync
+from engine import entity_classify, entity_enrich, inspection, series_sync
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import (
-    iso_utc_now, open_db, parse_extra_json, record_activity, seed_ref,
+    iso_utc_now, open_db, other_venue_named, own_venue_named, parse_extra_json,
+    record_activity, record_host_venue_match, seed_ref,
 )
 from engine.entity_enrich import Budget
 from engine.event_extract import (
@@ -323,17 +324,17 @@ def enrich_event(conn, event: dict, live: Live, town: str, budget: Budget, repor
         conn.execute("UPDATE events SET derived_venue_uid = ? WHERE event_uid = ? AND derived_venue_uid IS NULL",
                      (vuid, uid))
 
-    # Host business / community — never a venue (the venue link carries it).
+    # Host business / community — never the event's own venue (the venue
+    # link carries it); a host that is another venue is kept, and logged.
     org, org_kind = meta.get("organizer"), meta.get("organizer_kind")
     if org and org_kind in ("business", "community") and not event.get("derived_host_uid"):
         bound = conn.execute("SELECT derived_venue_uid FROM events WHERE event_uid = ?",
                              (uid,)).fetchone()[0]
-        is_venue = event_people.host_venue(conn, org, {**event, "derived_venue_uid": bound},
-                                           lambda: live.entities["venue"])
-        if is_venue:
-            record_activity(conn, _WORKER, "host-is-venue", uid,
-                            detail=f"{org_kind} '{org}' is {is_venue} — no host")
-        else:
+        own_venue = own_venue_named(conn, org, {**event, "derived_venue_uid": bound})
+        venue_match = own_venue or other_venue_named(conn, org, live.entities["venue"])
+        if venue_match:
+            record_host_venue_match(conn, _WORKER, uid, org_kind, org, venue_match)
+        if not own_venue:
             huid = _resolve_and_tally(conn, org_kind, org, event, live, town, budget, report, llm)
             conn.execute(
                 "UPDATE events SET derived_host_uid = ?, derived_host_kind = ? "

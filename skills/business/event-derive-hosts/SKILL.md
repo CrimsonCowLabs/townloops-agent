@@ -26,12 +26,12 @@ on the event (`extra_json.people`) and shared with event-derive-people.
 - An existing local row of the same name is reused; else a shell is made for
   event-enrich-entities to research.
 - A host event-reconcile already resolved (`derived_host_uid`) is kept.
-- **A venue is never the host**: a name that matches the event's own venue,
-  or any local or live venue (shared name match, so "Cascade Kitchens Food
-  Hall & Bar" is venue Cascade Kitchens), gives no host — logged
-  `host-is-venue` with the venue. Live venues come from the file cache
-  shared with event-derive-venue; a failed lookup retries like a failed AI
-  call.
+- **The event's own venue is never its host**: a name that matches the
+  event's venue (`venue_raw`, `venue_name` or the bound venue row — so
+  "Cascade Kitchens Food Hall & Bar" at Cascade Kitchens) gives no host,
+  logged `host-is-venue`. A host that is another local or (cached) live venue
+  is kept and logged `host-matches-other-venue`; that check never fetches.
+- Ending with no host clears `derived_host_uid`/`derived_host_kind`.
 
 A failed AI call exits 1 (the workqueue retries); on the last attempt it
 exits 0 with no host instead of parking the event.

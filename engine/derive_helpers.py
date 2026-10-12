@@ -260,14 +260,6 @@ LIVE_VENUE_CACHE = _DB_PATH.parent / "cache" / "live-venues.json"
 LIVE_VENUE_TTL_SECONDS = 600
 
 
-def fetch_live_venues() -> list[dict]:
-    """This town's live venues (the venues endpoint only — not businesses)."""
-    from engine.townloops_api import Client
-    client = Client()
-    client.verify_town()
-    return list(client.paginate("venues"))
-
-
 def load_live_venues(fetch, cache_path: Path = LIVE_VENUE_CACHE,
                      ttl_seconds: int = LIVE_VENUE_TTL_SECONDS,
                      now: Optional[float] = None) -> list[dict]:
@@ -291,6 +283,77 @@ def load_live_venues(fetch, cache_path: Path = LIVE_VENUE_CACHE,
     except OSError:
         pass
     return venues
+
+
+def cached_live_venues(cache_path: Path = LIVE_VENUE_CACHE) -> list[dict]:
+    """The live venue list event-derive-venue last cached, whatever its age;
+    [] when there is none. Never fetches — for informational checks only."""
+    try:
+        return list(json.loads(cache_path.read_text())["venues"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+
+
+@dataclass
+class VenueNameMatch:
+    name: str                       # the venue's name
+    ref: Optional[str]              # its local entity_uid or live slug, when known
+    where: str                      # own (the event's venue) | local | live
+
+
+def _same_place(host: str, venue_name: Optional[str]) -> bool:
+    """`host` names the venue (names_match, so "Cascade Kitchens Food Hall &
+    Bar" is "Cascade Kitchens") — unless the words it adds make it a club or
+    non-profit of its own ("… College Foundation")."""
+    from engine.event_people import kind_from_words  # imports this module
+    if not names_match(host, venue_name):
+        return False
+    extra = set(normalize_name(host).split()) - set(normalize_name(venue_name).split())
+    return kind_from_words(" ".join(extra)) not in ("community", "nonprofit")
+
+
+def own_venue_named(conn: sqlite3.Connection, host: str,
+                    event: dict) -> Optional[VenueNameMatch]:
+    """The event's own venue, when `host` names it: venue_raw, venue_name or
+    the bound venue row's name. A venue is never its own event's host
+    business or community — the venue link carries it."""
+    vuid = event.get("derived_venue_uid")
+    row = vuid and conn.execute("SELECT name, townloops_slug FROM venues WHERE entity_uid = ?",
+                                (vuid,)).fetchone()
+    names = [event.get("venue_raw"), event.get("venue_name"), row[0] if row else None]
+    for name in names:
+        if name and _same_place(host, name):
+            return VenueNameMatch(name, (row[1] or vuid) if row else None, "own")
+    return None
+
+
+def other_venue_named(conn: sqlite3.Connection, host: str,
+                      live_venues: Iterable[dict]) -> Optional[VenueNameMatch]:
+    """A local, then live, venue `host` names. Not a reason to drop a host —
+    a brewery that is also a venue hosts elsewhere — only worth logging."""
+    for name, uid, slug in conn.execute(
+            "SELECT name, entity_uid, townloops_slug FROM venues").fetchall():
+        if _same_place(host, name):
+            return VenueNameMatch(name, slug or uid, "local")
+    for v in live_venues:
+        if _same_place(host, v.get("name")):
+            return VenueNameMatch(v["name"], v.get("slug"), "live")
+    return None
+
+
+def record_host_venue_match(conn: sqlite3.Connection, worker: str, event_uid: str,
+                            kind: str, host: str, match: VenueNameMatch) -> None:
+    """Log a host name that is a venue: `host-is-venue` (dropped) for the
+    event's own venue, `host-matches-other-venue` (kept) for any other."""
+    where = {"own": "the event's own venue", "local": "local venue",
+             "live": "live venue"}[match.where]
+    ref = f" ({match.ref})" if match.ref else ""
+    if match.where == "own":
+        record_activity(conn, worker, "host-is-venue", event_uid,
+                        detail=f"{kind} '{host}' is {where} '{match.name}'{ref} — no host")
+    else:
+        record_activity(conn, worker, "host-matches-other-venue", event_uid,
+                        detail=f"{kind} '{host}' matches {where} '{match.name}'{ref} — kept as host")
 
 
 def mint_entity_uid(kind: str, seed_name: str, event_uid: str) -> str:

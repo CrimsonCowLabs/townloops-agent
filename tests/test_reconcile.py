@@ -266,20 +266,22 @@ class TestStageAndEnrich:
             "SELECT detail FROM agent_activity WHERE action = 'host-is-venue'")]
         assert "Cascade Kitchens" in detail
 
-    def test_organizer_matching_another_live_venue_gets_no_host(self, skill):
+    def test_organizer_that_is_another_live_venue_is_kept_and_logged(self, skill):
         mod, conn = skill
         cascade = {"id": 41, "slug": "cascade-kitchens", "name": "Cascade Kitchens"}
         live = FakeLive(venues=[*VENUES, cascade])
         [c] = _classified(live, [{"title": "Chef Pop-up", "date": "2026-10-20T18:00:00",
+                                  "venue": "Tipsy Putt",
                                   "organizer": "Cascade Kitchens Food Hall & Bar",
                                   "organizer_kind": "business"}])
         uid, _ = mod._stage(conn, "Seed", c, "run-1")
         mod.enrich(conn, live, {}, [uid], max_lookups=5)
         row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
-        assert row["derived_host_uid"] is None
-        assert conn.execute("SELECT COUNT(*) FROM businesses").fetchone()[0] == 0
+        assert row["derived_host_kind"] == "business"
+        assert conn.execute("SELECT COUNT(*) FROM agent_activity WHERE action = 'host-is-venue'"
+                            ).fetchone()[0] == 0
         [detail] = [r[0] for r in conn.execute(
-            "SELECT detail FROM agent_activity WHERE action = 'host-is-venue'")]
+            "SELECT detail FROM agent_activity WHERE action = 'host-matches-other-venue'")]
         assert "cascade-kitchens" in detail
 
     def test_new_community_host_gets_meeting_info_from_its_site(self, skill):

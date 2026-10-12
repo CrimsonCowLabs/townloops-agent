@@ -4,23 +4,24 @@ community group or a non-profit), from one quote-checked AI pass over the
 event's own text (engine/event_people). NULL is legit: a name the text
 doesn't carry, or a kind it doesn't support, means no host.
 
-A venue is never the host: a name that is the event's own venue, or any
-local or live venue, gives no host business or community.
+The event's own venue is never its host: a host named like it gives no host
+business or community — the venue link carries it. A host that is some
+other venue (a brewery hosting elsewhere) is kept, and logged.
 
-A failed AI call or live venue lookup retries through the workqueue and, on
-the last attempt, goes on with no host rather than parking the event."""
+A failed AI call retries through the workqueue and, on the last attempt,
+goes on with no host rather than parking the event. Ending with no host
+clears any host the event row still points at."""
 
 from __future__ import annotations
 
-import os
 import sys
-from typing import Optional
 
 from engine import event_detail, event_people, workqueue
 from engine.derive_helpers import (
-    fetch_live_venues, insert_entity, link_event_to_entity, load_event,
-    load_live_venues, mint_entity_uid, normalize_name, open_db,
-    parse_event_uid_arg, record_activity,
+    cached_live_venues, insert_entity, link_event_to_entity, load_event,
+    mint_entity_uid, normalize_name, open_db, other_venue_named,
+    own_venue_named, parse_event_uid_arg, record_activity,
+    record_host_venue_match,
 )
 
 
@@ -56,36 +57,27 @@ def _host_entity(conn, event_uid: str, host: dict) -> tuple[str, str, bool]:
     return kind, entity_uid, True
 
 
-def _live_venues() -> list[dict]:
-    # Unconfigured = local-only mode; the file cache is shared with
-    # event-derive-venue, so a drain fetches the list at most once.
-    if not os.environ.get("TOWNLOOPS_API_KEY"):
-        return []
-    return load_live_venues(fetch_live_venues)
-
-
-def _venue_host(conn, event: dict, kind: str, name: str) -> Optional[int]:
-    """An exit code when the host is a venue (no host) or the live venue
-    lookup failed (retry; no host on the last attempt); None for a real host."""
-    event_uid = event["event_uid"]
-    try:
-        venue = event_people.host_venue(conn, name, event, _live_venues)
-    except Exception as e:  # noqa: BLE001 — API/network down: retry, don't guess
-        if workqueue.is_last_attempt(conn, event_uid, _ACTION):
-            record_activity(conn, _WORKER, "no-host-signal", event_uid,
-                            detail="live venue lookup failed on the last attempt — no host",
-                            ok=False, error=str(e)[:300])
-            return 0
-        print(f"event {event_uid[:12]}: live venue lookup failed — retried: {e}", file=sys.stderr)
-        return 1
-    if venue is None:
-        return None
+def _no_host(conn, event_uid: str) -> int:
+    """End with no host: clear any host the row still points at."""
     conn.execute("UPDATE events SET derived_host_uid = NULL, derived_host_kind = NULL "
                  "WHERE event_uid = ?", (event_uid,))
-    record_activity(conn, _WORKER, "host-is-venue", event_uid,
-                    detail=f"{kind} '{name}' is {venue} — no host")
-    print(f"host '{name}' is {venue}; advancing NULL")
     return 0
+
+
+def _is_own_venue(conn, event: dict, kind: str, name: str) -> bool:
+    """True (logged) when the host is the event's own venue. A host that is
+    another local or cached-live venue is only logged — never a live fetch,
+    never a failure."""
+    event_uid = event["event_uid"]
+    own = own_venue_named(conn, name, event)
+    if own:
+        record_host_venue_match(conn, _WORKER, event_uid, kind, name, own)
+        print(f"host '{name}' is the event's own venue '{own.name}'; advancing NULL")
+        return True
+    other = other_venue_named(conn, name, cached_live_venues())
+    if other:
+        record_host_venue_match(conn, _WORKER, event_uid, kind, name, other)
+    return False
 
 
 def main() -> int:
@@ -105,9 +97,8 @@ def main() -> int:
         f"SELECT name FROM {preset_table} WHERE entity_uid = ?", (preset,),
     ).fetchone()
     if preset_row:
-        rc = _venue_host(conn, event, preset_kind, preset_row["name"])
-        if rc is not None:
-            return rc
+        if _is_own_venue(conn, event, preset_kind, preset_row["name"]):
+            return _no_host(conn, event_uid)
         link_event_to_entity(conn, event_uid, preset_kind, preset, role="host")
         record_activity(conn, _WORKER, "host-preset", event_uid,
                         detail=f"kept pre-resolved {preset_kind} {preset[:12]}")
@@ -120,7 +111,7 @@ def main() -> int:
             record_activity(conn, _WORKER, "no-host-signal", event_uid,
                             detail="AI pass unavailable on the last attempt — no host",
                             ok=False, error="ai-unavailable")
-            return 0
+            return _no_host(conn, event_uid)
         print(f"event {event_uid[:12]}: host AI pass failed — retried", file=sys.stderr)
         return 1
     host = found["host"]
@@ -128,11 +119,10 @@ def main() -> int:
         record_activity(conn, _WORKER, "no-host-signal", event_uid,
                         detail="the event's text names no verifiable host")
         print("no host derivable; advancing NULL")
-        return 0
+        return _no_host(conn, event_uid)
 
-    rc = _venue_host(conn, event, host["kind"], host["name"])
-    if rc is not None:
-        return rc
+    if _is_own_venue(conn, event, host["kind"], host["name"]):
+        return _no_host(conn, event_uid)
     kind, entity_uid, created = _host_entity(conn, event_uid, host)
     record_activity(conn, _WORKER, "host-created" if created else "host-matched", event_uid,
                     detail=f"{host['kind']} '{host['name']}' → {entity_uid[:12]}")

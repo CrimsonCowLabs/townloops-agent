@@ -16,16 +16,21 @@ Distilled from the CMO's `farmers-market-community-vs-organizer`,
   group people follow: farmers markets, concert series, weekly meetups, clubs,
   nonprofits and civic bodies without a business-facing operation.
 
-## A venue is never the host
+## The event's own venue is never its host
 
-An organizer or host named like the event's own venue, or any local or live
-venue, is that venue — the event gets no host business or community; its
-venue link already carries it. A suffix variant is the same place: "Cascade
-Kitchens Food Hall & Bar" organizing "Plates at Cascade Kitchens" is venue
-`cascade-kitchens`, not a new business. A name that adds a club or non-profit
-word to the venue's ("… College Foundation") is an organisation of its own.
-Enforced by `engine/event_people.host_venue` in event-derive-hosts and
-event-reconcile; the skip is logged as `host-is-venue` with the matched venue.
+A host that is the event's own venue is never its host business or
+community — the venue link already carries it. A suffix variant is the same
+place: "Cascade Kitchens Food Hall & Bar" organizing "Plates at Cascade
+Kitchens" is venue `cascade-kitchens`, not a new business. A name that adds a
+club or non-profit word to the venue's ("… College Foundation") is an
+organisation of its own.
+
+A host that is some *other* venue is a genuine host — a brewery that is also
+a TownLoops venue, pouring at a festival elsewhere. It is kept, and logged
+`host-matches-other-venue` so a misfire is easy to spot.
+
+Enforced by `engine/derive_helpers.own_venue_named` in event-derive-hosts and
+event-reconcile; a dropped host is logged `host-is-venue` with the venue.
 
 ## Organizer vs the series it runs
 

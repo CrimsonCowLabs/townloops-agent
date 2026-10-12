@@ -1,6 +1,6 @@
-"""A venue is never an event's host business or community (issue #4): a host
-name that is the event's own venue, or any local or live venue, derives no
-host — the venue link already carries it."""
+"""An event's own venue is never its host business or community (issue #4):
+the venue link already carries it. A host that is some other venue is a
+genuine host — kept, with an informational log."""
 
 from __future__ import annotations
 
@@ -11,14 +11,16 @@ from pathlib import Path
 
 import pytest
 
-from engine import workqueue
-from engine.derive_helpers import mirror_live_entity
+from engine.derive_helpers import (
+    VenueNameMatch, cached_live_venues, mirror_live_entity, other_venue_named, own_venue_named,
+)
 from engine.event_extract import event_uid, upsert_event
 
 
 CASCADE = {"id": 41, "slug": "cascade-kitchens", "name": "Cascade Kitchens",
            "address": "3668 Lake Tahoe Blvd"}
 TIPSY = {"id": 99, "slug": "tipsy-putt", "name": "Tipsy Putt"}
+ALIBI = {"id": 12, "slug": "alibi-ale-works", "name": "Alibi Ale Works"}
 
 
 def _load_derive():
@@ -48,11 +50,10 @@ def _event(conn, venue, host, title="Plates at Cascade Kitchens", venue_uid=None
     return uid
 
 
-def _run(mod, conn, monkeypatch, uid, live=lambda: []):
+def _run(mod, conn, monkeypatch, uid, cached_live=()):
     monkeypatch.setattr(mod, "open_db", lambda: conn)
     monkeypatch.setattr(mod, "parse_event_uid_arg", lambda: uid)
-    monkeypatch.setenv("TOWNLOOPS_API_KEY", "k")
-    monkeypatch.setattr(mod, "load_live_venues", lambda fetch: live())
+    monkeypatch.setattr(mod, "cached_live_venues", lambda: list(cached_live))
     return mod.main()
 
 
@@ -71,52 +72,38 @@ def _count(conn, table):
     return conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
 
 
-class TestVenueIsNeverTheHost:
+class TestOwnVenueIsNeverTheHost:
     def test_cascade_kitchens_organizer_is_its_own_venue(self, derive, monkeypatch):
         mod, conn = derive
         vuid = mirror_live_entity(conn, "venue", CASCADE)
         uid = _event(conn, "Cascade Kitchens", venue_uid=vuid,
                      host={"name": "Cascade Kitchens Food Hall & Bar", "kind": "business"})
-        assert _run(mod, conn, monkeypatch, uid, lambda: [CASCADE]) == 0
+        assert _run(mod, conn, monkeypatch, uid, [CASCADE]) == 0
         assert tuple(_host(conn, uid)) == (None, None)
         assert _count(conn, "businesses") == 0
         assert conn.execute("SELECT COUNT(*) FROM linked_events WHERE role = 'host'").fetchone()[0] == 0
         [detail] = _activity(conn, "host-is-venue")
         assert "Cascade Kitchens" in detail
 
-    def test_own_venue_matches_without_a_live_lookup(self, derive, monkeypatch):
+    def test_own_venue_matches_by_the_events_venue_name_alone(self, derive, monkeypatch):
         mod, conn = derive
         uid = _event(conn, "Cascade Kitchens",
-                     host={"name": "Cascade Kitchens Food Hall & Bar", "kind": "business"})
-
-        def no_lookup():
-            raise AssertionError("live list fetched")
-        assert _run(mod, conn, monkeypatch, uid, no_lookup) == 0
-        assert _host(conn, uid)["derived_host_uid"] is None
-        assert _count(conn, "businesses") == 0
-
-    def test_host_matching_another_local_venue_is_skipped_and_logged(self, derive, monkeypatch):
-        mod, conn = derive
-        mirror_live_entity(conn, "venue", CASCADE)
-        uid = _event(conn, "Lakeview Commons", title="Chef Pop-up",
                      host={"name": "Cascade Kitchens Food Hall & Bar", "kind": "business"})
         assert _run(mod, conn, monkeypatch, uid) == 0
         assert _host(conn, uid)["derived_host_uid"] is None
         assert _count(conn, "businesses") == 0
-        [detail] = _activity(conn, "host-is-venue")
-        assert "Cascade Kitchens" in detail and "cascade-kitchens" in detail
+        assert _activity(conn, "host-is-venue")
 
-    def test_host_matching_a_live_venue_is_skipped_and_logged(self, derive, monkeypatch):
+    def test_own_venue_matches_by_the_derived_venue_rows_name(self, derive, monkeypatch):
         mod, conn = derive
-        uid = _event(conn, "Lakeview Commons", title="Chef Pop-up",
+        vuid = mirror_live_entity(conn, "venue", CASCADE)
+        uid = _event(conn, "the food hall on Lake Tahoe Blvd", venue_uid=vuid,
                      host={"name": "Cascade Kitchens Food Hall & Bar", "kind": "business"})
-        assert _run(mod, conn, monkeypatch, uid, lambda: [TIPSY, CASCADE]) == 0
+        assert _run(mod, conn, monkeypatch, uid) == 0
         assert _host(conn, uid)["derived_host_uid"] is None
         assert _count(conn, "businesses") == 0
-        [detail] = _activity(conn, "host-is-venue")
-        assert "live venue cascade-kitchens" in detail
 
-    def test_preset_host_that_is_a_venue_is_dropped(self, derive, monkeypatch):
+    def test_preset_host_that_is_the_own_venue_is_dropped(self, derive, monkeypatch):
         mod, conn = derive
         uid = _event(conn, "Cascade Kitchens", host=None)
         conn.execute("INSERT INTO businesses (entity_uid, source, source_kind, name, first_seen_at, "
@@ -129,16 +116,27 @@ class TestVenueIsNeverTheHost:
         assert conn.execute("SELECT COUNT(*) FROM linked_events WHERE role = 'host'").fetchone()[0] == 0
         assert _activity(conn, "host-is-venue")
 
-    def test_live_lookup_failure_retries(self, derive, monkeypatch):
-        mod, conn = derive
-        uid = _event(conn, "Lakeview Commons", title="Chef Pop-up",
-                     host={"name": "Alibi Ale Works", "kind": "business"})
-        workqueue.enqueue(conn, uid, "extract-hosts")
 
-        def down():
-            raise RuntimeError("503")
-        assert _run(mod, conn, monkeypatch, uid, down) == 1
-        assert _count(conn, "businesses") == 0
+class TestNoHostClearsAStaleHost:
+    def _stale(self, conn, uid):
+        conn.execute("UPDATE events SET derived_host_uid = 'gone', derived_host_kind = 'business' "
+                     "WHERE event_uid = ?", (uid,))
+
+    def test_no_host_in_the_text_clears_it(self, derive, monkeypatch):
+        mod, conn = derive
+        uid = _event(conn, "Lakeview Commons", title="Fireworks", host=None)
+        self._stale(conn, uid)
+        assert _run(mod, conn, monkeypatch, uid) == 0
+        assert tuple(_host(conn, uid)) == (None, None)
+
+    def test_ai_unavailable_on_the_last_attempt_clears_it(self, derive, monkeypatch):
+        mod, conn = derive
+        uid = _event(conn, "Lakeview Commons", title="Fireworks", host=None)
+        conn.execute("UPDATE events SET extra_json = '{}' WHERE event_uid = ?", (uid,))
+        self._stale(conn, uid)
+        monkeypatch.setattr(mod.event_people, "derive", lambda *a, **k: None)
+        assert _run(mod, conn, monkeypatch, uid) == 0   # no queue row = last attempt
+        assert tuple(_host(conn, uid)) == (None, None)
 
 
 class TestGenuineHostsStillDerive:
@@ -146,17 +144,38 @@ class TestGenuineHostsStillDerive:
         mod, conn = derive
         uid = _event(conn, "Cascade Kitchens", title="Rotary Lunch",
                      host={"name": "Rotary Club of Tahoe", "kind": "community"})
-        assert _run(mod, conn, monkeypatch, uid, lambda: [CASCADE]) == 0
+        assert _run(mod, conn, monkeypatch, uid, [CASCADE]) == 0
         assert _host(conn, uid)["derived_host_kind"] == "community"
         assert _count(conn, "communities") == 1
+        assert not _activity(conn, "host-matches-other-venue")
 
     def test_brewery_that_is_not_the_venue_is_a_business_host(self, derive, monkeypatch):
         mod, conn = derive
         uid = _event(conn, "Cascade Kitchens", title="Tap Takeover",
                      host={"name": "Alibi Ale Works", "kind": "business"})
-        assert _run(mod, conn, monkeypatch, uid, lambda: [TIPSY, CASCADE]) == 0
+        assert _run(mod, conn, monkeypatch, uid, [TIPSY, CASCADE]) == 0
         assert _host(conn, uid)["derived_host_kind"] == "business"
         assert _count(conn, "businesses") == 1
+
+    def test_brewery_that_is_a_local_venue_hosting_elsewhere_is_kept_and_logged(self, derive, monkeypatch):
+        mod, conn = derive
+        mirror_live_entity(conn, "venue", ALIBI)
+        uid = _event(conn, "Lakeview Commons", title="Beer Garden",
+                     host={"name": "Alibi Ale Works", "kind": "business"})
+        assert _run(mod, conn, monkeypatch, uid) == 0
+        assert _host(conn, uid)["derived_host_kind"] == "business"
+        assert _count(conn, "businesses") == 1
+        [detail] = _activity(conn, "host-matches-other-venue")
+        assert "Alibi Ale Works" in detail and "alibi-ale-works" in detail
+
+    def test_brewery_that_is_a_live_venue_hosting_elsewhere_is_kept_and_logged(self, derive, monkeypatch):
+        mod, conn = derive
+        uid = _event(conn, "Lakeview Commons", title="Beer Garden",
+                     host={"name": "Alibi Ale Works Brewing", "kind": "business"})
+        assert _run(mod, conn, monkeypatch, uid, [TIPSY, ALIBI]) == 0
+        assert _host(conn, uid)["derived_host_kind"] == "business"
+        [detail] = _activity(conn, "host-matches-other-venue")
+        assert "alibi-ale-works" in detail
 
     def test_foundation_named_after_its_venue_is_still_a_host(self, derive, monkeypatch):
         mod, conn = derive
@@ -165,3 +184,29 @@ class TestGenuineHostsStillDerive:
         assert _run(mod, conn, monkeypatch, uid) == 0
         assert _host(conn, uid)["derived_host_kind"] == "community"
         assert _count(conn, "communities") == 1
+        assert not _activity(conn, "host-is-venue")
+
+
+class TestVenueNameHelpers:
+    def test_cached_live_venues_reads_a_stale_cache_and_never_fetches(self, tmp_path):
+        path = tmp_path / "live-venues.json"
+        assert cached_live_venues(path) == []
+        path.write_text(json.dumps({"fetched_at": 0, "venues": [CASCADE]}))
+        assert cached_live_venues(path) == [CASCADE]
+        path.write_text("not json")
+        assert cached_live_venues(path) == []
+
+    def test_own_venue_match_names_the_bound_live_venue(self, fresh_db):
+        fresh_db.row_factory = sqlite3.Row
+        vuid = mirror_live_entity(fresh_db, "venue", CASCADE)
+        event = {"venue_raw": "Cascade Kitchens", "derived_venue_uid": vuid}
+        assert own_venue_named(fresh_db, "Cascade Kitchens Food Hall & Bar", event) == \
+            VenueNameMatch("Cascade Kitchens", "cascade-kitchens", "own")
+        assert own_venue_named(fresh_db, "Rotary Club of Tahoe", event) is None
+
+    def test_other_venue_match_prefers_local_then_live(self, fresh_db):
+        fresh_db.row_factory = sqlite3.Row
+        assert other_venue_named(fresh_db, "Alibi Ale Works", [ALIBI]) == \
+            VenueNameMatch("Alibi Ale Works", "alibi-ale-works", "live")
+        mirror_live_entity(fresh_db, "venue", ALIBI)
+        assert other_venue_named(fresh_db, "Alibi Ale Works", []).where == "local"
