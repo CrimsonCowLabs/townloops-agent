@@ -12,8 +12,10 @@ name search alone); this skill picks them up from `enrichment_status =
 
 ## The evidence ladder
 
-1. **Event evidence** (local DB): linked events, their venues, recurrence,
-   the event pages. Recorded for the operator; never proves identity.
+1. **Event evidence** (local DB): linked events, their venues (the bound
+   venue row, else the event's own venue name — an event shipped name-only
+   still names it), recurrence, the event pages. Recorded for the operator;
+   never proves identity.
 2. **Venue / event pages**: a link the page gives to the performer's own
    site or profile (labelled with their name, or carrying it in the URL) is
    a bridge. A booking without a link is event evidence only.
@@ -24,6 +26,13 @@ name search alone); this skill picks them up from `enrichment_status =
    (musician, band, singer, DJ, touring, …) for performers, or a maker
    (artist, potter, photographer, author, …) for creators — not bare genres
    ("country living") or "tour" as in tourism.
+   An act's **own site** (host carries the name) that names the act and a
+   role but not the town gets one more look: its own shows / tour-dates
+   page — the page itself when it carries a "Tour dates"/"Shows" section,
+   else its same-site shows link (one extra read) — listing the town or a
+   linked venue is locality. Recorded as the candidate's `shows_page`.
+   Touring and tribute acts verify this way (detail:
+   `references/touring-acts.md`).
 4. **Search, last**: `"<name>" <town>` only *discovers* candidates whose
    result title carries the name. A search snippet never verifies; the
    candidate's own page must.
@@ -47,7 +56,7 @@ A site's `website` is recorded as its root.
 | probable | one profile with the name and a role *or* locality, but not both | `needs-review`, nothing filled |
 | ambiguous | several such profiles, or two verified profiles disagree | `needs-review`, nothing filled |
 | unresolved | no profile names them, or only empty shells do (name, no role, no locality) | `not-found` |
-| deferred | budget ran out, search failed or returned nothing, or the only candidates couldn't be read | stays `pending`; the 3rd deferral in a row → unresolved |
+| deferred | budget ran out, search failed or returned nothing, or the only candidates couldn't be read (fetch failed, bot challenge, block/error page, or an empty shell with no title) | stays `pending`; the 3rd deferral in a row → unresolved |
 
 A Firecrawl 401/403 (search or scrape) aborts the run with exit 1 rather
 than deferring every row.
@@ -93,7 +102,9 @@ Cron `performer-research` runs every 20 minutes via
 scripts after 120s) and logs to `state/logs/performer-research-<date>.log`.
 An flock (`performer-research`) stops overlapping runs. ≤3 entities per run,
 each with its own budget of 6 Firecrawl searches + page reads (≤2 event
-pages, 1 search, ≤3 candidate pages); scrapes share `engine.policy`'s
+pages, 1 search, ≤3 candidate pages, a shows page per own-site candidate
+that needs one); a Firecrawl fallback read asks for the raw page (its
+cleaned `html` drops the `<head>` the ladder judges by); scrapes share `engine.policy`'s
 Firecrawl QPS bucket. Never-researched entities go first, most-booked
 first; after that, deferred ones take turns, longest-waiting first.
 

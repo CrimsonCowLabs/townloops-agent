@@ -6,23 +6,28 @@ match strangers — so identity is attached only when the evidence bridges a
 public profile to the local booking:
 
 1. **Event evidence** (local DB, no network): the linked events, their
-   venues, how often they recur, the event pages.
+   venues (the bound venue row, else the event's own venue name), how
+   often they recur, the event pages.
 2. **Venue / event pages**: a link the venue itself gives to the
    performer's own profile/site is a bridge. A booking with no link is event
    evidence only, never identity proof.
 3. **Public-profile metadata**: the profile page's title and meta
    description — exact name, plus locality (the town or a linked venue)
-   and role (music, art, …).
+   and role (music, art, …). An act's own site may show locality on its
+   own shows / tour-dates page instead (a touring act's bio rarely names
+   the town).
 4. **Search, last**: used only to *discover* candidate profiles; a search
    snippet never verifies anything — the candidate's own page must.
 
 Outcomes: `verified` fills blank fields; `probable` (name + role, no
 locality bridge) and `ambiguous` (several fits, or only a name) go to the
 operator (`enrichment_status = 'needs-review'`); `unresolved` is
-`not-found`; `deferred` (budget out, pages unreadable) stays `pending` for a
-later run. Description/bio is only ever verbatim text from the identified
-profile — null beats invented copy. Never writes to TownLoops; filled
-fields reach live through engine/entity_sync.
+`not-found`; `deferred` (budget out, pages unreadable — a bot challenge, a
+block page or an empty shell is unread, never a page that fails to name
+the act) stays `pending` for a later run. Description/bio is only ever
+verbatim text from the identified profile — null beats invented copy.
+Never writes to TownLoops; filled fields reach live through
+engine/entity_sync.
 """
 
 from __future__ import annotations
@@ -33,9 +38,9 @@ import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from typing import Callable, Literal, Optional
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urldefrag, urljoin, urlparse
 
-from engine import listing_hosts, research
+from engine import autonomy, listing_hosts, research
 from engine.listing_hosts import bare_host as _host
 from engine.derive_helpers import iso_utc_now, normalize_name, parse_extra_json
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
@@ -84,6 +89,11 @@ _PROFILE_PATH = {
     "youtube": r"/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+|user/[\w.\-]+)/?",
     "linkedin": r"/in/[\w\-]+/?",
 }
+# An act's own shows / tour-dates page: a heading or link label, or a path.
+_SHOWS_LABEL = re.compile(r"(?:upcoming\s+)?(?:tour(?:\s+dates)?|shows?|concerts?|dates|events|gigs"
+                          r"|performances)", re.IGNORECASE)
+_SHOWS_PATH = re.compile(r"/(?:tour(?:-?dates)?|shows?|concerts?|dates|events?|gigs|calendar"
+                         r"|schedule)/?$", re.IGNORECASE)
 # Their image URLs are signed CDN links that expire — never store them.
 _EXPIRING_IMAGE_HOSTS = ("instagram.com", "facebook.com")
 
@@ -111,6 +121,8 @@ class Candidate:
     locality: bool = False
     role: bool = False
     bridge: bool = False          # the venue/event page linked to it
+    shows_page: Optional[str] = None   # its own shows page that gave locality
+    unreadable: Optional[str] = None   # why its page couldn't be judged
     fields: dict = field(default_factory=dict)   # what it would fill, if accepted
 
     @property
@@ -136,10 +148,13 @@ class Finding:
 
 def event_evidence(conn: sqlite3.Connection, kind: str, entity_uid: str) -> Evidence:
     """Rung 1: the entity's linked events, their venues and event pages."""
+    # An event that shipped name-only (no venue row bound) still names
+    # its venue.
     rows = conn.execute(
-        "SELECT e.event_uid, e.name, e.source_url, "
+        "SELECT e.event_uid, e.name, e.source_url, COALESCE("
         "  (SELECT v.name FROM linked_events lv JOIN venues v ON v.entity_uid = lv.entity_uid "
-        "   WHERE lv.event_uid = e.event_uid AND lv.entity_kind = 'venue' LIMIT 1) AS venue "
+        "   WHERE lv.event_uid = e.event_uid AND lv.entity_kind = 'venue' LIMIT 1), "
+        "  e.venue_name, e.venue_raw) AS venue "
         "FROM linked_events l JOIN events e ON e.event_uid = l.event_uid "
         "WHERE l.entity_kind = ? AND l.entity_uid = ? ORDER BY e.date, e.event_uid",
         (kind, entity_uid),
@@ -223,6 +238,32 @@ def venue_page_links(html: str, page_url: str, name: str) -> list[str]:
     return out
 
 
+def _unreadable(html: str) -> Optional[str]:
+    """Why a fetched page can't be judged, or None: a bot challenge, block
+    or error page, or a shell with no title to match the name against."""
+    failure = autonomy.page_failure(research.page_text(html))
+    if failure and failure != "empty-page":
+        return failure
+    if not (research.title_text(html) or research.og_tags(html).get("title")):
+        return "empty-shell"
+    return None
+
+
+def _names_place(text: str, places: tuple[str, ...]) -> bool:
+    return any(_has_phrase(p, text) for p in places if p)
+
+
+def _shows_links(html: str, page_url: str) -> list[str]:
+    """Links on an act's own site to its own shows / tour-dates page."""
+    page, out = urldefrag(page_url).url.rstrip("/"), []
+    for url, text in research.page_links(html, page_url):
+        url = urldefrag(url).url
+        if (_host(url) == _host(page_url) and url.rstrip("/") != page and url not in out
+                and (_SHOWS_LABEL.fullmatch(text) or _SHOWS_PATH.search(urlparse(url).path))):
+            out.append(url)
+    return out
+
+
 def _profile_description(meta_description: str) -> str:
     """The profile's own words from its meta description, verbatim — the
     Instagram bio inside its follower-count wrapper, a Facebook page's text
@@ -285,7 +326,7 @@ def _default_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
     html, final = research.fetch_html(url)
     if html:
         return html, final
-    return research.firecrawl_fetch(url)
+    return research.firecrawl_fetch(url, raw=True)    # the ladder judges by <head>
 
 
 def _default_search(query: str) -> list[dict]:
@@ -318,16 +359,39 @@ def investigate(conn: sqlite3.Connection, kind: str, entity_uid: str, town: str,
             for url in venue_page_links(html, final or page_url, name):
                 cands.setdefault(url, Candidate(url, "venue-page", bridge=True))
 
+    places = (town, *evidence.venues)
+
     def read(cand: Candidate) -> bool:
         if not budget.take():
             return False
         html, final = fetch(cand.url)
-        if html:
+        cand.unreadable = _unreadable(html) if html else "fetch-failed"
+        if not cand.unreadable:
             _read_profile(cand, html, final or cand.url, kind, name, evidence, town)
+            if (cand.name_match and cand.role and not cand.locality
+                    and not _platform(cand.url) and _own_host(name, cand.url)):
+                return read_shows(cand, html, final or cand.url)
         elif cand.bridge:
             # Unreadable (profiles often wall logged-out readers), but the
             # venue linked it and the handle carries the name.
             cand.name_match = _handle_matches(name, cand.url)
+        return True
+
+    def read_shows(cand: Candidate, html: str, url: str) -> bool:
+        """The act's own site, named + role but no locality: its own shows
+        page listing the town or a linked venue bridges it — the page
+        itself when it carries the tour dates, else its shows link."""
+        text = research.page_text(html)
+        if (any(_SHOWS_LABEL.fullmatch(line) for line in text.splitlines())
+                and _names_place(text, places)):
+            cand.locality, cand.shows_page = True, url
+            return True
+        for link in _shows_links(html, url)[:1]:
+            if not budget.take():
+                return False
+            page, final = fetch(link)
+            if page and not _unreadable(page) and _names_place(research.page_text(page), places):
+                cand.locality, cand.shows_page = True, final or link
         return True
 
     for cand in list(cands.values()):
@@ -397,6 +461,7 @@ def _classify(kind: str, candidates: list[Candidate], evidence: Evidence) -> Fin
                                    why=f"two verified profiles disagree on {k}: "
                                        f"{payload[k]} vs {v}")
         how = ("linked from the venue page" if any(c.bridge for c in verified)
+               else "own site's shows page lists the town/venue" if any(c.shows_page for c in verified)
                else "profile names the town/venue and the role")
         return Finding("verified", payload, candidates, why=how,
                        description_source=source, evidence=evidence)

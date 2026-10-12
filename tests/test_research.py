@@ -202,6 +202,22 @@ class TestFirecrawlErrorSurfacing:
         _, kwargs = mock_post.call_args
         assert kwargs["headers"]["Authorization"] == "Bearer self-hosted"
 
+    def test_raw_asks_for_the_whole_page(self, monkeypatch):
+        """`html` is Firecrawl's cleaned main content — no <head>; `raw=True`
+        returns the page as served, title and meta included."""
+        from engine import research
+        from unittest.mock import MagicMock
+        monkeypatch.setenv("FIRECRAWL_API_URL", "http://localhost:8302")
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {"data": {"html": "<p>hi</p>",
+                                               "rawHtml": "<head><title>Hi</title></head>"}}
+        mock_post = MagicMock(return_value=response)
+        monkeypatch.setattr(research.requests, "post", mock_post)
+        html, _ = research.firecrawl_fetch("https://example.com", raw=True)
+        assert html == "<head><title>Hi</title></head>"
+        assert mock_post.call_args.kwargs["json"]["formats"] == ["rawHtml"]
+
     def test_url_honors_env_override(self, monkeypatch):
         """P1.2 also fixed the self-hosted URL bug — matches the CMO fix."""
         from engine import research

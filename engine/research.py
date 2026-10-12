@@ -74,8 +74,10 @@ def fetch_html(url: str, timeout: float = 20.0) -> tuple[Optional[str], Optional
     return r.text, r.url
 
 
-def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
-    """Firecrawl fallback for JS-heavy or bot-blocked pages.
+def firecrawl_fetch(url: str, raw: bool = False) -> tuple[Optional[str], Optional[str]]:
+    """Firecrawl fallback for JS-heavy or bot-blocked pages. Firecrawl's
+    `html` is the cleaned main content, without <head>; `raw` asks for the
+    page as served (title and meta tags included).
 
     Returns (html, final_url) on success, (None, None) on failure.
     Increments the module-level meter regardless. Logs every non-2xx to
@@ -100,7 +102,7 @@ def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
     try:
         r = requests.post(
             endpoint,
-            json={"url": url, "formats": ["html"]},
+            json={"url": url, "formats": ["rawHtml" if raw else "html"]},
             headers=firecrawl_env.headers(),
             timeout=45,
         )
@@ -137,7 +139,7 @@ def firecrawl_fetch(url: str) -> tuple[Optional[str], Optional[str]]:
         log.warning("firecrawl non-JSON 2xx",
                      extra={"endpoint": endpoint, "target": url})
         return None, None
-    return data.get("html"), url
+    return data.get("rawHtml" if raw else "html"), url
 
 
 # -------- extractors --------

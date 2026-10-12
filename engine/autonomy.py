@@ -589,15 +589,14 @@ _PAGE_FAILURES = (
 
 def page_failure(markdown: Optional[str]) -> Optional[str]:
     """Why a 2xx page is still a failed run, or None. Only the top of the page
-    is read — a calendar can mention "404 Main St" further down."""
+    is read — a calendar can mention "404 Main St" further down. A bot wall
+    is short, so it is named before the page is judged empty."""
     text = (markdown or "").strip()
-    if len(text) < 200:
-        return "empty-page"
     head = text[:600]
     for why, pattern in _PAGE_FAILURES:
         if pattern.search(head):
             return why
-    return None
+    return "empty-page" if len(text) < 200 else None
 
 
 # --------------------------------------------------------------------------
