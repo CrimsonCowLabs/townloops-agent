@@ -702,6 +702,79 @@ class TestDirectFromSweden:
         assert f.status == "verified" and f.payload["website"] == self.SITE
         assert web.searched == []
 
+    # The site's own footer links (issue #9), plus what must never be
+    # stored as a profile: share buttons, a post, a video, an event.
+    IG = "https://www.instagram.com/sos_abbashow/"
+    FB = "https://www.facebook.com/sosdirectfromsweden"
+    YT = "https://www.youtube.com/@SOS-DIRECTFROMSWEDEN-THE-ft1pb"
+    TOUR = ("<li>October 31, 2026 — Direct from Sweden – The Music of ABBA at "
+            "Harrah’s Lake Tahoe<br>South Shore Room at Harrah's, Lake Tahoe, NV, USA</li>")
+    NOT_PROFILES = ("<a href='https://www.facebook.com/sharer/sharer.php?u=x'>Share</a>"
+                    "<a href='https://www.facebook.com/sharer.php?u=x'>Share</a>"
+                    "<a href='https://twitter.com/share?url=x'>Tweet</a>"
+                    "<a href='https://twitter.com/intent/tweet?text=x'>Tweet</a>"
+                    "<a href='https://www.instagram.com/p/C1abcDEF/'>Latest post</a>"
+                    "<a href='https://www.youtube.com/watch?v=abc123'>Watch the show</a>"
+                    "<a href='https://www.facebook.com/events/123456/'>Harrah's show</a>")
+
+    def _socials(self, *extra):
+        links = (f"<a href='{self.IG}?igsh=abc'>Instagram</a><a href='{self.FB}'>Facebook</a>"
+                 f"<a href='{self.YT}'>YouTube</a>")
+        return f"<footer>{links}{self.NOT_PROFILES}{''.join(extra)}</footer>"
+
+    def test_own_site_social_anchors_fill_the_profile(self, conn):
+        [result] = self._run(conn, {self.SITE: self._home(self.TOUR + self._socials())})
+        assert result["status"] == "verified"
+        row = _row(conn)
+        assert (row["instagram"], row["facebook"], row["youtube"]) == (self.IG, self.FB, self.YT)
+        assert row["twitter"] is None and row["tiktok"] is None
+        assert row["website"] == self.SITE and row["description"] == self.DESCRIPTION
+
+    def test_conflicting_links_for_one_platform_fill_neither(self, conn):
+        other = "<a href='https://instagram.com/someone_else'>Our singer</a>"
+        [result] = self._run(conn, {self.SITE: self._home(self.TOUR + self._socials(other))})
+        assert result["status"] == "verified"
+        row = _row(conn)
+        assert row["instagram"] is None
+        assert (row["facebook"], row["youtube"]) == (self.FB, self.YT)
+
+    def test_same_profile_linked_twice_is_not_a_conflict(self, conn):
+        again = "<a href='https://instagram.com/SOS_ABBAshow'>Follow us</a>"
+        self._run(conn, {self.SITE: self._home(self.TOUR + self._socials(again))})
+        assert _row(conn)["instagram"] == self.IG
+
+    def test_unverified_site_links_are_never_applied(self, conn):
+        tour = "<li>October 27, 2026 — at Yoshi’s<br>Yoshi’s, Oakland, CA, USA</li>"
+        [result] = self._run(conn, {self.SITE: self._home(tour + self._socials())})
+        assert result["status"] == "probable"
+        row = _row(conn)
+        assert row["instagram"] is None and row["facebook"] is None and row["youtube"] is None
+        # Kept on the candidate for the operator's review.
+        assert _research(conn)["candidates"][0]["fields"]["instagram"] == self.IG
+
+    def test_site_links_fill_blanks_only(self, conn):
+        mine = "https://www.instagram.com/operator_set/"
+        _event(conn, "e1", "Direct From Sweden: The Music of ABBA", self.LISTING,
+               venue_name="Harrah’s Lake Tahoe")
+        _performer(conn, name="Direct From Sweden", events=("e1",), instagram=mine)
+        web = Web(pages={self.LISTING: page("Direct From Sweden at Harrah's - Visit Lake Tahoe"),
+                         self.SITE: self._home(self.TOUR + self._socials())},
+                  hits=[{"url": self.SITE, "title": "Direct from Sweden - The Music of ABBA"}])
+        f = pr.investigate(conn, "performer", "p1", TOWN, Budget(6), fetch=web.fetch,
+                           search=web.search)
+        filled = pr.apply_finding(conn, "performer", "p1", f)
+        assert _row(conn)["instagram"] == mine
+        assert "instagram" not in filled and {"facebook", "youtube"} <= set(filled)
+
+    def test_ld_json_same_as_gets_the_profile_checks_too(self, conn):
+        ld = ('<script type="application/ld+json">{"@type": "MusicGroup", "sameAs": '
+              '["https://open.spotify.com/artist/4abc", '
+              '"https://twitter.com/intent/tweet?text=x"]}</script>')
+        self._run(conn, {self.SITE: self._home(self.TOUR + ld)})
+        row = _row(conn)
+        assert row["spotify_url"] == "https://open.spotify.com/artist/4abc"
+        assert row["twitter"] is None
+
 
 class TestDefaultFetch:
     def test_firecrawl_fallback_keeps_the_head(self, monkeypatch):

@@ -90,7 +90,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `entity_classify.py` (blank `category_slug` on venues/businesses/communities ← town vocabulary:
     whole-word keyword map, Codex fallback constrained to the town's slugs; run by `enrich_entity`),
     `performer_research.py` (performer/creator evidence ladder: event evidence → venue-page links →
-    profile metadata → search as discovery only; bios verbatim or null; ambiguous → `needs-review`;
+    profile metadata → search as discovery only; bios verbatim or null; a verified own site's profile links (anchors +
+    `sameAs`, profile paths only, one per platform) fill blank socials; ambiguous → `needs-review`;
     driven by the `performer-research` skill, ≤3 per 20-min cron run),
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
     `entity-live-sync`), `live_patch.py` (full-body PATCH + GET verify for events and entities),

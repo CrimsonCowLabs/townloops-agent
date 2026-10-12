@@ -19,9 +19,10 @@ public profile to the local booking:
 4. **Search, last**: used only to *discover* candidate profiles; a search
    snippet never verifies anything — the candidate's own page must.
 
-Outcomes: `verified` fills blank fields; `probable` (name + role, no
-locality bridge) and `ambiguous` (several fits, or only a name) go to the
-operator (`enrichment_status = 'needs-review'`); `unresolved` is
+Outcomes: `verified` fills blank fields — an own site also gives its links
+to the act's platform profiles (anchors and JSON-LD sameAs, one profile per
+platform or none); `probable` (name + role, no locality bridge) and
+`ambiguous` (several fits, or only a name) go to the operator (`enrichment_status = 'needs-review'`); `unresolved` is
 `not-found`; `deferred` (budget out, pages unreadable — a bot challenge, a
 block page or an empty shell is unread, never a page that fails to name
 the act) stays `pending` for a later run. Description/bio is only ever
@@ -81,10 +82,12 @@ _LINK_FIELDS = {
 }
 _EVENT_PATH = re.compile(
     r"/(?:events?|e|tickets?|shows?|concerts?|calendar|tour-dates|whats-on)(?:/|$)", re.IGNORECASE)
-# What a profile (not a post, event or video) looks like on each platform.
+# What a profile (not a post, event, video or share link) looks like on each platform.
 _PROFILE_PATH = {
-    "instagram": r"/[\w.]+/?", "tiktok": r"/@[\w.]+/?", "twitter": r"/\w+/?",
-    "facebook": r"/(?!events\b|groups\b|share\b|watch\b|photo|story|profile\.php)[\w.\-]+/?",
+    "instagram": r"/[\w.]+/?", "tiktok": r"/@[\w.]+/?",
+    "twitter": r"/(?!share\b|intent\b|home\b|search\b|hashtag\b)\w+/?",
+    "facebook": r"/(?!events\b|groups\b|share\b|sharer\b|watch\b|photo|story|profile\.php)"
+                r"[\w.\-]+/?",
     "spotify_url": r"/artist/\w+/?",
     "youtube": r"/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+|user/[\w.\-]+)/?",
     "linkedin": r"/in/[\w\-]+/?",
@@ -177,6 +180,17 @@ def _platform(url: str) -> Optional[str]:
     return None
 
 
+def _is_profile(url: str) -> bool:
+    """A platform profile — not a post, event, video or share link."""
+    platform = _platform(url)
+    return bool(platform) and bool(re.fullmatch(_PROFILE_PATH[platform], urlparse(url).path or "/"))
+
+
+def _profile_key(url: str) -> tuple[str, str]:
+    """One profile whatever its scheme, www, query, trailing slash or case."""
+    return _host(url), urlparse(url).path.rstrip("/").lower()
+
+
 def _has_phrase(phrase: str, text: str) -> bool:
     p = normalize_name(phrase)
     return bool(p) and f" {p} " in f" {normalize_name(text)} "
@@ -209,9 +223,8 @@ def is_presence(name: str, url: str, *, bridged: bool, exclude_hosts: set[str] =
     # are a booking, not the performer.
     if host in exclude_hosts or listing_hosts.is_listing_host(host):
         return False
-    platform = _platform(url)
-    if platform:
-        return bool(re.fullmatch(_PROFILE_PATH[platform], path))
+    if _platform(url):
+        return _is_profile(url)
     if _EVENT_PATH.search(path):
         return False
     if _own_host(name, url):
@@ -264,6 +277,33 @@ def _shows_links(html: str, page_url: str) -> list[str]:
     return out
 
 
+def _same_as(node) -> list[str]:
+    """Every JSON-LD `sameAs` link under `node`."""
+    if isinstance(node, list):
+        return [u for n in node for u in _same_as(n)]
+    if not isinstance(node, dict):
+        return []
+    same = node.get("sameAs")
+    out = [same] if isinstance(same, str) else [u for u in same or () if isinstance(u, str)]
+    return out + [u for v in node.values() for u in _same_as(v)]
+
+
+def _site_profiles(html: str, page_url: str) -> dict:
+    """An act's own site's links to its platform profiles — anchors and
+    JSON-LD sameAs — as {field: url}, query and fragment dropped. A post,
+    event, video or share link is not a profile. Two different profiles for
+    one platform (a member's, a venue's) give neither — never a guess."""
+    links = [u for u, _ in research.page_links(html, page_url)]
+    links += _same_as(research.ld_json_blocks(html))
+    found: dict[str, dict] = {}
+    for url in links:
+        p = urlparse(url)
+        url = f"{p.scheme}://{p.netloc}{p.path}"
+        if _is_profile(url):
+            found.setdefault(_platform(url), {}).setdefault(_profile_key(url), url)
+    return {fld: next(iter(urls.values())) for fld, urls in found.items() if len(urls) == 1}
+
+
 def _profile_description(meta_description: str) -> str:
     """The profile's own words from its meta description, verbatim — the
     Instagram bio inside its follower-count wrapper, a Facebook page's text
@@ -294,8 +334,7 @@ def _read_profile(cand: Candidate, html: str, final_url: str, kind: str, name: s
     if description:
         cand.fields["description"] = description
     if not _platform(cand.url):
-        for block in research.ld_json_blocks(html):
-            research._fill_from_ldjson(cand.fields, block)   # sameAs socials
+        cand.fields.update(_site_profiles(html, final_url))
     if not any(h in _host(final_url) for h in _EXPIRING_IMAGE_HOSTS):
         for image in research.image_candidates(html, final_url):
             if research.verify_image(image):
@@ -456,7 +495,8 @@ def _classify(kind: str, candidates: list[Candidate], evidence: Evidence) -> Fin
                         payload[k] = v
                         if k in ("description", "bio"):
                             source = c.url
-                elif payload.setdefault(k, v) != v:
+                # The same profile spelled differently is not a disagreement.
+                elif _profile_key(payload.setdefault(k, v)) != _profile_key(v):
                     return Finding("ambiguous", candidates=candidates, evidence=evidence,
                                    why=f"two verified profiles disagree on {k}: "
                                        f"{payload[k]} vs {v}")

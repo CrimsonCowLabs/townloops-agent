@@ -76,6 +76,15 @@ probable/ambiguous match all leave it **null**. No template copy
 skipped (their CDN URLs expire); others follow the shared image rules
 (`engine/research.image_candidates`: no logos/placeholders, HEAD-verified).
 
+## Profile links from an own site
+
+A verified own site also fills blank socials (instagram, facebook, youtube,
+spotify_url, tiktok, twitter, linkedin) from its links to them — anchors on
+the page and JSON-LD `sameAs`. Only profile paths count (no post, event,
+video or share link). Two different profiles for one platform fill neither
+(one may be a member's or a venue's). An unverified candidate's links are
+only recorded on it for review.
+
 ## Operator review
 
 ```bash
