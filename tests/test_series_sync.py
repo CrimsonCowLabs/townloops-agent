@@ -96,12 +96,14 @@ class TestSeriesFill:
     def test_upcoming_shipped_occurrence_fills_blanks_from_a_sibling(self, sync):
         sibling = live("trivia-0", -6, "trivia-thursday", description="Six rounds, prizes.",
                        tags=["trivia", "free"])
-        api = FakeAPI([sibling, live("trivia-1", 3, "trivia-thursday")], series=SERIES)
+        occurrence = live("trivia-1", 3, "trivia-thursday")
+        start_at = occurrence["start_at"]
+        api = FakeAPI([sibling, occurrence], series=SERIES)
         uid = sync.shipped("trivia-1", 3)
         sync(api)
         assert api.events["trivia-1"]["description"] == "Six rounds, prizes."
         assert api.events["trivia-1"]["tags"] == ["trivia"]
-        assert api.events["trivia-1"]["start_at"] == at(3)
+        assert api.events["trivia-1"]["start_at"] == start_at
         [detail] = [r["detail"] for r in sync.conn.execute(
             "SELECT detail FROM agent_activity WHERE action = 'series-fill' AND target = ?",
             (uid,))]
