@@ -72,7 +72,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"),
     `listing_hosts.py` (the one directory/listing/aggregator host list — restaurantji, Yelp, maps, ticketing,
     Facebook events: evidence at most, never an entity's `website`; enrichment, discovery's blocklist, promote and
-    performer research all check it — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
+    performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
     `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py` (also the one
     `extra_json` parser `parse_extra_json`, and `seed_ref`/`seed_name_of` for the `seed:<name>` reference),
@@ -147,7 +147,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     Codex pass over the event's own text, cached on the event; derive-hosts/-people use it),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
     skill: days with no live event, per-day Series/one-off coverage, local events not live yet, sparse live metadata
-    (one finding per Series), venues of upcoming events with no image; LIST/GET only).
+    (one finding per Series), venues of upcoming events with no image; LIST/GET only),
+    `listing_website_audit.py` (read-only, for the `operator-audit-listing-websites` skill: venues/businesses/
+    communities whose `website` is a listing page per `listing_hosts.is_listing_url`, local ↔ live paired by
+    `townloops_slug` → `live_id` → merge-following GET; one row per entity, `side` local/live/both — the
+    listing-website cleanup works from `find_listing_websites`' rows; LIST/GET only).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the

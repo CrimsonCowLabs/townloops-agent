@@ -94,7 +94,7 @@ There is no phase machine. Progress lives in the `events` table (each row's `sta
 - Performers/creators: `performer-research`
 - Business candidates (operator-gated promote): `business-discovery`
 - Cancellations (operator-gated): `event-cancellations`
-- Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
+- Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-audit-listing-websites`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
 - Bootstrap / health: `town-init`
 - Legacy structured-source ingest (unscheduled): `event-ingest`
 - Newsletter: `newsletter-weekly`
@@ -148,6 +148,7 @@ The town operator talks to me through a chat panel in the dashboard. Messages ar
 - `operator-list-events` — filtered event listing (by status / date / source), one row per Series with its date count; `--series <slug>` lists every live occurrence of one Series. Use when the operator wants to see specific pending / approved / declined events, or all the dates of a Series.
 - `operator-review-event` — fuzzy single-event lookup by title / venue / uid prefix. Use when the operator names one specific event.
 - `operator-audit-upcoming` — read-only audit of the next N town-local days (default 30): days with no live events, local events not live yet, live events missing description / venue / source_url / categories, and venues of upcoming events with no image. Use for "what's missing this week?" or "audit the next 30 days". Report counts first, say which are live and which local, and follow the reading rules in its SKILL.md.
+- `operator-audit-listing-websites` — read-only audit of venues, businesses and communities whose `website` is a directory/listing page (restaurantji, Yelp, maps, ticketing), each row saying local, live or both. Use for "which businesses link to restaurantji?" or before any listing-website cleanup. Report counts first, say which are live and which local; it changes nothing.
 - `operator-bulk-decline` — **PROPOSES** a mass decline. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-bulk-approve` — **PROPOSES** a mass approve. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-requeue` — reset one stuck workqueue row so heartbeat retries it. Idempotent, safe to call directly.
