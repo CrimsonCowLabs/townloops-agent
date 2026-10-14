@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 import sqlite3
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -70,11 +69,6 @@ SHARED_HOSTS = {
     "facebook.com", "instagram.com", "tiktok.com", "x.com", "twitter.com",
     "youtube.com", "linktr.ee", "sites.google.com", "google.com",
 }
-
-_GENERIC_TITLE_PARTS = {"home", "homepage", "home page", "welcome", "official site",
-                        "official website", "index"}
-_TITLE_SPLIT = re.compile(r"\s+[|\-–—:]\s+")
-
 
 # --------------------------------------------------------------------------
 # Live dedup
@@ -192,14 +186,7 @@ class LiveIndex:
         return best
 
 
-def name_from_title(title: Optional[str]) -> Optional[str]:
-    """A business name from a page title: 'Home | Alibi Ale Works' → 'Alibi
-    Ale Works'. The first segment that isn't a generic page label."""
-    for part in _TITLE_SPLIT.split(title or ""):
-        part = part.strip()
-        if part and part.lower() not in _GENERIC_TITLE_PARTS:
-            return part[:120]
-    return None
+name_from_title = discovery.name_from_title
 
 
 # --------------------------------------------------------------------------
@@ -474,6 +461,7 @@ def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
                 region=profile.get("region") or "",
                 aliases=list(profile.get("name_aliases") or []),
                 **({} if kind == KIND else {"kind": kind}),
+                name=cand.get("display_name"),
             )
         except Exception as e:
             out["deferred"] += 1

@@ -42,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable, Literal, Optional
 from urllib.parse import urldefrag, urljoin, urlparse
 
-from engine import autonomy, listing_hosts, research
+from engine import autonomy, listing_hosts, own_site, research
 from engine.listing_hosts import bare_host as _host
 from engine.derive_helpers import iso_utc_now, normalize_name, parse_extra_json
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
@@ -76,25 +76,6 @@ _ROLE_TERMS = {
                r"sculptor|maker|creator|podcast\w*|filmmaker|designer|instructor",
 }
 
-# host → field. Anything else is the entity's own website.
-_LINK_FIELDS = {
-    "instagram.com": "instagram", "facebook.com": "facebook", "tiktok.com": "tiktok",
-    "twitter.com": "twitter", "x.com": "twitter", "linkedin.com": "linkedin",
-    "spotify.com": "spotify_url", "youtube.com": "youtube", "youtu.be": "youtube",
-}
-_EVENT_PATH = re.compile(
-    r"/(?:events?|e|tickets?|shows?|concerts?|calendar|tour-dates|whats-on)(?:/|$)", re.IGNORECASE)
-# What a profile (not a post, event, video, share link or site page) looks
-# like on each platform.
-_PROFILE_PATH = {
-    "instagram": r"/(?!(?:explore|reels?|p)(?:/|$))[\w.]+/?", "tiktok": r"/@[\w.]+/?",
-    "twitter": r"/(?!share\b|intent\b|home\b|search\b|hashtag\b|explore\b|i\b)\w+/?",
-    "facebook": r"/(?!events\b|groups\b|share\b|sharer\b|watch\b|reels?\b|login\b|photo|story"
-                r"|profile\.php|permalink\.php)[\w.\-]+/?",
-    "spotify_url": r"/artist/\w+/?",
-    "youtube": r"/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+|user/[\w.\-]+)/?",
-    "linkedin": r"/in/[\w\-]+/?",
-}
 # An act's own shows / tour-dates page: a heading or link label, or a path.
 _SHOWS_LABEL = re.compile(r"(?:upcoming\s+)?(?:tour(?:\s+dates)?|shows?|concerts?|dates|events|gigs"
                           r"|performances)", re.IGNORECASE)
@@ -175,18 +156,8 @@ def event_evidence(conn: sqlite3.Connection, kind: str, entity_uid: str) -> Evid
     return ev
 
 
-def _platform(url: str) -> Optional[str]:
-    host = _host(url)
-    for h, fld in _LINK_FIELDS.items():
-        if host == h or host.endswith("." + h):
-            return fld
-    return None
-
-
-def _is_profile(url: str) -> bool:
-    """A platform profile — not a post, event, video, share link or site page."""
-    platform = _platform(url)
-    return bool(platform) and bool(re.fullmatch(_PROFILE_PATH[platform], urlparse(url).path or "/"))
+_platform = own_site.platform
+_is_profile = own_site.is_profile
 
 
 def _profile_url(url: str) -> Optional[str]:
@@ -207,8 +178,7 @@ def _has_phrase(phrase: str, text: str) -> bool:
     return bool(p) and f" {p} " in f" {normalize_name(text)} "
 
 
-def _compact(s: str) -> str:
-    return normalize_name(s).replace(" ", "")
+_compact = own_site.compact
 
 
 def _handle_matches(name: str, url: str) -> bool:
@@ -216,33 +186,15 @@ def _handle_matches(name: str, url: str) -> bool:
     return len(compact) >= 5 and compact in _compact(f"{_host(url)} {urlparse(url).path}")
 
 
-def _own_host(name: str, url: str) -> bool:
-    """The site's host carries the name: moe.org for "moe.",
-    janedoe.bandcamp.com / janedoemusic.com for "Jane Doe"."""
-    host, compact = _host(url), _compact(name)
-    return bool(compact) and (host.split(".")[0].replace("-", "") == compact
-                              or (len(compact) >= 5 and compact in host.replace("-", "").replace(".", "")))
+_own_host = own_site.host_carries_name
 
 
 def is_presence(name: str, url: str, *, bridged: bool, exclude_hosts: set[str] = frozenset()) -> bool:
-    """Could `url` be the performer's own presence? A platform profile (not
-    a post/event/video), or — never on a ticketing/listing host or an
-    event path — a site the venue linked to (`bridged`) or whose host
-    carries the name."""
-    host, path = _host(url), urlparse(url).path or "/"
-    # Ticketing / listing hosts name the performer and the town, but they
-    # are a booking, not the performer.
-    if host in exclude_hosts or listing_hosts.is_listing_host(host):
-        return False
-    if _platform(url):
-        return _is_profile(url)
-    if _EVENT_PATH.search(path):
-        return False
-    if _own_host(name, url):
-        return True
-    # A venue's link to someone else's site counts only as a homepage — a
-    # deeper page (an article, a review) is about them, not theirs.
-    return bridged and path.strip("/") == ""
+    """Could `url` be the performer's own presence? engine/own_site's rule:
+    a platform profile, or — never on a ticketing/listing host or an event
+    path — a site whose host carries the name, or a homepage the venue
+    linked to (`bridged`)."""
+    return own_site.is_own(name, url, homepage_counts=bridged, exclude_hosts=exclude_hosts)
 
 
 def venue_page_links(html: str, page_url: str, name: str) -> list[str]:

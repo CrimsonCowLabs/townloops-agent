@@ -27,7 +27,13 @@ is for the ones that never host a listed event.
    a `name_aliases` entry / the region), show no closure marker, and look
    customer-facing (menu, hours, book, shop, contact…). Address, phone and
    hours are pulled out when present. A candidate with no name (from a
-   directory) is named from its page title.
+   directory) is named from its page title. The URL must also be the
+   organisation's **own** site (`engine/own_site`, the rule performer research
+   uses): a homepage, a platform profile, or any page on a host that carries
+   its name — a deep page on someone else's host (a travel blog's "24 BEST …"
+   post, a city directory, a chamber's `/jobs`) is rejected with the reason,
+   before any scrape when the candidate already has a name. A `.gov` page is
+   the government's own site. Don't add blogs to the listing-host list.
 3. **dedup against live** — at sweep *and* verify, every candidate is
    checked against the town's live businesses (fetched fresh each run):
    - its URL is a live business's `website`, or on the same host (social and

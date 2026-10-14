@@ -29,7 +29,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 import requests
 
 from engine.ingest_core import DEFAULT_TZ
-from engine import firecrawl_env, listing_hosts
+from engine import firecrawl_env, listing_hosts, own_site
 from engine.policy import firecrawl_bucket
 
 
@@ -99,6 +99,11 @@ MEMBER_FACING_MARKERS = [
 ]
 
 
+_GENERIC_TITLE_PARTS = {"home", "homepage", "home page", "welcome", "official site",
+                        "official website", "index"}
+_TITLE_SPLIT = re.compile(r"\s+[|\-–—:]\s+")
+
+
 class FirecrawlError(RuntimeError):
     pass
 
@@ -155,6 +160,27 @@ def directory_link_block_reason(seed_host: str, link: str) -> Optional[str]:
     if generic_hits >= 2:
         return "generic directory/resort section path"
     return None
+
+
+def name_from_title(title: Optional[str]) -> Optional[str]:
+    """An organisation name from a page title: 'Home | Alibi Ale Works' →
+    'Alibi Ale Works'. The first segment that isn't a generic page label."""
+    for part in _TITLE_SPLIT.split(title or ""):
+        part = part.strip()
+        if part and part.lower() not in _GENERIC_TITLE_PARTS:
+            return part[:120]
+    return None
+
+
+def not_own_site_reason(url: str, name: Optional[str]) -> Optional[str]:
+    """Why the candidate `url` can't be `name`'s own site (engine/own_site;
+    a homepage counts — the sweep found it as a site of its own), or None.
+    A page on a government host is that government's own site."""
+    host = listing_hosts.bare_host(url)
+    if host.endswith(".gov"):
+        return None
+    why = own_site.not_own_reason(name, url, homepage_counts=True)
+    return f"not its own site: {why}" if why else None
 
 
 # --------------------------------------------------------------------------
@@ -435,10 +461,13 @@ def verify_candidate(
     region: str = "",
     aliases: list[str] | None = None,
     kind: str = "business",
+    name: Optional[str] = None,
 ) -> dict:
     """Adversarial verify: scrape the candidate URL, decide whether it's a
     real customer-facing entity in the target town (member-facing, for a
-    community group or non-profit `kind`).
+    community group or non-profit `kind`) — on its own site, not a page
+    about it (`not_own_site_reason`, judged with `name`, else the name the
+    page title gives; a named candidate that fails is rejected unscraped).
 
     Return shape matches `engine.policy.is_high_confidence()` expectations:
       {
@@ -453,6 +482,8 @@ def verify_candidate(
         fetched_at: str,
       }
     """
+    if name and (why := not_own_site_reason(canonical_url, name)):
+        return {"verified": False, "reasons": [why], "fetched_at": _iso_now()}
     scraped = firecrawl_scrape(canonical_url)
     if not scraped:
         return {
@@ -470,6 +501,10 @@ def verify_candidate(
 
     md_lower = md.lower()
     reasons_reject: list[str] = []
+
+    if not name and (why := not_own_site_reason(
+            canonical_url, name_from_title(scraped.get("title")))):
+        reasons_reject.append(why)
 
     tn = (town_name or "").lower()
     rg = (region or "").lower()

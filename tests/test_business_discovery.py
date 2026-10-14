@@ -224,7 +224,8 @@ def test_run_verify_rechecks_live_and_records_verdicts(fresh_db, monkeypatch):
 
     assert out == {"processed": 2, "verified": 1, "rejected": 1, "already_live": 0,
                    "deferred": 0, "errors": []}
-    assert calls[0][1] == {"town_name": "South Lake Tahoe", "region": "California", "aliases": ["SLT"]}
+    assert calls[0][1] == {"town_name": "South Lake Tahoe", "region": "California", "aliases": ["SLT"],
+                           "name": "Brand New Bakery"}
 
 
 def test_run_verify_leaves_a_candidate_pending_when_the_verifier_crashes(fresh_db, monkeypatch):

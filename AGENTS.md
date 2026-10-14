@@ -77,6 +77,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
   - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
     `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
     same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"),
+    `own_site.py` (the one "own page, not a page about it" rule: platform profile, a host carrying the name, else a
+    homepage where the caller says one counts — performer research's presence test and discovery's verify),
     `listing_hosts.py` (the one directory/listing/aggregator host list — restaurantji, Yelp, maps, ticketing,
     Facebook events: evidence at most, never an entity's `website`; enrichment, discovery's blocklist, promote and
     performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),

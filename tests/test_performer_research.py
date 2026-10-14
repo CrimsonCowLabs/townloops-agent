@@ -828,3 +828,30 @@ class TestDefaultFetch:
                             lambda url, raw=False: calls.append(raw) or ("<html/>", url))
         assert pr._default_fetch("https://x.example/") == ("<html/>", "https://x.example/")
         assert calls == [True]
+
+
+class TestPresenceVerdicts:
+    """Pins is_presence's verdicts — the rule lives in engine/own_site,
+    shared with discovery's verify (#16)."""
+
+    @pytest.mark.parametrize("name, url, bridged, expected", [
+        ("Jane Doe", "https://www.livenation.com/event/17C8v/jane-doe", True, False),
+        ("Jane Doe", "https://www.instagram.com/janedoe/", False, True),
+        ("Jane Doe", "https://www.instagram.com/p/Cxyz123/", True, False),
+        ("Jane Doe", "https://www.facebook.com/events/123456/", True, False),
+        ("Jane Doe", "https://janedoemusic.example/events/1", True, False),
+        ("Jane Doe", "https://janedoemusic.example/about", False, True),
+        ("Jane Doe", "https://janedoe.bandcamp.com/", False, True),
+        ("moe.", "https://www.moe.org/pages/tour", False, True),
+        ("Jane Doe", "https://localnews.example/2026/jane-doe-interview", True, False),
+        ("Jane Doe", "https://someband.example/", True, True),
+        ("Jane Doe", "https://someband.example/", False, False),
+        ("Jo", "https://jo.example/about", False, True),
+        ("Jo", "https://jodie.example/about", False, False),
+    ])
+    def test_verdicts(self, name, url, bridged, expected):
+        assert pr.is_presence(name, url, bridged=bridged) is expected
+
+    def test_excluded_host_is_never_presence(self):
+        assert not pr.is_presence("Jane Doe", "https://janedoemusic.example/", bridged=True,
+                                  exclude_hosts={"janedoemusic.example"})

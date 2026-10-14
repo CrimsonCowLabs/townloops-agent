@@ -142,6 +142,95 @@ class TestVerifyCandidate:
         assert discovery.verify_candidate("https://x.co", town_name="Town")["title"] == "Elsewhere Bakery"
 
 
+class TestVerifyOwnSite:
+    """A page about an organisation — a travel blog's listicle, a city
+    directory — is not its own site, however well it names the town (#16:
+    25 listicles reached SLT's business queue this way)."""
+
+    # Passes the town, closure and customer/member-facing checks for every kind.
+    PAGE = "Eat and play in South Lake Tahoe. Contact us. About us. Join. Menu."
+    KINDS = ("business", "community", "nonprofit")
+
+    def _scrape(self, monkeypatch, title=""):
+        from engine import discovery
+        scraped = []
+
+        def scrape(url, *, raise_on_error=False):
+            scraped.append(url)
+            return {"markdown": self.PAGE, "links": [], "title": title}
+
+        monkeypatch.setattr(discovery, "firecrawl_scrape", scrape)
+        return scraped
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, name", [
+        ("https://insidetheupgrade.com/post/south-lake-tahoe-restaurants",
+         "The 24 BEST South Lake Tahoe Restaurants"),
+        ("https://foxintheforest.net/best-south-lake-tahoe-hikes", "15 Best South Lake Tahoe Hikes"),
+        ("https://gowanderly.com/south-lake-tahoe-bucket-list", "South Lake Tahoe Bucket List"),
+        ("https://sf.eater.com/maps/best-restaurants-bars-beach-south-lake-tahoe",
+         "The Best Restaurants in South Lake Tahoe"),
+        ("https://localgovs.com/local-california/south-lake-tahoe", "South Lake Tahoe"),
+        ("https://citydirectory.us/city-south-lake-tahoe.html", "South Lake Tahoe City Directory"),
+        ("https://business.tahoechamber.org/member-application", "Member Application"),
+        ("https://business.tahoechamber.org/jobs", "Jobs"),
+        ("https://business.tahoechamber.org/hotdeals", "Hot Deals"),
+    ])
+    def test_a_page_about_organisations_rejects(self, monkeypatch, url, name, kind):
+        from engine import discovery
+        scraped = self._scrape(monkeypatch)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind, name=name)
+        assert not v["verified"]
+        assert any("not its own site" in r for r in v["reasons"]), v["reasons"]
+        assert scraped == []          # decided from the URL — no Firecrawl spent
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, title", [
+        ("https://business.tahoechamber.org/member-application",
+         "Member Application | Lake Tahoe South Shore Chamber of Commerce"),
+        ("https://business.tahoechamber.org/jobs", "Job Board - Lake Tahoe South Shore Chamber"),
+        ("https://business.tahoechamber.org/hotdeals", "Hot Deals | Tahoe Chamber"),
+        ("https://insidetheupgrade.com/post/south-lake-tahoe-restaurants",
+         "The 24 BEST South Lake Tahoe Restaurants | Inside the Upgrade"),
+    ])
+    def test_a_nameless_candidate_is_judged_by_its_page_title_name(self, monkeypatch, url, title, kind):
+        from engine import discovery
+        self._scrape(monkeypatch, title=title)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind)
+        assert not v["verified"]
+        assert any("not its own site" in r for r in v["reasons"]), v["reasons"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, name", [
+        ("https://tahoeoutdooradventures.com/", "Tahoe Outdoor Adventures"),
+        ("https://oncoursetahoe.com/", "OnCourse Tahoe"),
+        ("https://pacificcrestgallerytahoe.com/", "Pacific Crest Gallery"),
+        ("https://pacificcrestgallerytahoe.com/", None),
+        ("https://tahoeoutdooradventures.com/kayak-tours", "Tahoe Outdoor Adventures"),
+        ("https://www.facebook.com/tahoeyogacollective", "Tahoe Yoga Collective"),
+    ])
+    def test_an_organisations_own_site_still_verifies(self, monkeypatch, url, name, kind):
+        from engine import discovery
+        self._scrape(monkeypatch, title="Home | Somewhere")
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind, name=name)
+        assert v["verified"], v["reasons"]
+
+    def test_a_nameless_deep_page_on_its_own_host_verifies_by_title(self, monkeypatch):
+        from engine import discovery
+        self._scrape(monkeypatch, title="Tahoe Outdoor Adventures | Kayak Tours")
+        v = discovery.verify_candidate("https://tahoeoutdooradventures.com/kayak-tours",
+                                       town_name="South Lake Tahoe")
+        assert v["verified"], v["reasons"]
+
+    def test_a_government_department_page_is_the_governments_own_site(self, monkeypatch):
+        from engine import discovery
+        self._scrape(monkeypatch)
+        v = discovery.verify_candidate("https://cityofslt.gov/parks-recreation",
+                                       town_name="South Lake Tahoe", kind="community",
+                                       name="Parks & Recreation")
+        assert v["verified"], v["reasons"]
+
+
 class TestSweepFunctions:
     def test_sweep_web_search_dedupes(self, monkeypatch):
         from engine import discovery

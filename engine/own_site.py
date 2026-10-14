@@ -1,0 +1,102 @@
+"""Could a URL be an entity's *own* page, rather than a page *about* it?
+
+The one rule, shared by performer research's presence test and discovery's
+verify (a travel blog's "24 BEST South Lake Tahoe Restaurants" names the
+town and has a "contact us" footer, but it is nobody's own site):
+
+- never a directory/listing/ticketing host (engine.listing_hosts) or a host
+  the caller excludes (the event's own source host);
+- on a social platform, only a profile — not a post, event, video or share
+  link;
+- never an event page;
+- a site whose host carries the entity's name (moe.org for "moe.",
+  janedoemusic.com for "Jane Doe") — any page on it;
+- otherwise only a homepage, and only where the caller says a homepage
+  counts (a venue linked to it; discovery found it as a site of its own).
+  A deeper page on a host that doesn't carry the name is an article, a
+  review or a directory entry about the entity, not theirs.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Optional
+from urllib.parse import urlparse
+
+from engine import listing_hosts
+from engine.derive_helpers import normalize_name
+from engine.listing_hosts import bare_host
+
+# host → field. Anything else is the entity's own website.
+PLATFORM_FIELDS = {
+    "instagram.com": "instagram", "facebook.com": "facebook", "tiktok.com": "tiktok",
+    "twitter.com": "twitter", "x.com": "twitter", "linkedin.com": "linkedin",
+    "spotify.com": "spotify_url", "youtube.com": "youtube", "youtu.be": "youtube",
+}
+EVENT_PATH = re.compile(
+    r"/(?:events?|e|tickets?|shows?|concerts?|calendar|tour-dates|whats-on)(?:/|$)", re.IGNORECASE)
+# What a profile (not a post, event, video, share link or site page) looks
+# like on each platform.
+PROFILE_PATH = {
+    "instagram": r"/(?!(?:explore|reels?|p)(?:/|$))[\w.]+/?", "tiktok": r"/@[\w.]+/?",
+    "twitter": r"/(?!share\b|intent\b|home\b|search\b|hashtag\b|explore\b|i\b)\w+/?",
+    "facebook": r"/(?!events\b|groups\b|share\b|sharer\b|watch\b|reels?\b|login\b|photo|story"
+                r"|profile\.php|permalink\.php)[\w.\-]+/?",
+    "spotify_url": r"/artist/\w+/?",
+    "youtube": r"/(?:@[\w.\-]+|channel/[\w\-]+|c/[\w.\-]+|user/[\w.\-]+)/?",
+    "linkedin": r"/in/[\w\-]+/?",
+}
+
+
+def platform(url: str) -> Optional[str]:
+    """The entity field a social-platform URL belongs in, or None."""
+    host = bare_host(url)
+    for h, fld in PLATFORM_FIELDS.items():
+        if host == h or host.endswith("." + h):
+            return fld
+    return None
+
+
+def is_profile(url: str) -> bool:
+    """A platform profile — not a post, event, video, share link or site page."""
+    p = platform(url)
+    return bool(p) and bool(re.fullmatch(PROFILE_PATH[p], urlparse(url).path or "/"))
+
+
+def compact(s: str) -> str:
+    return normalize_name(s).replace(" ", "")
+
+
+def host_carries_name(name: Optional[str], url: str) -> bool:
+    """The site's host carries the name: moe.org for "moe.",
+    janedoe.bandcamp.com / janedoemusic.com for "Jane Doe"."""
+    host, c = bare_host(url), compact(name or "")
+    return bool(c) and (host.split(".")[0].replace("-", "") == c
+                        or (len(c) >= 5 and c in host.replace("-", "").replace(".", "")))
+
+
+def not_own_reason(name: Optional[str], url: str, *, homepage_counts: bool,
+                   exclude_hosts: set[str] = frozenset()) -> Optional[str]:
+    """Why `url` can't be `name`'s own page, or None when it could be."""
+    host, path = bare_host(url), urlparse(url).path or "/"
+    if host in exclude_hosts:
+        return f"{host} is the event's own source"
+    # Ticketing / listing hosts name the entity and the town, but they are a
+    # listing, not the entity.
+    if listing_hosts.is_listing_host(host):
+        return f"{host} is a listing host"
+    if platform(url):
+        return None if is_profile(url) else f"a {host} page, not a profile"
+    if EVENT_PATH.search(path):
+        return "an event page"
+    if host_carries_name(name, url):
+        return None
+    if path.strip("/") == "":
+        return None if homepage_counts else f"{host} doesn't carry the name"
+    return f"a page on {host}, whose host doesn't carry the name — about it, not its own"
+
+
+def is_own(name: Optional[str], url: str, *, homepage_counts: bool,
+           exclude_hosts: set[str] = frozenset()) -> bool:
+    return not_own_reason(name, url, homepage_counts=homepage_counts,
+                          exclude_hosts=exclude_hosts) is None
