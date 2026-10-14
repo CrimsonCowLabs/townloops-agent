@@ -240,8 +240,9 @@ on the server shares:
    pages. It runs on your server; cloud Firecrawl is never used.
 2. **Squid egress proxy** — a firewall-like guard that only lets the
    agent connect to an allowlist of websites (TownLoops, ChatGPT,
-   Telegram, Firecrawl, and the sites each town lists in its
-   `town-profile.yaml` → `allowed_hosts`).
+   Telegram, Listmonk, and the sites each town lists in its
+   `town-profile.yaml` → `allowed_hosts`). Firecrawl is reached directly
+   on the shared Docker network, not through Squid.
 
 Start them once, and every town you add later reuses them.
 
@@ -351,8 +352,8 @@ You need to change these:
 - **`allowed_hosts`** — websites the agent may reach through the egress
   firewall. Start with your local chamber of commerce and any visitor
   bureau site; add each new event source's website as you go. Every entry
-  is a website the agent trusts. After changing it, regenerate the shared
-  firewall config (see
+  is a website the agent trusts. After changing it, run
+  `./bin/townloops-agent-add --egress` and reload Squid (see
   [Squid keeps blocking legitimate websites](#squid-keeps-blocking-legitimate-websites)).
 - **`discovery.business.category_query_terms`** — the kinds of businesses
   in your town (`"restaurants"`, `"coffee shops"`, `"boutiques"`, etc.).
@@ -623,18 +624,30 @@ resuming.
 
 ### Squid keeps blocking legitimate websites
 
-The allowlist comes from each town's `town-profile.yaml` →
-`allowed_hosts`. Add the website there (just the host, like
-`visitexample.com` — no `https://` and no path), regenerate the shared
-`squid.conf` from every town's profile with `bin/townloops-agent-add` (see
-its `--help`), then restart Squid:
+The allowlist is generated from every town's `town-profile.yaml` →
+`allowed_hosts` — don't hand-edit `squid.conf`, the next regeneration
+overwrites it. To allow a website:
 
-```
-docker compose -f ~/workspace/townloops-agent/templates/_shared/egress/docker-compose.yml restart squid
-```
+1. Add it to the town's `allowed_hosts` — just the host, like
+   `visitexample.com` (no `https://`, no path; those are rejected).
+2. Regenerate the shared `templates/_shared/egress/squid.conf` from all
+   towns' profiles:
 
-Squid restarts don't affect running agents; egress just becomes allowed
-on the next connection.
+   ```
+   cd ~/workspace/townloops-agent
+   ./bin/townloops-agent-add --egress
+   ```
+
+3. Tell Squid to reload it (this never happens automatically — it's shared
+   by every town on the server):
+
+   ```
+   docker exec squid-egress squid -k reconfigure
+   ```
+
+Reloading doesn't interrupt running agents; the website becomes reachable
+on the next connection. Running `--egress` again with no profile change
+leaves the file unchanged.
 
 ### The Telegram messages stopped
 
