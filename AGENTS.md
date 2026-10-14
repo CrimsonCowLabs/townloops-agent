@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 025).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 026).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -152,7 +152,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     communities whose `website` is a listing page per `listing_hosts.is_listing_url`, local ↔ live paired by
     listing slug → `live_id` → merge-following GET (no re-point); one row per entity, `side` local/live/both,
     `live_unread` when the GET failed, a shared live row counted once (`duplicate_of`) — the listing-website
-    cleanup works from `find_listing_websites`' rows + `unverified`; LIST/GET only).
+    cleanup works from `find_listing_websites`' rows + `unverified`; LIST/GET only),
+    `listing_website_cleanup.py` (the `listing-website-cleanup` skill: clear those websites live *and* local, ledger
+    `listing_website_clears`. Supervised: `clear_listing_websites` widget → `apply` (also the first pass of the daily
+    `entity-live-sync` run): `live_patch.clear_entity_fields` (`website: ""` + GET verify) first, then local.
+    Autonomous: a pending copy of the live row with `website: null` (`submissions.kind 'clear-website'`) for the
+    merge flow; `settle` (moderation poll + each run) clears local only once the target shows no listing website.
+    Local clear keeps the URL in `extra_json.listing_pages`, takes live's own site or blanks + `pending` → `reenrich`;
+    `live_unread` rows never cleared; each row says `changed` live/local/both/none).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -216,7 +223,8 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Enrichment is "fill blanks only"** (`engine/entity_enrich.fill_blanks` writes only NULL-locally fields, to
   protect operator edits) and refreshes `content_hash`. It reaches live via `engine/entity_sync.py`
   (event-ship + the daily `entity-live-sync` sweep): resync from the live row first (live values win), then
-  PATCH only live's blanks, GET-verify, and only then set `pushed_hash`. A 404 naming a curator's merge
+  PATCH only live's blanks, GET-verify, and only then set `pushed_hash`. A listing-page `website` is copied neither
+  way (nor into a live mirror) — clearing one is the operator-gated `listing-website-cleanup`, never a sync. A 404 naming a curator's merge
   survivor (`merged_into_slug`) re-points the row there (slug + `live_id` persisted) and syncs the survivor; any
   other 404 or a PATCH that doesn't land flags the entity (`extra_json.live_sync`) for the operator — never
   re-created, never retried until cleared.

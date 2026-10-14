@@ -73,5 +73,5 @@ python skills/business/operator-audit-listing-websites/audit.py --limit 50
   the operator needs to know what is actually on TownLoops.
 - A `local` row whose `live_website` is an own site: live is already right;
   only the local copy is wrong.
-- Clearing is a separate, operator-gated step; this audit never clears a
-  website. Don't PATCH a website from these rows by hand.
+- Clearing is a separate, operator-gated step (`listing-website-cleanup`);
+  this audit never clears a website. Don't PATCH a website from these rows by hand.

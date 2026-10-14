@@ -32,7 +32,8 @@ from dashboard import chat_db
 # doesn't need the intent_handlers import.
 _ALLOWED_PROPOSAL_KINDS = frozenset({"decline_events", "approve_events",
                                     "promote_businesses", "decline_businesses",
-                                    "confirm_cancellations", "dismiss_cancellations"})
+                                    "confirm_cancellations", "dismiss_cancellations",
+                                    "clear_listing_websites"})
 
 # `.*?` non-greedy so we can find the LAST fenced json block if Hermes emits
 # more than one (unlikely but not forbidden). re.DOTALL to span newlines.

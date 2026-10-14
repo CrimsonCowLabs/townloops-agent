@@ -42,6 +42,20 @@ flagged, `extra_json.sync_error_at` is stamped, and the next run retries it
 after the rows that haven't failed lately (so stubborn rows can't starve the
 rest). The sweep calls `verify_town()` first.
 
+A listing-page `website` (engine/listing_hosts) is copied neither way — not
+pulled into the local row, not sent to fill a live blank — so a website the
+listing-website cleanup cleared on one side never comes back.
+
+## Listing-website pass
+
+First in each `run` (engine/listing_website_cleanup.run, see the
+`listing-website-cleanup` skill): supervised, the listing-page websites the
+operator confirmed are cleared live (PATCH `website: ""` + GET verify), then
+locally; autonomous, submitted clears the moderator decided are settled and new
+ones submitted as pending changes. Then cleared entities are re-enriched, so an
+own site found is synced live by the sweep that follows. A failure here is
+logged and never stops the sync.
+
 ## Release pass
 
 After the entity sweep (`engine/entity_ship.ship_released`): performers and

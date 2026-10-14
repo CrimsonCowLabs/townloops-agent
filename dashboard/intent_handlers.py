@@ -20,6 +20,7 @@ from dashboard import db_v2
 from engine import business_promote
 from engine import event_cancel
 from engine import event_state as _event_state
+from engine import listing_website_cleanup
 from engine import workqueue as _wq
 
 
@@ -27,7 +28,8 @@ from engine import workqueue as _wq
 # set is refused by /v2/chat/confirm.
 ALLOWED_KINDS = frozenset({"decline_events", "approve_events",
                            "promote_businesses", "decline_businesses",
-                           "confirm_cancellations", "dismiss_cancellations"})
+                           "confirm_cancellations", "dismiss_cancellations",
+                           "clear_listing_websites"})
 
 
 def _iso_utc_now() -> str:
@@ -71,6 +73,8 @@ def execute(proposal: dict, *, note: Optional[str] = None) -> dict:
         return _confirm_cancellations(uids)
     if kind == "dismiss_cancellations":
         return _dismiss_cancellations(uids)
+    if kind == "clear_listing_websites":
+        return _clear_listing_websites(uids)
     # Unreachable if validate_proposal was called first.
     return {"error": f"no handler for kind: {kind}"}
 
@@ -172,3 +176,11 @@ def _dismiss_cancellations(uids: list[str]) -> dict:
     """The events are still on: clear the flags for good."""
     with db_v2.connect() as c:
         return {"kind": "dismiss_cancellations", **event_cancel.dismiss(c, uids)}
+
+
+def _clear_listing_websites(uids: list[str]) -> dict:
+    """Confirm listing-page website clears — the next listing-website-cleanup
+    apply (or the daily entity-live-sync run) clears them live, then
+    locally, and re-enriches."""
+    with db_v2.connect() as c:
+        return {"kind": "clear_listing_websites", **listing_website_cleanup.confirm(c, uids)}

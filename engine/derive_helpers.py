@@ -393,14 +393,20 @@ def insert_entity(conn: sqlite3.Connection, table: str, entity_uid: str,
 def mirror_live_entity(conn: sqlite3.Connection, kind: str, live_row: dict) -> str:
     """Local stand-in for a row already live on TownLoops. event-ship sees
     source_kind='live' + townloops_slug and never POSTs it; the live id in
-    extra_json lets a PATCH bind events to it by venue_id. Idempotent: the
-    uid is keyed by the live slug."""
+    extra_json lets a PATCH bind events to it by venue_id. A listing-page
+    website isn't copied (extra_json.listing_pages keeps it). Idempotent:
+    the uid is keyed by the live slug."""
+    from engine.listing_hosts import is_listing_url
     entity_uid = mint_entity_uid(kind, live_row["name"], f"live:{live_row['slug']}")
     fields = {k: live_row.get(k) for k in _MIRROR_FIELDS}
+    extra = {"live_id": live_row.get("id")}
+    if is_listing_url(fields.get("website")):
+        # A listing page is not the entity's website — kept as evidence only.
+        extra["listing_pages"] = [fields.pop("website")]
     fields.update({
         "source": "live:townloops", "source_kind": "live",
         "townloops_slug": live_row["slug"], "pushed_at": iso_utc_now(),
-        "extra_json": json.dumps({"live_id": live_row.get("id")}),
+        "extra_json": json.dumps(extra),
         "enrichment_status": "live",
     })
     insert_entity(conn, _entity_table(kind), entity_uid, fields)

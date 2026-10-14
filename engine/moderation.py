@@ -11,7 +11,10 @@ in `submissions`).
 A merge and a delete both 404. A change submission counts as merged when
 its target now shows any value it carried that the target didn't (recorded
 by event-ship on the event as `change_submission`); a cancellation, when the
-target shows the cancelled marking.
+target shows the cancelled marking; an entity's listing-website clear, when
+the target shows no listing website — and only then is the local website
+cleared (engine/listing_website_cleanup.settle, after each poll that
+decided something).
 
 An entity GET with no `status` field (TownLoops before the entity gate) is
 published; a merged entity's 404 names its survivor (`merged_into_slug`). Outcomes are attributed to the event's seed and Series (and an
@@ -70,6 +73,12 @@ def poll(client, conn: sqlite3.Connection, s: autonomy.Settings, *, limit: int =
         if sub.get("seed"):
             seeds.add(sub["seed"])
     conn.commit()
+    if out["checked"] - out["pending"] - len(out["errors"]):
+        # A decided listing-website clear: its local clear follows acceptance.
+        from engine import listing_website_cleanup
+        settled = listing_website_cleanup.settle(conn, client)
+        if settled:
+            out["listing_websites"] = settled
     if seeds:
         autonomy.refresh_trust(conn, seeds)
     breaker = autonomy.check_rejection_rate(conn, s)
@@ -127,8 +136,15 @@ def _after_404(client, conn: sqlite3.Connection, sub: dict,
                 else ("gone", None)
         survivor = _event_survivor(client, conn, sub)
     else:
+        from engine import listing_website_cleanup as lwc
         from engine.live_lookup import merged_into_slug
-        survivor = merged_into_slug(err) or _entity_survivor(client, conn, sub)
+        survivor = merged_into_slug(err)
+        if not survivor and sub.get("kind") == lwc.CLEAR_KIND and sub.get("target_slug"):
+            # A listing-website clear merged into its target shows there.
+            if lwc.shows_clear(lwc.read_target(client, sub["resource"], sub["target_slug"])):
+                survivor = sub["target_slug"]
+        elif not survivor:
+            survivor = _entity_survivor(client, conn, sub)
     return ("merged", survivor) if survivor else ("gone", None)
 
 

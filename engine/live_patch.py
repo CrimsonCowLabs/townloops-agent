@@ -194,6 +194,26 @@ def apply_entity_patch(client, resource: str, slug: str, overrides: dict,
     return PatchResult(body=body, mismatches=verify_entity(after, body))
 
 
+def clear_entity_fields(client, resource: str, slug: str, fields: tuple[str, ...],
+                        current: Optional[dict] = None) -> PatchResult:
+    """Blank `fields` on a live entity: GET (unless `current` is given) →
+    full-body PATCH with `""` for each (the only value that clears) → GET
+    verify that they are blank and the rest unchanged. Only for a clear the
+    operator confirmed (engine/listing_website_cleanup) — every other entity
+    PATCH fills blanks. API errors raise."""
+    if current is None:
+        current = client.get(resource, slug) or {}
+    body = build_entity_patch(resource, current, {})
+    body.update({f: "" for f in fields if f in ENTITY_FIELDS[resource]})
+    client.update(resource, slug, body)
+    after = client.get(resource, slug) or {}
+    kept = {k: v for k, v in body.items() if k not in fields}
+    mismatches = verify_entity(after, kept) + [
+        f"{f}: sent '', live has {after.get(f)!r}" for f in fields
+        if isinstance(after.get(f), str) and after[f].strip()]
+    return PatchResult(body=body, mismatches=mismatches)
+
+
 def shows(row: dict, field: str, value: Any) -> bool:
     """Whether the live `row` already carries `value` for `field`. Sets
     compare unordered, times as instants; `venue_name` is write-only on

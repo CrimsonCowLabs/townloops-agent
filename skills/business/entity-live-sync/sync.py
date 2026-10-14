@@ -2,6 +2,11 @@
 """entity-live-sync — bring local entity changes (enrichment) to the live
 TownLoops rows they belong to. Logic: engine/entity_sync.py.
 
+First the listing-website cleanup's pass (engine/listing_website_cleanup):
+operator-confirmed clears (supervised) or moderation-settled and new
+submissions (autonomous), then re-enrichment of cleared entities — before the
+sweep, so an own site found reaches live in this run.
+
 Then the release pass (engine/entity_ship.ship_released): performers/creators
 event-ship held back for research that research or the operator has since
 released are created live when one of their events is already live.
@@ -25,9 +30,9 @@ import json
 import os
 import sys
 
-from engine import autonomy, entity_ship, entity_sync, series_sync
+from engine import autonomy, entity_ship, entity_sync, listing_website_cleanup, series_sync
 from engine import lock as _lock
-from engine.derive_helpers import open_db
+from engine.derive_helpers import open_db, record_activity
 
 
 def _run(args) -> int:
@@ -42,6 +47,8 @@ def _run(args) -> int:
         # same entity at the same time.
         with _lock.acquire("workqueue-drain"):
             client = Client()
+            # First, so an own site re-enrichment finds is synced live below.
+            listing = _listing_websites(conn, client)
             counts = entity_sync.sweep(client, conn, limit=args.limit,
                                        kinds=tuple(args.kind or entity_sync.RESOURCES))
             conn.commit()
@@ -57,8 +64,24 @@ def _run(args) -> int:
         return 0
     conn.commit()
     print(json.dumps({**(counts or {"synced": 0}), "released": released,
-                      "series": series_counts}))
+                      "series": series_counts, "listing_websites": listing}, default=str))
     return 0
+
+
+def _listing_websites(conn, client) -> dict:
+    """The listing-website cleanup's pass (engine/listing_website_cleanup):
+    supervised, what the operator confirmed; autonomous, settle + submit.
+    Then re-enrich what was cleared. A failure here never stops the sync."""
+    try:
+        out = listing_website_cleanup.run(conn, client, enrich=listing_website_cleanup.enricher())
+    except Exception as e:  # noqa: BLE001
+        conn.rollback()
+        record_activity(conn, "listing-website-cleanup", "apply", "listing-websites",
+                        ok=False, error=str(e)[:1000])
+        conn.commit()
+        return {"error": str(e)[:200]}
+    conn.commit()
+    return {k: len(v) if isinstance(v, list) else v for k, v in out.items()}
 
 
 def _list(args) -> int:

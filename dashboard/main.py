@@ -1455,6 +1455,12 @@ def v2_chat_confirm(request: Request,
         body = f"Dismissed {result['dismissed']} cancellation flags; they won't be flagged again."
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (no longer flagged)."
+    elif kind == "clear_listing_websites":
+        body = (f"Confirmed {result['confirmed']} listing-website clears — the next "
+                "listing-website-cleanup apply (or the daily entity-live-sync run) clears "
+                "them on TownLoops, then locally, and re-enriches them.")
+        if result.get("skipped"):
+            body += f" Skipped {result['skipped']} (already confirmed or unknown)."
     else:
         body = f"Executed intent {kind}: {result}"
     chat_db.insert_message("agent", body, thread_id=thread_id)
@@ -1481,7 +1487,9 @@ def v2_chat_cancel(request: Request,
         raise HTTPException(status_code=409, detail="cancel race")
 
     proposal = payload.get("proposal") or {}
-    noun = "business candidates" if str(proposal.get("kind", "")).endswith("_businesses") else "events"
+    kind = str(proposal.get("kind", ""))
+    noun = ("business candidates" if kind.endswith("_businesses")
+            else "entities" if kind == "clear_listing_websites" else "events")
     chat_db.insert_message(
         "system",
         f"Cancelled — nothing changed. ({proposal.get('count', 0)} {noun} would have been affected.)",

@@ -94,7 +94,7 @@ There is no phase machine. Progress lives in the `events` table (each row's `sta
 - Performers/creators: `performer-research`
 - Business candidates (operator-gated promote): `business-discovery`
 - Cancellations (operator-gated): `event-cancellations`
-- Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-audit-listing-websites`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
+- Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-audit-listing-websites`, `listing-website-cleanup`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
 - Bootstrap / health: `town-init`
 - Legacy structured-source ingest (unscheduled): `event-ingest`
 - Newsletter: `newsletter-weekly`
@@ -137,7 +137,7 @@ There is no dashboard and no Confirm widget. The operator reviews my output in t
 - "What's the state?" → `autonomy status` (mode, gate, circuit, pending count, last 24h) and `operator-status`.
 - "Stop" → tell them to set `autonomy.paused: true` in town-profile.yaml (I can't edit it); "resume" after a stop → `autonomy resume`, only when they ask and only after they've said the cause is fixed.
 - A retired seed comes back with `event-seed-discovery restore --seed-id N` (add `--previous-url` to undo a calendar move) — on the operator's say-so.
-- The supervised-mode proposers (`operator-bulk-*`, `business-discovery propose-*`, `event-cancellations propose-*`) answer `inactive` here; don't emit proposal blocks.
+- The supervised-mode proposers (`operator-bulk-*`, `business-discovery propose-*`, `event-cancellations propose-*`, `listing-website-cleanup propose-clear`) answer `inactive` here — listing-page websites go to the moderator as pending changes by themselves; don't emit proposal blocks.
 
 ## Operator chat (dashboard `/v2` chat panel)
 
@@ -149,6 +149,7 @@ The town operator talks to me through a chat panel in the dashboard. Messages ar
 - `operator-review-event` — fuzzy single-event lookup by title / venue / uid prefix. Use when the operator names one specific event.
 - `operator-audit-upcoming` — read-only audit of the next N town-local days (default 30): days with no live events, local events not live yet, live events missing description / venue / source_url / categories, and venues of upcoming events with no image. Use for "what's missing this week?" or "audit the next 30 days". Report counts first, say which are live and which local, and follow the reading rules in its SKILL.md.
 - `operator-audit-listing-websites` — read-only audit of venues, businesses and communities whose `website` is a directory/listing page (restaurantji, Yelp, maps, ticketing), each row saying local, live or both. Use for "which businesses link to restaurantji?" or before any listing-website cleanup. Report counts first, say which are live and which local; it changes nothing.
+- `listing-website-cleanup` `list` / `propose-clear` / `apply` — clears those listing-page websites live and local, then re-enriches so the entity's own site can fill the blank. `propose-clear` is read-only and returns a `clear_listing_websites` proposal for the Confirm widget; `apply` clears only what the operator confirmed (live first, then local; the daily entity-live-sync run does the same). The listing URL stays on the entity as evidence. Report each row's `changed` (live, local, both or none). See that skill's SKILL.md.
 - `operator-bulk-decline` — **PROPOSES** a mass decline. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-bulk-approve` — **PROPOSES** a mass approve. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-requeue` — reset one stuck workqueue row so heartbeat retries it. Idempotent, safe to call directly.
@@ -157,10 +158,10 @@ The town operator talks to me through a chat panel in the dashboard. Messages ar
 
 **Widget-based confirmation contract (destructive actions):**
 
-I *cannot* decline or approve events — or approve / decline business candidates, or confirm / dismiss cancellations — myself. The `operator-bulk-decline`, `operator-bulk-approve`, `business-discovery propose-*` and `event-cancellations propose-*` commands are read-only — they select the matching events or candidates and return a proposal. Execution happens ONLY when the operator clicks a Confirm button that the dashboard renders. There is no `--confirmed` / `--execute` flag. Do not look for one, do not try to "just do it," do not claim you have done it — you have not.
+I *cannot* decline or approve events — or approve / decline business candidates, confirm / dismiss cancellations, or clear listing-page websites — myself. The `operator-bulk-decline`, `operator-bulk-approve`, `business-discovery propose-*`, `event-cancellations propose-*` and `listing-website-cleanup propose-clear` commands are read-only — they select the matching events or candidates and return a proposal. Execution happens ONLY when the operator clicks a Confirm button that the dashboard renders. There is no `--confirmed` / `--execute` flag. Do not look for one, do not try to "just do it," do not claim you have done it — you have not.
 
 When the operator asks for a destructive action, I MUST:
-1. Invoke the matching read-only proposer — `operator-bulk-*` for events (with the operator's filters: `--before`, `--source`, etc.), `business-discovery propose-promote` / `propose-decline` for business candidates (with `--uid` for the ones they named), `event-cancellations propose-confirm` / `propose-dismiss` for flagged cancellations. Read the returned `proposal` object + `preview` array.
+1. Invoke the matching read-only proposer — `operator-bulk-*` for events (with the operator's filters: `--before`, `--source`, etc.), `business-discovery propose-promote` / `propose-decline` for business candidates (with `--uid` for the ones they named), `event-cancellations propose-confirm` / `propose-dismiss` for flagged cancellations, `listing-website-cleanup propose-clear` for listing-page websites. Read the returned `proposal` object + `preview` array.
 2. Write a short human-readable summary of the proposal ("I found N events matching X. Sample: '…'. Click Confirm below to decline.").
 3. **End my reply with a fenced JSON block** containing the skill's `proposal` (and optionally `preview`), verbatim:
     ```json
@@ -171,7 +172,7 @@ When the operator asks for a destructive action, I MUST:
    The chat panel extracts this block into a Confirm/Cancel widget on my message. Without this block the operator has no way to trigger execution.
 
 Rules for the fenced block:
-- Use `kind` from the whitelist: `decline_events`, `approve_events`, `promote_businesses`, `decline_businesses`, `confirm_cancellations`, `dismiss_cancellations`. Anything else is dropped silently.
+- Use `kind` from the whitelist: `decline_events`, `approve_events`, `promote_businesses`, `decline_businesses`, `confirm_cancellations`, `dismiss_cancellations`, `clear_listing_websites`. Anything else is dropped silently.
 - Include the full `uids` list from the skill output — don't truncate it, the confirm route mutates only those uids.
 - Put the fenced block LAST in the reply. If multiple fences appear, only the last is parsed.
 - Never emit this block for a NON-destructive skill (status, list, review, audit, requeue). Widgets appear only on destructive proposals.

@@ -11,6 +11,8 @@ entity is synced:
 2. fill live's blanks — local values for fields live has empty go out as a
    full-body PATCH (`engine/live_patch.apply_entity_patch`), never over a
    live value;
+   a listing-page `website` (engine/listing_hosts) is copied neither way, so
+   one the listing-website cleanup cleared on one side never comes back;
 3. GET verify — only then does `pushed_hash` move.
 
 A live row a curator merged into another (its 404 names the survivor,
@@ -90,6 +92,13 @@ def _blank(value) -> bool:
     return not (isinstance(value, str) and value.strip())
 
 
+def _listing_website(key: str, value) -> bool:
+    """A directory/listing page as `website` (engine/listing_hosts): never
+    copied either way — a cleared one would otherwise come back."""
+    from engine.listing_hosts import is_listing_url
+    return key == "website" and is_listing_url(value)
+
+
 def sync_entity(client, conn: sqlite3.Connection, kind: str, entity_uid: str) -> SyncResult:
     """Sync one entity to its live row (see module doc). `skipped` when it
     doesn't need it; `error` (transient — retried next time) on API errors
@@ -120,12 +129,14 @@ def _sync(client, conn: sqlite3.Connection, kind: str, entity_uid: str,
         repoint(conn, kind, row, live)
         slug = row["townloops_slug"]
 
-    pulled = [k for k in fields if not _blank(live.get(k)) and row.get(k) != live[k]]
+    pulled = [k for k in fields if not _blank(live.get(k)) and row.get(k) != live[k]
+              and not _listing_website(k, live[k])]
     for k in pulled:
         row[k] = live[k]
     town_categories = cats.town_category_slugs()
     fill = {k: row[k] for k in fields
             if k != "name" and _blank(live.get(k)) and sendable(resource, k, row.get(k))
+            and not _listing_website(k, row[k])
             and (k != "category_slug" or row[k] in town_categories)}
 
     if fill:
