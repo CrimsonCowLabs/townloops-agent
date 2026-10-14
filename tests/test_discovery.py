@@ -190,8 +190,8 @@ class TestVerifyOwnSite:
          "Member Application | Lake Tahoe South Shore Chamber of Commerce"),
         ("https://business.tahoechamber.org/jobs", "Job Board - Lake Tahoe South Shore Chamber"),
         ("https://business.tahoechamber.org/hotdeals", "Hot Deals | Tahoe Chamber"),
-        ("https://insidetheupgrade.com/post/south-lake-tahoe-restaurants",
-         "The 24 BEST South Lake Tahoe Restaurants | Inside the Upgrade"),
+        ("https://foxintheforest.net/best-south-lake-tahoe-hikes",
+         "15 Best South Lake Tahoe Hikes | Fox in the Forest"),
     ])
     def test_a_nameless_candidate_is_judged_by_its_page_title_name(self, monkeypatch, url, title, kind):
         from engine import discovery
@@ -251,6 +251,133 @@ class TestVerifyOwnSite:
                                        town_name="South Lake Tahoe", name="Best Restaurants")
         assert not v["verified"]
         assert any("not its own site" in r for r in v["reasons"]), v["reasons"]
+
+
+class TestRoundupReason:
+    """An article or roundup *about* organisations — on any host (#17)."""
+
+    @pytest.mark.parametrize("url, title, signal", [
+        ("https://laketahoethisweek.com/blog/tahoes-art-scene", None, "/blog/"),
+        ("https://insidetheupgrade.com/post/south-lake-tahoe-restaurants", None, "/post/"),
+        ("https://townandtourist.com/articles/things-to-do", None, "/articles/"),
+        ("https://example.com/article-12345", None, "/article"),
+        ("https://tahoe.com/south-lake-tahoe/restaurants",
+         "All 196+ South Lake Tahoe Restaurants", "opens with a count"),
+        ("https://example.com/x", "The 25 Best Hikes", "opens with a count"),
+        ("https://example.com/x", "12 Galleries Worth a Visit", "opens with a count"),
+        ("https://example.com/x", "Best Restaurants and Bars in South Lake Tahoe", "'best'"),
+        ("https://example.com/x", "Top Restaurants in Tahoe", "'top'"),
+        ("https://example.com/x", "Things To Do in South Lake Tahoe", "'things to do'"),
+        ("https://example.com/x", "South Lake Tahoe Bucket List", "'bucket list'"),
+        ("https://example.com/x", "Places to Visit Near Tahoe", "'places to visit'"),
+        ("https://example.com/x", "A Local’s Guide to South Lake Tahoe", "guide"),
+        ("https://example.com/x", "Your Guide to Tahoe Galleries", "guide"),
+        ("https://example.com/x", "Can't-Miss Spots in Tahoe", "can't-miss"),
+        ("https://example.com/x", "Tahoe's Art Scene: Tour Local Galleries and…", "truncated"),
+        ("https://example.com/x", "Tahoe's Art Scene: Tour Local Galleries and ...", "truncated"),
+    ])
+    def test_a_signal_fires_and_is_named(self, url, title, signal):
+        from engine import discovery
+        why = discovery.roundup_reason(url, title)
+        assert why and signal.lower() in why.lower(), why
+
+    @pytest.mark.parametrize("url, title", [
+        # A homepage: the name is the organisation's, whatever words it carries.
+        ("https://thebestoftahoe.com/", "The Best of Tahoe"),
+        ("https://topofthetram.com/", "Top of the Tram"),
+        ("https://tahoeflyfishing.com/", "Tahoe Fly Fishing Guide Service"),
+        ("https://insidetheupgrade.com/", "Inside the Upgrade | 24 BEST South Lake Tahoe…"),
+        # A deep page whose title is the name its own host carries.
+        ("https://thebestoftahoe.com/about", "About Us | The Best of Tahoe"),
+        ("https://tahoeflyfishingguideservice.com/trips", "Tahoe Fly Fishing Guide Service"),
+        ("https://tahoeoutdooradventures.com/kayak-tours", "Tahoe Outdoor Adventures | Kayak Tours"),
+        ("https://oncoursetahoe.com/", None),
+        ("https://example.com/menu", "Menu | Blue Angel Cafe"),
+    ])
+    def test_an_organisations_own_page_carries_no_signal(self, url, title):
+        from engine import discovery
+        assert discovery.roundup_reason(url, title) is None
+
+
+class TestVerifyRoundup:
+    """An editorial page about organisations is rejected even where its host
+    passes the own-site check (#17) — SLT's queue held visitlaketahoe.com and
+    tahoe.com roundups that sit on the town's own allowed hosts."""
+
+    PAGE = TestVerifyOwnSite.PAGE
+    KINDS = TestVerifyOwnSite.KINDS
+
+    def _scrape(self, monkeypatch, title=""):
+        return TestVerifyOwnSite._scrape(self, monkeypatch, title=title)
+
+    # (url, a name its host carries, the page's own title)
+    ROUNDUPS = [
+        ("https://visitlaketahoe.com/food-and-wine/best-restaurants-and-bars-in-south-lake-tahoe",
+         "Visit Lake Tahoe", "Best Restaurants and Bars in South Lake Tahoe | Visit Lake Tahoe"),
+        ("https://tahoe.com/south-lake-tahoe/restaurants",
+         "Tahoe.com", "All 196+ South Lake Tahoe Restaurants | Tahoe.com"),
+        ("https://thebestoftahoe.com/blog/post/the-5-best-art-galleries-around-lake-tahoe-region",
+         "The Best of Tahoe", "The 5 Best Art Galleries Around Lake Tahoe Region - The Best of Tahoe"),
+        ("https://laketahoethisweek.com/blog/tahoes-art-scene-tour-local-galleries-and-studios",
+         "Lake Tahoe This Week", "Tahoe's Art Scene: Tour Local Galleries and Studios"),
+        ("https://townandtourist.com/articles/things-to-do-in-south-lake-tahoe",
+         "Town and Tourist", "25 Fun Things To Do in South Lake Tahoe - Town and Tourist"),
+        ("https://insidetheupgrade.com/post/south-lake-tahoe-restaurants",
+         "Inside the Upgrade", "Inside the Upgrade | 24 BEST South Lake Tahoe Restaurants…"),
+    ]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, host_name, title", ROUNDUPS)
+    def test_a_roundup_rejects_by_its_page_title(self, monkeypatch, url, host_name, title, kind):
+        """Named after its host — the own-site check passes — the page's own
+        title (or its path) still gives it away."""
+        from engine import discovery
+        self._scrape(monkeypatch, title=title)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind, name=host_name)
+        assert not v["verified"]
+        assert any("article or roundup" in r for r in v["reasons"]), v["reasons"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, host_name, title", ROUNDUPS)
+    def test_a_nameless_roundup_rejects(self, monkeypatch, url, host_name, title, kind):
+        from engine import discovery
+        self._scrape(monkeypatch, title=title)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind)
+        assert not v["verified"]
+        assert any("article or roundup" in r for r in v["reasons"]), v["reasons"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, serp_name", [
+        ("https://tahoe.com/south-lake-tahoe/restaurants", "All 196+ South Lake Tahoe Restaurants"),
+        ("https://visitlaketahoe.com/food-and-wine/best-restaurants-and-bars-in-south-lake-tahoe",
+         "Best Restaurants and Bars in South Lake Tahoe"),
+        ("https://laketahoethisweek.com/blog/tahoes-art-scene-tour-local-galleries-and-studios",
+         "Tahoe's Art Scene: Tour Local Galleries and…"),
+    ])
+    def test_a_roundup_search_title_rejects_unscraped(self, monkeypatch, url, serp_name, kind):
+        from engine import discovery
+        scraped = self._scrape(monkeypatch)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind, name=serp_name)
+        assert not v["verified"]
+        assert any("article or roundup" in r for r in v["reasons"]), v["reasons"]
+        assert scraped == []
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url, name, title", [
+        ("https://thebestoftahoe.com/", "The Best of Tahoe", "The Best of Tahoe | Home"),
+        ("https://thebestoftahoe.com/", None, "The Best of Tahoe | Home"),
+        ("https://tahoeflyfishing.com/", "Tahoe Fly Fishing Guide Service",
+         "Tahoe Fly Fishing Guide Service"),
+        ("https://topofthetram.com/", "Top of the Tram", "Top of the Tram - Heavenly"),
+        ("https://tahoeoutdooradventures.com/", "Tahoe Outdoor Adventures", "Home | Somewhere"),
+        ("https://oncoursetahoe.com/", "OnCourse Tahoe", "OnCourse Tahoe"),
+        ("https://pacificcrestgallerytahoe.com/", "Pacific Crest Gallery", "Pacific Crest Gallery"),
+    ])
+    def test_a_homepage_named_with_best_or_top_still_verifies(self, monkeypatch, url, name, title, kind):
+        from engine import discovery
+        self._scrape(monkeypatch, title=title)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind, name=name)
+        assert v["verified"], v["reasons"]
 
 
 class TestSweepFunctions:

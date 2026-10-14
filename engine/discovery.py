@@ -191,6 +191,52 @@ def not_own_site_reason(url: str, name: Optional[str], *, allow_gov: bool = Fals
     return f"not its own site: {why}" if why else None
 
 
+_ARTICLE_PATH = re.compile(r"/(blogs?|posts?|articles?)(?=/|$|[-_.\d])", re.IGNORECASE)
+# "12 Best …", "The 25 Best …", "All 196+ …"
+_COUNT_OPENING = re.compile(r"^(?:the\s+|all\s+|our\s+)?\d+\+?\s+\w", re.IGNORECASE)
+_ROUNDUP_PHRASES = [
+    (re.compile(r"\bbest\b", re.IGNORECASE), "'best'"),
+    # "Top of the Tram" is a name; "Top Restaurants", "Top 10" are a roundup.
+    (re.compile(r"\btop\b(?!\s+of\b)", re.IGNORECASE), "'top'"),
+    (re.compile(r"\bthings\s+to\s+do\b", re.IGNORECASE), "'things to do'"),
+    (re.compile(r"\bbucket\s+list\b", re.IGNORECASE), "'bucket list'"),
+    (re.compile(r"\bplaces\s+to\s+visit\b", re.IGNORECASE), "'places to visit'"),
+    (re.compile(r"\bcan[’']?t[\s-]+miss\b", re.IGNORECASE), "'can't-miss'"),
+    # "A Local's Guide to …", "Your Guide to …" — not a fishing guide service.
+    (re.compile(r"[’']s\s+guide\b|\bguide\s+to\b|\b(?:ultimate|complete|travel|insider)\s+guide\b",
+                re.IGNORECASE), "a 'guide' to somewhere"),
+]
+
+
+def roundup_reason(url: str, title: Optional[str]) -> Optional[str]:
+    """Why `url` is an article or roundup *about* organisations rather than
+    one organisation's page, or None. `title` is the search-result name or
+    the page's own title. On a homepage the title is the organisation's own
+    name, whatever words it carries ("The Best of Tahoe"); elsewhere a title
+    segment its host carries (thebestoftahoe.com/about, "About Us | The Best
+    of Tahoe") is that name too, so only the other segments are read."""
+    path = urlparse(url).path or "/"
+    if m := _ARTICLE_PATH.search(path):
+        seg = m.group(0).lower() + ("/" if path[m.end():].startswith("/") else "")
+        return f"an article or roundup: path {seg}"
+    if not title or path.strip("/") == "":
+        return None
+    for part in _TITLE_SPLIT.split(title.strip()):
+        part = part.strip()
+        if not part or own_site.host_carries_name(part, url):
+            continue
+        if _COUNT_OPENING.match(part):
+            return f"an article or roundup: title opens with a count ({part[:60]!r})"
+        for rx, label in _ROUNDUP_PHRASES:
+            if rx.search(part):
+                return f"an article or roundup: title carries {label} ({part[:60]!r})"
+    # A search engine cut the title short: the name came from a results
+    # page, not from the organisation.
+    if title.rstrip().endswith(("…", "...")):
+        return "an article or roundup: truncated search-result title"
+    return None
+
+
 # --------------------------------------------------------------------------
 # Firecrawl client
 # --------------------------------------------------------------------------
@@ -492,8 +538,12 @@ def verify_candidate(
     """
     # Government departments are community discovery's, never a business.
     allow_gov = kind != "business"
-    if name and (why := not_own_site_reason(canonical_url, name, allow_gov=allow_gov)):
-        return {"verified": False, "reasons": [why], "fetched_at": _iso_now()}
+    # Decided from the URL and the search-result name: no Firecrawl spent.
+    unscraped = [why for why in (
+        roundup_reason(canonical_url, name),
+        name and not_own_site_reason(canonical_url, name, allow_gov=allow_gov)) if why]
+    if unscraped:
+        return {"verified": False, "reasons": unscraped, "fetched_at": _iso_now()}
     scraped = firecrawl_scrape(canonical_url)
     if not scraped:
         return {
@@ -514,6 +564,10 @@ def verify_candidate(
 
     if not name and (why := not_own_site_reason(
             canonical_url, name_from_title(scraped.get("title")), allow_gov=allow_gov)):
+        reasons_reject.append(why)
+    # The page's own title, whole: a name shortened from it ("Inside the
+    # Upgrade | 24 BEST …" → "Inside the Upgrade") can hide the roundup.
+    if why := roundup_reason(canonical_url, scraped.get("title")):
         reasons_reject.append(why)
 
     tn = (town_name or "").lower()

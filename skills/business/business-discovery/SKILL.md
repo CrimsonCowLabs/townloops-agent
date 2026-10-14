@@ -35,7 +35,16 @@ is for the ones that never host a listed event.
    `/jobs`, `/member-application`, `/hotdeals` — `own_site.UTILITY_PATH`) is
    rejected with the reason, before any scrape when the candidate already has
    a name. For a community or non-profit, a `.gov` page is the government's
-   own site. Don't add blogs to the listing-host list.
+   own site. Don't add blogs to the listing-host list. An article or roundup
+   *about* organisations is rejected even on a host that passes — a
+   tourism board's "Best Restaurants and Bars in …" (`discovery.roundup_reason`):
+   a `/blog/`, `/post/`, `/article(s)` path; a title opening with a count
+   ("12 Best …", "All 196+ …"); a roundup phrase ("best", "top", "things to
+   do", "bucket list", "places to visit", "can't-miss", "a local's guide",
+   "guide to"); a search-result name cut short with "…". Read on the
+   search-result name and on the page's own title, whole. Never on a homepage
+   (its title is the organisation's name — "The Best of Tahoe"), nor on a
+   title segment the host carries.
 3. **dedup against live** — at sweep *and* verify, every candidate is
    checked against the town's live businesses (fetched fresh each run):
    - its URL is a live business's `website`, or on the same host (social and
