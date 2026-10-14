@@ -2,7 +2,8 @@
 """town-init — bootstrap the town on first boot / a fresh clone.
 
 Subcommands:
-  setup   verify credentials, snapshot categories, migrate the state DB.
+  setup      snapshot categories, migrate the state DB, then run preflight.
+  preflight  read-only verdict on whether this town will work (exit 1 on any error).
   status  dashboard of counts + enrichment queue depth + last newsletter.
 """
 
@@ -16,7 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, "/app")  # docker mount
-from engine import townloops_api, listmonk_api, db  # noqa: E402
+from engine import townloops_api, db, preflight  # noqa: E402
 
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", str(Path.home() / ".hermes")))
@@ -31,42 +32,19 @@ def _log(msg: str) -> None:
 def cmd_setup(args) -> int:
     STATE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. TownLoops auth.
-    tl = townloops_api.Client()
-    _log(f"town={tl.town_slug}  api={tl.base_url}")
+    # 1. Category snapshot (best-effort — preflight below reports a bad
+    #    URL/key/scope as an error, with the file and key to fix).
     try:
-        tl.healthz()
-    except Exception as e:
-        _log(f"FATAL: /healthz failed: {e}")
-        return 2
-    try:
-        # Cheap read to confirm the key works for this town.
-        tl.list("venues", limit=1)
-    except townloops_api.TownloopsError as e:
-        _log(f"FATAL: bearer token rejected for town {tl.town_slug}: {e}")
-        return 2
-    _log("townloops auth ok")
-
-    # 2. Listmonk auth (best-effort — non-fatal if the newsletter isn't set up yet).
-    if os.environ.get("LISTMONK_URL"):
-        try:
-            lm = listmonk_api.Client()
-            lists = lm.lists()
-            _log(f"listmonk auth ok ({len(lists)} lists visible)")
-        except Exception as e:
-            _log(f"WARN: listmonk unreachable: {e}")
-    else:
-        _log("skip listmonk (LISTMONK_URL unset)")
-
-    # 3. Category snapshot.
-    try:
+        tl = townloops_api.Client()
+        _log(f"town={tl.town_slug}  api={tl.base_url}")
         categories = tl.list("categories", limit=200)
         CATEGORIES_PATH.write_text(json.dumps(categories, indent=2))
         _log(f"snapshot {len(categories)} categories → {CATEGORIES_PATH}")
     except Exception as e:
+        tl = None
         _log(f"WARN: categories snapshot failed: {e}")
 
-    # 4. State DB migrations.
+    # 2. State DB migrations.
     conn = db.connect()
     applied = db.run_migrations(conn)
     if applied:
@@ -75,19 +53,35 @@ def cmd_setup(args) -> int:
         _log("state DB already up to date")
     conn.close()
 
+    # 3. Preflight — the verdict. A first boot that would do nothing says so.
+    findings = preflight.run(tl)
+    sys.stderr.write(preflight.format_human(findings) + "\n")
+    ok = not preflight.has_errors(findings)
     print(
         json.dumps(
             {
-                "town_slug": tl.town_slug,
+                "town_slug": os.environ.get("TOWNLOOPS_TOWN_SLUG"),
                 "state_dir": str(STATE_DIR),
                 "categories": str(CATEGORIES_PATH),
                 "applied_migrations": applied,
-                "ok": True,
+                "findings": [f.to_dict() for f in findings],
+                "ok": ok,
             },
             indent=2,
+            default=str,
         )
     )
-    return 0
+    return 0 if ok else 1
+
+
+def cmd_preflight(args) -> int:
+    findings = preflight.run()
+    if args.json:
+        print(json.dumps({"ok": not preflight.has_errors(findings),
+                          "findings": [f.to_dict() for f in findings]}, indent=2, default=str))
+    else:
+        print(preflight.format_human(findings))
+    return 1 if preflight.has_errors(findings) else 0
 
 
 def cmd_status(args) -> int:
@@ -147,6 +141,9 @@ def main() -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
     sub.add_parser("setup").set_defaults(func=cmd_setup)
     sub.add_parser("status").set_defaults(func=cmd_status)
+    pf = sub.add_parser("preflight", help="read-only check: will this town work?")
+    pf.add_argument("--json", action="store_true", help="machine-readable findings")
+    pf.set_defaults(func=cmd_preflight)
     args = p.parse_args()
     return args.func(args)
 

@@ -163,7 +163,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     then local. Autonomous: local cleared, a live listing website `flagged` (never PATCHed — TownLoops has no entity
     change submission yet) and listed in the nightly digest until a later `apply` sees live fixed. Local clear keeps
     the URL in `extra_json.listing_pages`, takes live's own site or blanks + `pending` → `reenrich`; `live_unread`
-    rows never cleared; each row says `changed` live/local/both/none).
+    rows never cleared; each row says `changed` live/local/both/none),
+    `preflight.py` (`town-init preflight` + the end of `town-init setup`: one read-only verdict, `Finding`s of
+    severity `error`/`warning`/`info` + stable `code` + file-and-key + consequence; exit non-zero on any error.
+    healthz + one `list(kind, limit=1)` + `verify_town()`, profile `query_groups` slugs vs the snapshot
+    (`policy.has_category`; stale snapshot vs bad profile), mode coherence (autonomous ⇒ override parks the
+    dashboard, supervised ⇒ `DASHBOARD_PASSWORD`), open `autonomy_state` circuit verbatim (DB opened `mode=ro`),
+    Firecrawl via `firecrawl_env`, Codex login presence, `AGENT_TZ`, Listmonk/Telegram as warnings. Never
+    writes or probes by create — a new check stays read-only and cheap).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -207,7 +214,8 @@ python scripts/workqueue_heartbeat.py   # what the 10-min cron runs (detaches; l
 python scripts/workqueue_heartbeat.py --drain   # one drain in the foreground
 python skills/business/event-seed-discovery/discover.py --help
 python skills/business/event-find/find.py --dry-run
-python skills/business/town-init/init.py setup      # verify creds, snapshot categories, migrate DB
+python skills/business/town-init/init.py setup      # snapshot categories, migrate DB, then preflight
+python skills/business/town-init/init.py preflight  # read-only verdict; exit 1 on any error (--json)
 ```
 
 Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help` (or read the skill's

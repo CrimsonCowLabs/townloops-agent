@@ -29,7 +29,7 @@ docker-compose up -d
 docker-compose logs -f agent
 ```
 
-The first successful boot runs `town-init setup` automatically (verifies credentials, snapshots category taxonomy, migrates the state DB).
+Before `up`, run `town-init setup` (snapshots the category taxonomy, migrates the state DB, then runs `town-init preflight` — one read-only verdict that exits non-zero when the town can't work). Re-run `preflight` first whenever something stops.
 
 The LLM steps (`event-seed-discovery`, `event-find`) use **your ChatGPT account via the OpenAI Codex CLI** — no separate API key. Run `codex login` on the host once; the per-town compose mounts `~/.codex` into the container so tokens can refresh. If the CLI is missing or throttled, those calls no-op and are retried on the next scheduled run.
 
@@ -129,7 +129,7 @@ for the full catalog + CLI invocations.
 
 | Skill | Purpose |
 |---|---|
-| `town-init` | Bootstrap: verify keys, snapshot categories, migrate SQLite. |
+| `town-init` | Bootstrap: snapshot categories, migrate SQLite, `preflight` (read-only: will this town work?). |
 | `townloops-api` | Snapshot + breaking-change check of the TownLoops OpenAPI; freeze frozen resources; read-through queries. |
 | `onboarding-orchestrator` | `tick` now drains the workqueue (legacy phase-machine names retained for compat). |
 | `newsletter-weekly` | Compose weekly HTML campaign, push to Listmonk (operator-gated). |
