@@ -187,24 +187,24 @@ def test_a_placeholder_town_name_is_an_error(town):
     assert "profile-placeholder" in town.codes("error")
 
 
-def test_an_unknown_category_slug_is_an_error_naming_known_slugs(town):
+def test_an_unknown_category_slug_is_a_warning_naming_known_slugs(town):
     town.profile["discovery"]["community"]["query_groups"][0]["category_slug"] = "municipality"
     f = next(f for f in town.run() if f.code == "category-unknown")
-    assert f.severity == "error"
+    assert f.severity == "warning"  # the sweep runs a group's terms; the slug labels nothing
     assert f.detail["slug"] == "municipality"
     assert "municipal" in f.detail["known"]
 
 
 def test_a_category_live_but_missing_from_the_snapshot_says_the_snapshot_is_stale(town):
     (town.state / "categories.json").write_text(json.dumps([{"slug": "nonprofit"}]))
-    codes = town.codes("error")
+    codes = town.codes("warning")
     assert "category-snapshot-stale" in codes
     assert "category-unknown" not in codes
 
 
-def test_a_missing_categories_snapshot_is_an_error(town):
+def test_a_missing_categories_snapshot_is_a_warning(town):
     (town.state / "categories.json").unlink()
-    assert "categories-snapshot-missing" in town.codes("error")
+    assert "categories-snapshot-missing" in town.codes("warning")
 
 
 # --------------------------------------------------------------------------
@@ -318,7 +318,8 @@ def test_the_pacific_fallback_timezone_is_a_warning_outside_pacific_time(town, m
 
 
 @pytest.mark.parametrize("region", ["California", "CA", "ca", " nevada ", "Oregon", "WA",
-                                    "Washington", "British Columbia", "bc"])
+                                    "Washington", "British Columbia", "bc",
+                                    "California/Nevada", "Nevada & California", "NV, CA"])
 def test_the_pacific_fallback_is_fine_in_a_pacific_region(town, monkeypatch, region):
     monkeypatch.delenv("AGENT_TZ")
     town.profile["region"] = region
@@ -451,11 +452,11 @@ def test_town_init_preflight_json_exits_nonzero_on_errors(town, monkeypatch, cap
 def test_town_init_setup_reports_preflight_errors_instead_of_ok(town, monkeypatch, capsys):
     mod = _town_init()
     _wire(mod, town, monkeypatch)
-    town.profile["discovery"]["community"]["query_groups"][0]["category_slug"] = "nope"
+    town.profile["name"] = "PLACEHOLDER"
     assert _cli(mod, monkeypatch, "setup") != 0
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False
-    assert "category-unknown" in {f["code"] for f in out["findings"]}
+    assert "profile-placeholder" in {f["code"] for f in out["findings"]}
 
 
 def test_town_init_setup_is_ok_for_a_configured_town(town, monkeypatch, capsys):

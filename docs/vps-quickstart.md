@@ -417,9 +417,8 @@ container. Add `--json` for machine-readable output.)
 You get a list of findings and a verdict:
 
 - **ERROR** — the agent cannot work until you fix it. Each one names the
-  file and the setting (for example `.env: TOWNLOOPS_API_KEY` or
-  `town-profile.yaml: discovery.community.query_groups[0].category_slug`)
-  and says what goes wrong if you leave it.
+  file and the setting (for example `.env: TOWNLOOPS_API_KEY`) and says
+  what goes wrong if you leave it.
 - **WARN** — the agent works with a piece missing (no newsletter, no
   Telegram). Fine while you're getting started.
 - **INFO** — something preflight can't check for you. `name` and `region`
@@ -431,7 +430,7 @@ any, so you can use it in a script. A few you may see:
 | Code | What to do |
 |---|---|
 | `credential-rejected`, `town-scope` | Wrong key for this town, or a mistyped `TOWNLOOPS_TOWN_SLUG` — get the right key |
-| `category-unknown` | Fix that `category_slug` in `town-profile.yaml` — the finding lists the valid ones |
+| `category-unknown` (warning) | Fix that `category_slug` in `town-profile.yaml` — the finding lists the valid ones. The group's search terms still run |
 | `category-snapshot-stale` | Your profile is right; re-run `setup` to refresh the category list |
 | `dashboard-password-missing` | Supervised town without `DASHBOARD_PASSWORD` — see above |
 | `dashboard-enabled-autonomous` | Autonomous town whose `docker-compose.override.yml` doesn't park the dashboard |

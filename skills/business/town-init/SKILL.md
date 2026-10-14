@@ -45,7 +45,7 @@ consequence. **Exits 1 on any error**, 0 otherwise — warnings never fail. `--j
 Checks: TownLoops healthz + one-row read + `verify_town()` (`api-unreachable`, `credential-rejected`,
 `town-scope`, `credential-missing`); the profile (`profile-missing`, `profile-placeholder`,
 `profile-unverifiable` info for `name`/`region`); every `discovery.community.query_groups[].category_slug`
-against the snapshot (`category-unknown` lists the known slugs, `category-snapshot-stale` when live has it
+against the snapshot, as warnings — the sweep uses a group's terms, not its slug (`category-unknown` lists the known slugs, `category-snapshot-stale` when live has it
 — re-run `setup`; `categories-snapshot-missing`); operating mode (`dashboard-password-missing` supervised,
 `dashboard-parked-supervised` warning when a supervised town's override parks the dashboard,
 `dashboard-enabled-autonomous` when `docker-compose.override.yml` doesn't park the dashboard,

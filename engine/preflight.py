@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -146,9 +147,9 @@ def _categories(profile: dict, client, out: list[Finding]) -> None:
     snap = policy.categories_snapshot_path()
     known = policy.load_category_slugs(snap)
     if not known:
-        out.append(Finding(ERROR, "categories-snapshot-missing", str(snap),
-                           "no categories snapshot — run `town-init setup`; until then every "
-                           "community query group enqueues nothing"))
+        out.append(Finding(WARNING, "categories-snapshot-missing", str(snap),
+                           "no categories snapshot — run `town-init setup`; until then the "
+                           "community query groups' category_slug can't be checked"))
         return
     unknown = [(i, slug) for i, slug in wanted if not policy.has_category(slug, snap)]
     live: set[str] = set()
@@ -161,13 +162,14 @@ def _categories(profile: dict, client, out: list[Finding]) -> None:
     for i, slug in unknown:
         where = f"{PROFILE}: discovery.community.query_groups[{i}].category_slug"
         if slug in live:
-            out.append(Finding(ERROR, "category-snapshot-stale", where,
+            out.append(Finding(WARNING, "category-snapshot-stale", where,
                                f"{slug!r} exists on TownLoops but not in the snapshot — re-run "
                                "`town-init setup` (the profile is right)", {"slug": slug}))
         else:
-            out.append(Finding(ERROR, "category-unknown", where,
-                               f"{slug!r} is not a category of this town — that query group "
-                               f"enqueues nothing. Known: {', '.join(sorted(known))}",
+            out.append(Finding(WARNING, "category-unknown", where,
+                               f"{slug!r} is not a category of this town — the sweep still runs "
+                               f"the group's terms, but the slug labels nothing. Known: "
+                               f"{', '.join(sorted(known))}",
                                {"slug": slug, "known": sorted(known)}))
 
 
@@ -273,7 +275,9 @@ def _timezone(profile: dict, out: list[Finding]) -> None:
 
 
 def _pacific_region(region) -> bool:
-    return str(region or "").strip().lower() in PACIFIC_REGIONS
+    """Any part of a multi-state region on Pacific time ("California/Nevada")."""
+    parts = re.split(r"\s*(?:/|,|&|\band\b)\s*", str(region or "").strip().lower())
+    return any(p in PACIFIC_REGIONS for p in parts)
 
 
 def _listmonk(factory: Optional[Callable], out: list[Finding]) -> None:
