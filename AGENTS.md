@@ -150,8 +150,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     (one finding per Series), venues of upcoming events with no image; LIST/GET only),
     `listing_website_audit.py` (read-only, for the `operator-audit-listing-websites` skill: venues/businesses/
     communities whose `website` is a listing page per `listing_hosts.is_listing_url`, local ↔ live paired by
-    `townloops_slug` → `live_id` → merge-following GET; one row per entity, `side` local/live/both — the
-    listing-website cleanup works from `find_listing_websites`' rows; LIST/GET only).
+    listing slug → `live_id` → merge-following GET (no re-point); one row per entity, `side` local/live/both,
+    `live_unread` when the GET failed, a shared live row counted once (`duplicate_of`) — the listing-website
+    cleanup works from `find_listing_websites`' rows + `unverified`; LIST/GET only).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
