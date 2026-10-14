@@ -35,7 +35,7 @@ from typing import Callable, Iterable, Literal, Optional
 from urllib.parse import urlparse
 
 from engine import business_discovery as bd
-from engine import entity_ship, listing_hosts
+from engine import discovery, entity_ship, listing_hosts
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid,
 )
@@ -181,7 +181,7 @@ def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
     for cand in approved:
         out["processed"] += 1
         uid, url = cand["candidate_uid"], cand["canonical_url"]
-        name = cand["display_name"] or bd.name_from_title((cand["verify"] or {}).get("title"))
+        name = cand["display_name"] or discovery.name_from_title((cand["verify"] or {}).get("title"))
         if not name:
             out["failed"] += 1
             _failed(conn, out, uid, f"{url}: no business name — decline it or name it first")

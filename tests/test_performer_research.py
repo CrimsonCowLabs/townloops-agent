@@ -12,7 +12,7 @@ import sqlite3
 
 import pytest
 
-from engine import performer_research as pr
+from engine import own_site, performer_research as pr
 from engine.derive_helpers import insert_entity, link_event_to_entity
 from engine.entity_enrich import Budget
 
@@ -783,14 +783,14 @@ class TestDirectFromSweden:
         "https://twitter.com/i", "https://x.com/i/", "https://x.com/explore",
     ])
     def test_site_pages_are_not_profiles(self, url):
-        assert not pr._is_profile(url)
+        assert not own_site.is_profile(url)
 
     @pytest.mark.parametrize("url", [
         "https://www.instagram.com/explorer_band/", "https://www.instagram.com/pete.s",
         "https://www.facebook.com/loginband", "https://x.com/ian", "https://twitter.com/explorers",
     ])
     def test_profiles_named_like_site_pages_still_count(self, url):
-        assert pr._is_profile(url)
+        assert own_site.is_profile(url)
 
     @pytest.mark.parametrize("a, b", [
         ("https://x.com/sos_abba", "https://twitter.com/SOS_ABBA/"),

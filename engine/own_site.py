@@ -5,7 +5,7 @@ verify (a travel blog's "24 BEST South Lake Tahoe Restaurants" names the
 town and has a "contact us" footer, but it is nobody's own site):
 
 - never a directory/listing/ticketing host (engine.listing_hosts) or a host
-  the caller excludes (the event's own source host);
+  the caller excludes (performer research: the event's own source host);
 - on a social platform, only a profile — not a post, event, video or share
   link;
 - never an event page;
@@ -25,7 +25,6 @@ from urllib.parse import urlparse
 
 from engine import listing_hosts
 from engine.derive_helpers import normalize_name
-from engine.listing_hosts import bare_host
 
 # host → field. Anything else is the entity's own website.
 PLATFORM_FIELDS = {
@@ -35,6 +34,11 @@ PLATFORM_FIELDS = {
 }
 EVENT_PATH = re.compile(
     r"/(?:events?|e|tickets?|shows?|concerts?|calendar|tour-dates|whats-on)(?:/|$)", re.IGNORECASE)
+# A site's own utility pages — joining, jobs, deals, its member list — are
+# never an organisation's own site, even on a host that carries the name.
+UTILITY_PATH = re.compile(
+    r"/(?:(?:member(?:ship)?-?application|jobs?|job-?board|careers?|hot-?deals"
+    r"|deals|list|member-?(?:list|directory)|search)(?:/|$)|members/list(?:/|$))", re.IGNORECASE)
 # What a profile (not a post, event, video, share link or site page) looks
 # like on each platform.
 PROFILE_PATH = {
@@ -50,7 +54,7 @@ PROFILE_PATH = {
 
 def platform(url: str) -> Optional[str]:
     """The entity field a social-platform URL belongs in, or None."""
-    host = bare_host(url)
+    host = listing_hosts.bare_host(url)
     for h, fld in PLATFORM_FIELDS.items():
         if host == h or host.endswith("." + h):
             return fld
@@ -63,24 +67,42 @@ def is_profile(url: str) -> bool:
     return bool(p) and bool(re.fullmatch(PROFILE_PATH[p], urlparse(url).path or "/"))
 
 
-def compact(s: str) -> str:
+def is_utility_page(url: str) -> bool:
+    """A site's own utility page: a member application, job board, deals,
+    member list or search."""
+    return bool(UTILITY_PATH.search(urlparse(url).path or "/"))
+
+
+def compact_name(s: str) -> str:
     return normalize_name(s).replace(" ", "")
+
+
+def _carries(name: Optional[str], text: str) -> bool:
+    # Shorter names match too much by accident.
+    c = compact_name(name or "")
+    return len(c) >= 5 and c in text
 
 
 def host_carries_name(name: Optional[str], url: str) -> bool:
     """The site's host carries the name: moe.org for "moe.",
     janedoe.bandcamp.com / janedoemusic.com for "Jane Doe"."""
-    host, c = bare_host(url), compact(name or "")
+    host, c = listing_hosts.bare_host(url), compact_name(name or "")
     return bool(c) and (host.split(".")[0].replace("-", "") == c
-                        or (len(c) >= 5 and c in host.replace("-", "").replace(".", "")))
+                        or _carries(name, host.replace("-", "").replace(".", "")))
+
+
+def url_carries_name(name: Optional[str], url: str) -> bool:
+    """The name appears in the URL's host or path: a handle or slug
+    (venue.example/artists/jane-doe for "Jane Doe")."""
+    return _carries(name, compact_name(f"{listing_hosts.bare_host(url)} {urlparse(url).path}"))
 
 
 def not_own_reason(name: Optional[str], url: str, *, homepage_counts: bool,
                    exclude_hosts: set[str] = frozenset()) -> Optional[str]:
     """Why `url` can't be `name`'s own page, or None when it could be."""
-    host, path = bare_host(url), urlparse(url).path or "/"
+    host, path = listing_hosts.bare_host(url), urlparse(url).path or "/"
     if host in exclude_hosts:
-        return f"{host} is the event's own source"
+        return f"{host} is excluded"
     # Ticketing / listing hosts name the entity and the town, but they are a
     # listing, not the entity.
     if listing_hosts.is_listing_host(host):

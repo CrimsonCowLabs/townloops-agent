@@ -186,9 +186,6 @@ class LiveIndex:
         return best
 
 
-name_from_title = discovery.name_from_title
-
-
 # --------------------------------------------------------------------------
 # Candidate store
 # --------------------------------------------------------------------------
@@ -319,7 +316,7 @@ def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
     the verify ran; their call stands). A nameless (directory) candidate
     takes its name from the page title, and the live and operator-decline
     checks run again with it, since live may have grown since the sweep."""
-    name = candidate.get("display_name") or name_from_title(verdict.get("title"))
+    name = candidate.get("display_name") or discovery.name_from_title(verdict.get("title"))
     live = index.match(candidate["canonical_url"], name)
     declined = None if live else declined_match(conn, candidate["town_slug"], name,
                                                 candidate.get("kind") or KIND)

@@ -31,4 +31,27 @@ def test_own(name, url, homepage_counts):
 
 def test_excluded_host():
     assert own_site.not_own_reason("Jane Doe", "https://janedoe.example/", homepage_counts=True,
-                                   exclude_hosts={"janedoe.example"})
+                                   exclude_hosts={"janedoe.example"}) == "janedoe.example is excluded"
+
+
+@pytest.mark.parametrize("name, url, matches", [
+    ("Jane Doe", "https://janedoe.bandcamp.com/", True),
+    ("Jane Doe", "https://venue.example/artists/jane-doe", True),
+    ("Moe", "https://venue.example/artists/moe", False),      # under 5 letters: too loose
+    ("Jane Doe", "https://venue.example/artists/john", False),
+])
+def test_url_carries_name(name, url, matches):
+    assert own_site.url_carries_name(name, url) is matches
+
+
+@pytest.mark.parametrize("url, utility", [
+    ("https://business.tahoechamber.org/member-application", True),
+    ("https://business.tahoechamber.org/jobs", True),
+    ("https://business.tahoechamber.org/hotdeals", True),
+    ("https://business.tahoechamber.org/list", True),
+    ("https://example.org/careers/", True),
+    ("https://tahoeoutdooradventures.com/kayak-tours", False),
+    ("https://example.org/", False),
+])
+def test_utility_page(url, utility):
+    assert own_site.is_utility_page(url) is utility

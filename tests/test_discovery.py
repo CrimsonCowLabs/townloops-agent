@@ -222,13 +222,35 @@ class TestVerifyOwnSite:
                                        town_name="South Lake Tahoe")
         assert v["verified"], v["reasons"]
 
-    def test_a_government_department_page_is_the_governments_own_site(self, monkeypatch):
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("path", ["/member-application", "/jobs", "/hotdeals", "/hot-deals",
+                                      "/careers", "/list", "/members/list", "/events/search",
+                                      "/calendar"])
+    def test_a_site_utility_page_rejects_even_named_after_its_host(self, monkeypatch, path, kind):
+        from engine import discovery
+        scraped = self._scrape(monkeypatch)
+        v = discovery.verify_candidate(f"https://business.tahoechamber.org{path}",
+                                       town_name="South Lake Tahoe", kind=kind, name="Tahoe Chamber")
+        assert not v["verified"]
+        assert any("not its own site" in r for r in v["reasons"]), v["reasons"]
+        assert scraped == []
+
+    @pytest.mark.parametrize("kind", ["community", "nonprofit"])
+    def test_a_government_department_page_is_the_governments_own_site(self, monkeypatch, kind):
         from engine import discovery
         self._scrape(monkeypatch)
         v = discovery.verify_candidate("https://cityofslt.gov/parks-recreation",
-                                       town_name="South Lake Tahoe", kind="community",
+                                       town_name="South Lake Tahoe", kind=kind,
                                        name="Parks & Recreation")
         assert v["verified"], v["reasons"]
+
+    def test_a_deep_government_page_is_no_business_own_site(self, monkeypatch):
+        from engine import discovery
+        self._scrape(monkeypatch)
+        v = discovery.verify_candidate("https://ca.gov/best-restaurants-south-lake-tahoe",
+                                       town_name="South Lake Tahoe", name="Best Restaurants")
+        assert not v["verified"]
+        assert any("not its own site" in r for r in v["reasons"]), v["reasons"]
 
 
 class TestSweepFunctions:

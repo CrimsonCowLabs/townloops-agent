@@ -31,9 +31,11 @@ is for the ones that never host a listed event.
    organisation's **own** site (`engine/own_site`, the rule performer research
    uses): a homepage, a platform profile, or any page on a host that carries
    its name — a deep page on someone else's host (a travel blog's "24 BEST …"
-   post, a city directory, a chamber's `/jobs`) is rejected with the reason,
-   before any scrape when the candidate already has a name. A `.gov` page is
-   the government's own site. Don't add blogs to the listing-host list.
+   post, a city directory) or a site utility page on any host (a chamber's
+   `/jobs`, `/member-application`, `/hotdeals` — `own_site.UTILITY_PATH`) is
+   rejected with the reason, before any scrape when the candidate already has
+   a name. For a community or non-profit, a `.gov` page is the government's
+   own site. Don't add blogs to the listing-host list.
 3. **dedup against live** — at sweep *and* verify, every candidate is
    checked against the town's live businesses (fetched fresh each run):
    - its URL is a live business's `website`, or on the same host (social and

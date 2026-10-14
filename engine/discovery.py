@@ -130,11 +130,16 @@ def canonicalize_url(url: str) -> str:
     return urlunparse((p.scheme.lower(), host, path, p.params, urlencode(q), ""))
 
 
+def is_gov_host(url: str) -> bool:
+    host = urlparse(url).netloc.lower()
+    return any(host.endswith(sfx) or (sfx in host) for sfx in GOV_HOST_SUFFIXES)
+
+
 def host_blocked(url: str, allow_gov: bool = False) -> bool:
     host = urlparse(url).netloc.lower()
     if any(bad in host for bad in HOST_BLOCKLIST_SUBSTRINGS) or listing_hosts.is_listing_url(url):
         return True
-    if not allow_gov and any(host.endswith(sfx) or (sfx in host) for sfx in GOV_HOST_SUFFIXES):
+    if not allow_gov and is_gov_host(url):
         return True
     return False
 
@@ -172,12 +177,15 @@ def name_from_title(title: Optional[str]) -> Optional[str]:
     return None
 
 
-def not_own_site_reason(url: str, name: Optional[str]) -> Optional[str]:
+def not_own_site_reason(url: str, name: Optional[str], *, allow_gov: bool = False) -> Optional[str]:
     """Why the candidate `url` can't be `name`'s own site (engine/own_site;
     a homepage counts — the sweep found it as a site of its own), or None.
-    A page on a government host is that government's own site."""
-    host = listing_hosts.bare_host(url)
-    if host.endswith(".gov"):
+    A site utility page (jobs, member application, deals) never is. With
+    `allow_gov` (community discovery), a page on a government host is that
+    government's own site."""
+    if own_site.is_utility_page(url):
+        return "not its own site: a site utility page"
+    if allow_gov and is_gov_host(url):
         return None
     why = own_site.not_own_reason(name, url, homepage_counts=True)
     return f"not its own site: {why}" if why else None
@@ -482,7 +490,9 @@ def verify_candidate(
         fetched_at: str,
       }
     """
-    if name and (why := not_own_site_reason(canonical_url, name)):
+    # Government departments are community discovery's, never a business.
+    allow_gov = kind != "business"
+    if name and (why := not_own_site_reason(canonical_url, name, allow_gov=allow_gov)):
         return {"verified": False, "reasons": [why], "fetched_at": _iso_now()}
     scraped = firecrawl_scrape(canonical_url)
     if not scraped:
@@ -503,7 +513,7 @@ def verify_candidate(
     reasons_reject: list[str] = []
 
     if not name and (why := not_own_site_reason(
-            canonical_url, name_from_title(scraped.get("title")))):
+            canonical_url, name_from_title(scraped.get("title")), allow_gov=allow_gov)):
         reasons_reject.append(why)
 
     tn = (town_name or "").lower()

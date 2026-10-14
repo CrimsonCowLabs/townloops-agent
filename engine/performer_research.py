@@ -156,37 +156,22 @@ def event_evidence(conn: sqlite3.Connection, kind: str, entity_uid: str) -> Evid
     return ev
 
 
-_platform = own_site.platform
-_is_profile = own_site.is_profile
-
-
 def _profile_url(url: str) -> Optional[str]:
     """`url` as a stored profile link — query and fragment dropped — or
     None when it is not a platform profile."""
     p = urlparse(url)
-    return f"{p.scheme}://{p.netloc}{p.path}" if _is_profile(url) else None
+    return f"{p.scheme}://{p.netloc}{p.path}" if own_site.is_profile(url) else None
 
 
 def _profile_key(url: str) -> tuple[str, str]:
     """One profile whatever its scheme, host alias (www, m., x.com for
     twitter.com), query, trailing slash or case."""
-    return _platform(url) or _host(url), urlparse(url).path.rstrip("/").lower()
+    return own_site.platform(url) or _host(url), urlparse(url).path.rstrip("/").lower()
 
 
 def _has_phrase(phrase: str, text: str) -> bool:
     p = normalize_name(phrase)
     return bool(p) and f" {p} " in f" {normalize_name(text)} "
-
-
-_compact = own_site.compact
-
-
-def _handle_matches(name: str, url: str) -> bool:
-    compact = _compact(name)
-    return len(compact) >= 5 and compact in _compact(f"{_host(url)} {urlparse(url).path}")
-
-
-_own_host = own_site.host_carries_name
 
 
 def is_presence(name: str, url: str, *, bridged: bool, exclude_hosts: set[str] = frozenset()) -> bool:
@@ -208,7 +193,7 @@ def venue_page_links(html: str, page_url: str, name: str) -> list[str]:
         if not url.startswith(("http://", "https://")) or _host(url) == page_host:
             continue
         label = html_lib.unescape(_TAGS.sub(" ", text))
-        if ((_has_phrase(name, label) or _handle_matches(name, url)) and url not in out
+        if ((_has_phrase(name, label) or own_site.url_carries_name(name, url)) and url not in out
                 and is_presence(name, url, bridged=True)):
             out.append(url)
     return out
@@ -251,7 +236,7 @@ def _site_profiles(html: str, page_url: str) -> dict[str, str]:
         links += [same] if isinstance(same, str) else [u for u in same or () if isinstance(u, str)]
     found: dict[str, dict] = {}
     for url in filter(None, map(_profile_url, links)):
-        found.setdefault(_platform(url), {}).setdefault(_profile_key(url), url)
+        found.setdefault(own_site.platform(url), {}).setdefault(_profile_key(url), url)
     return {fld: next(iter(urls.values())) for fld, urls in found.items() if len(urls) == 1}
 
 
@@ -279,12 +264,12 @@ def _read_profile(cand: Candidate, html: str, final_url: str, kind: str, name: s
     description = _profile_description(og.get("description") or meta.get("description") or "")
     blob = f"{title} {description}"
     cand.read = True
-    cand.name_match = _has_phrase(name, title) or (cand.bridge and _handle_matches(name, cand.url))
+    cand.name_match = _has_phrase(name, title) or (cand.bridge and own_site.url_carries_name(name, cand.url))
     cand.locality = any(_has_phrase(p, blob) for p in (town, *evidence.venues) if p)
     cand.role = bool(re.search(rf"(?<!\w)(?:{_ROLE_TERMS[kind]})(?!\w)", blob, re.IGNORECASE))
     if description:
         cand.fields["description"] = description
-    if not _platform(cand.url):
+    if not own_site.platform(cand.url):
         cand.fields.update(_site_profiles(html, final_url))
     if not any(h in _host(final_url) for h in _EXPIRING_IMAGE_HOSTS):
         for image in research.image_candidates(html, final_url):
@@ -298,7 +283,7 @@ def _fields_for(kind: str, cand: Candidate) -> dict:
     """The candidate's link plus what its page gave, as `kind` columns,
     schema-validated."""
     raw = dict(cand.fields)
-    platform = _platform(cand.url)
+    platform = own_site.platform(cand.url)
     if platform:
         raw[platform] = cand.url
     else:
@@ -359,12 +344,12 @@ def investigate(conn: sqlite3.Connection, kind: str, entity_uid: str, town: str,
         if not cand.unreadable:
             _read_profile(cand, html, final or cand.url, kind, name, evidence, town)
             if (cand.name_match and cand.role and not cand.locality
-                    and not _platform(cand.url) and _own_host(name, cand.url)):
+                    and not own_site.platform(cand.url) and own_site.host_carries_name(name, cand.url)):
                 return read_shows(cand, html, final or cand.url)
         elif cand.bridge:
             # Unreadable (profiles often wall logged-out readers), but the
             # venue linked it and the handle carries the name.
-            cand.name_match = _handle_matches(name, cand.url)
+            cand.name_match = own_site.url_carries_name(name, cand.url)
         return True
 
     def read_shows(cand: Candidate, html: str, url: str) -> bool:
