@@ -75,6 +75,10 @@ from engine.ingest_core import (  # noqa: E402
     # Phase 2: enrichment overlay
     _extract_enrichment_field, _fetch_for_enrichment, _apply_enrichments,
 )
+# A merged entity's 404 names its survivor (townloops ADR 0009): followed and
+# re-pointed by the engine's one implementation.
+from engine.entity_sync import repoint  # noqa: E402
+from engine.live_lookup import error_details, follow_merges, merged_into  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -885,28 +889,55 @@ def _patch_one(
     # slug renames); fall back to our deterministic hermes-<hash> for legacy
     # rows that haven't been resync'd yet.
     item_slug = _patch_target_slug(row, kind)
-    url = _patch_endpoint_for_kind(base, town_slug, kind, item_slug)
     payload = _patch_payload_for_kind(row, kind)
     if dry_run:
-        print(f"--- PATCH {url} ---")
+        print(f"--- PATCH {_patch_endpoint_for_kind(base, town_slug, kind, item_slug)} ---")
         print(json.dumps(payload, indent=2))
         return 1, 0, []
-    try:
+    # Deterministic on target slug + content_hash: retries dedupe server-side.
+    # Ship logic upstream only PATCHes when content_hash changed, so a
+    # different key naturally means a distinct edit. The slug is in the key
+    # because TownLoops caches responses on (key, body), not path: a PATCH
+    # to a merge survivor must never be answered with the old slug's 404.
+    def attempt(slug: str):
         resp = requests.patch(
-            url,
+            _patch_endpoint_for_kind(base, town_slug, kind, slug),
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json",
-                # Deterministic on content_hash: retries dedupe server-side.
-                # Ship logic upstream only PATCHes when content_hash changed,
-                # so a different key naturally means a distinct edit.
-                "Idempotency-Key": f"hermes-{TOWNLOOPS_TOWN_SLUG}:{kind}:patch:{row['content_hash']}",
+                "Idempotency-Key":
+                    f"hermes-{TOWNLOOPS_TOWN_SLUG}:{kind}:patch:{slug}:{row['content_hash']}",
             },
             json=payload,
             timeout=30,
         )
+        # Only entity 404s name a survivor; an event's never does.
+        merged = kind != "event" and resp.status_code == 404
+        return resp, merged_into(error_details(resp)) if merged else None
+
+    def on_survivor(survivor: str) -> None:
+        # Bound to the survivor before the retry, so it sticks whatever the
+        # retry does.
+        print(f"[repoint] PATCH {kind} {live['townloops_slug']} merged into {survivor}",
+              file=sys.stderr)
+        with conn:
+            repoint(conn, kind, live, {"slug": survivor})
+
+    first_slug = item_slug
+    live = {"entity_uid": row[uid_col], "townloops_slug": item_slug,
+            "extra_json": row["extra_json"]}
+    try:
+        resp, item_slug, unfollowed = follow_merges(attempt, item_slug, on_survivor)
     except requests.RequestException as exc:
         return 0, 1, [{"kind": kind, "uid": row[uid_col], "error": str(exc)}]
+    if unfollowed:
+        # Merged, but the chain doesn't resolve: keep the binding (a re-POST
+        # would only hit slug_taken) and leave it to the operator.
+        print(f"[fail] PATCH {kind} 404 {row[name_col][:50]} — merge chain at {item_slug} "
+              f"→ {unfollowed} unresolved", file=sys.stderr)
+        return 0, 1, [{"kind": kind, "uid": row[uid_col], "name": row[name_col],
+                       "error": {"code": "merge_chain_unresolved",
+                                 "slugs": [item_slug, unfollowed]}}]
     if resp.status_code in (200, 201):
         with conn:
             conn.execute(
@@ -915,9 +946,14 @@ def _patch_one(
             )
         # Re-capture in case the PATCH response reflects a slug rename
         # (rare but possible — Townloops may normalize on edit).
-        returned = ((resp.json().get("data") or {}).get("slug")) if resp.content else ""
+        data = (resp.json().get("data") or {}) if resp.content else {}
+        returned = data.get("slug") or ""
         if returned and returned != item_slug:
             _capture_townloops_slug(conn, kind, uid_col, row[uid_col], returned)
+        if item_slug != first_slug and data.get("id") is not None:
+            # Re-pointed onto a survivor: record its live id with its slug.
+            with conn:
+                repoint(conn, kind, live, {"slug": returned or item_slug, "id": data["id"]})
         return 1, 0, []
     if resp.status_code == 404:
         with conn:

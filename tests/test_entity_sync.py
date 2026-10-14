@@ -278,3 +278,93 @@ class TestSweep:
         api.verify_town = lambda *a, **k: (_ for _ in ()).throw(TownloopsError(401, "x", "wrong town"))
         with pytest.raises(TownloopsError):
             entity_sync.sweep(api, conn)
+
+
+KINDS = {"venue": "venues", "business": "businesses", "community": "communities",
+         "performer": "performers", "creator": "creators"}
+
+
+class TestMergedIntoSurvivor:
+    """A curator merged our live row into a published one: its 404 names the
+    survivor (`merged_into_slug`, townloops ADR 0009). The local row is
+    re-pointed there and synced — not flagged, never re-created."""
+
+    def _shipped(self, conn, kind, uid="e-uid", slug="hermes-slt-old"):
+        table = KINDS[kind]
+        insert_entity(conn, table, uid, {"source": "derived", "source_kind": "derived",
+                                         "name": "Riva Grill", "townloops_slug": slug,
+                                         "pushed_at": "2026-10-01T00:00:00+00:00"})
+        conn.execute(f"UPDATE {table} SET pushed_hash = content_hash WHERE entity_uid = ?", (uid,))
+        ee.fill_blanks(conn, kind, uid, {"website": "https://riva.example"}, "enriched")
+
+    def _merged_api(self, kind, **survivor):
+        resource = KINDS[kind]
+        api = FakeAPI(entities={resource: [
+            {"id": 3, "slug": "hermes-slt-old", "name": "Riva Grill"},
+            {"id": 9, "slug": "riva-grill", "name": "Riva Grill", **survivor}]})
+        api.merge(resource, "hermes-slt-old", "riva-grill", fields=())
+        return api
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_survivor_is_synced_and_persisted(self, conn, kind):
+        api = self._merged_api(kind)
+        self._shipped(conn, kind)
+
+        res = entity_sync.sync_entity(api, conn, kind, "e-uid")
+
+        assert res.status == "synced" and api.creates() == []
+        assert api.tables[KINDS[kind]]["riva-grill"]["website"] == "https://riva.example"
+        r = row(conn, "e-uid", KINDS[kind])
+        assert r["townloops_slug"] == "riva-grill"
+        assert r["pushed_hash"] == r["content_hash"]
+        extra = json.loads(r["extra_json"] or "{}")
+        assert "live_sync" not in extra and extra["live_id"] == 9
+
+    def test_later_changes_go_straight_to_the_survivor(self, conn):
+        api = self._merged_api("venue")
+        self._shipped(conn, "venue")
+        entity_sync.sync_entity(api, conn, "venue", "e-uid")
+        api.calls.clear()
+        ee.fill_blanks(conn, "venue", "e-uid", {"phone": "530-555-0100"}, "enriched")
+
+        assert entity_sync.sync_entity(api, conn, "venue", "e-uid").status == "synced"
+        assert api.venues["riva-grill"]["phone"] == "530-555-0100"
+        assert {c[2] for c in api.calls} == {"riva-grill"}
+
+    def test_merged_between_read_and_patch_is_retried_on_the_survivor(self, conn):
+        api = FakeAPI(venues=[live_venue("hermes-slt-old"),
+                              live_venue("riva-grill", id=9, website="https://riva-grill.example")])
+        self._shipped(conn, "venue")
+        real_update = api.update
+
+        def merged_meanwhile(resource, slug, payload):
+            if slug == "hermes-slt-old":
+                api.merge(resource, slug, "riva-grill", fields=())
+            return real_update(resource, slug, payload)
+        api.update = merged_meanwhile
+
+        res = entity_sync.sync_entity(api, conn, "venue", "e-uid")
+
+        assert res.status == "synced" and api.creates() == []
+        # Re-read the survivor: its own website is kept, not overwritten.
+        assert api.venues["riva-grill"]["website"] == "https://riva-grill.example"
+        r = row(conn, "e-uid")
+        assert r["townloops_slug"] == "riva-grill" and r["website"] == "https://riva-grill.example"
+        assert r["pushed_hash"] == r["content_hash"]
+        assert json.loads(r["extra_json"])["live_id"] == 9
+
+    def test_merge_chain_past_the_hop_limit_is_flagged(self, conn):
+        from engine.live_lookup import MAX_MERGE_HOPS
+        slugs = [f"s{i}" for i in range(MAX_MERGE_HOPS + 2)]
+        api = FakeAPI(venues=[live_venue(s) for s in slugs])
+        for a, b in zip(slugs, slugs[1:]):
+            api.merge("venues", a, b, fields=())
+        self._shipped(conn, "venue", slug="s0")
+        assert entity_sync.sync_entity(api, conn, "venue", "e-uid").status == "missing"
+        assert row(conn, "e-uid")["townloops_slug"] == "s0"
+
+    def test_merge_loop_is_not_followed_forever(self, conn):
+        api = FakeAPI()
+        api.merged_into.update({("venues", "a"): "b", ("venues", "b"): "a"})
+        self._shipped(conn, "venue", slug="a")
+        assert entity_sync.sync_entity(api, conn, "venue", "e-uid").status == "missing"

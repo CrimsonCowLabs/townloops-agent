@@ -94,9 +94,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `sameAs`, profile paths only, one per platform) fill blank socials; ambiguous → `needs-review`;
     driven by the `performer-research` skill, ≤3 per 20-min cron run),
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
-    `entity-live-sync`), `live_patch.py` (full-body PATCH + GET verify for events and entities),
+    `entity-live-sync`; a 404 naming a merge survivor re-points instead of flagging), `live_patch.py`
+    (full-body PATCH + GET verify for events and entities),
     `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote),
-    `live_lookup.py` (find a live record before creating one),
+    `live_lookup.py` (find a live record before creating one; the one parser of a merged entity's 404
+    survivor, `merged_into`/`merged_into_slug`, and `follow_merges` — ≤`MAX_MERGE_HOPS`, under `get_live`
+    and event-ingest's PATCH. Entity reads by cached slug go through it and re-point via
+    `entity_sync.repoint` (slug + `live_id` together): a 404 *with* a survivor re-points, only one without
+    means gone/re-POST. Only entity 404s name a survivor (townloops ADR 0009) — an event's never does),
     `event_dedup.py` (cross-seed dedup: `canonical_event_uid` on every new event via `upsert_event`;
     one copy stays pending, the rest are declined `status='duplicate'`; primary beats syndicator seeds),
     `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`, and still-listed events the
@@ -165,7 +170,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
 ## Commands
 
 ```bash
-# Tests — run from repo root. ~250 tests, in-process, no network, ~3s.
+# Tests — run from repo root. ~1300 tests, in-process, no network, ~5 min.
 pytest                              # full suite
 pytest tests/test_orchestrator.py   # single file
 pytest -k "migration and rollback"  # by keyword
@@ -196,8 +201,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 
 - **`event-ingest/ingest.py` is a fork.** Before editing it, diff against the upstream SLT source
   (`~/.hermes/skills/business/south-lake-tahoe-events/events.py`). The deterministic town-scoped
-  `Idempotency-Key`, `agent` metadata `hermes/{slug}-events`, env-driven path constants, and `AGENT_TZ`
-  reads are deliberate edits that MUST be re-applied on any re-fork. Shared logic belongs in
+  `Idempotency-Key` (a PATCH's names its target slug — TownLoops replays on key + body, not path),
+  `agent` metadata `hermes/{slug}-events`, env-driven path constants, `AGENT_TZ` reads, and merge-survivor
+  re-pointing via `engine/live_lookup.follow_merges` + `entity_sync.repoint` are deliberate edits that MUST be re-applied on any re-fork. Shared logic belongs in
   `engine/ingest_core.py`, not the fork.
 - **`verify_town()` is a hard cross-town guard.** Never write to a town other than `$TOWNLOOPS_TOWN_SLUG`.
   It fails closed if the bearer's scope or the `categories.json` snapshot drifts. Called at the top of
@@ -205,8 +211,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Enrichment is "fill blanks only"** (`engine/entity_enrich.fill_blanks` writes only NULL-locally fields, to
   protect operator edits) and refreshes `content_hash`. It reaches live via `engine/entity_sync.py`
   (event-ship + the daily `entity-live-sync` sweep): resync from the live row first (live values win), then
-  PATCH only live's blanks, GET-verify, and only then set `pushed_hash`. A 404 or a PATCH that doesn't land
-  flags the entity (`extra_json.live_sync`) for the operator — never re-created, never retried until cleared.
+  PATCH only live's blanks, GET-verify, and only then set `pushed_hash`. A 404 naming a curator's merge
+  survivor (`merged_into_slug`) re-points the row there (slug + `live_id` persisted) and syncs the survivor; any
+  other 404 or a PATCH that doesn't land flags the entity (`extra_json.live_sync`) for the operator — never
+  re-created, never retried until cleared.
 - **Performer/creator identity is never inferred from a name.** They're researched only by the
   `performer-research` batch (event-enrich-entities skips them); a profile is attached only when a venue page
   links it or its metadata names the town/a linked venue *and* the role. Bios are the profile's own text or

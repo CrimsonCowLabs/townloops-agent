@@ -85,10 +85,13 @@ class FakeAPI:
         table = self.tables.setdefault(resource, {})
         # Town-scoped like the server: another town's venue is a 404 here.
         if slug not in table or table[slug].get("town", "slt") != "slt":
-            into = self.merged_into.get((resource, slug))
-            raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found",
-                                 {"merged_into_slug": into} if into else None)
+            self._not_found(resource, slug)
         return copy.deepcopy(table[slug])
+
+    def _not_found(self, resource, slug):
+        into = self.merged_into.get((resource, slug))
+        raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found",
+                             {"merged_into_slug": into} if into else None)
 
     def list(self, resource, **params):
         self.calls.append(("LIST", resource, dict(params)))
@@ -179,6 +182,8 @@ class FakeAPI:
         _no_series_writes(resource)
         if resource != "events":
             return self._update_entity(resource, slug, payload)
+        if slug not in self.events:
+            self._not_found(resource, slug)
         row = self.events[slug]
         if "title" in payload and payload["title"] is not None and len(payload["title"]) < 3:
             raise RuntimeError("[422 validation_error] title too short")
@@ -195,7 +200,7 @@ class FakeAPI:
     def _update_entity(self, resource, slug, payload):
         table = self.tables.setdefault(resource, {})
         if slug not in table or table[slug].get("town", "slt") != "slt":
-            raise TownloopsError(404, "not_found", f"{resource} {slug!r} not found")
+            self._not_found(resource, slug)
         row = table[slug]
         for k, v in payload.items():
             if v is None or k in self.ignore or (k == "name" and v == ""):
@@ -217,7 +222,7 @@ class FakeAPI:
         """Apply `fields` of pending `slug` onto published `into`, then
         soft-delete `slug` (townloops `merge_event`). A merged entity's 404
         names the survivor (`merged_into_slug`, townloops ADR 0009); an
-        event's doesn't."""
+        event's doesn't. GET and PATCH 404 alike."""
         source = self.tables[resource][slug]
         for f in fields:
             if f in source:

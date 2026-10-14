@@ -471,3 +471,86 @@ class TestFindBySeriesDay:
                             series_slug="jazz-night", tz=TZ)
         assert m.row["slug"] == "hermes-jazz"
         assert not [c for c in api.calls if c[0] == "LIST"]
+
+
+# --------------------------------------------------------------------------
+# merged records (townloops ADR 0009): a 404 naming `merged_into_slug`
+# --------------------------------------------------------------------------
+
+class TestMergeSurvivor:
+    def test_survivor_is_read_from_a_404s_details(self):
+        from engine.live_lookup import merged_into, merged_into_slug
+        assert merged_into_slug(TownloopsError(404, "not_found", "x",
+                                               {"merged_into_slug": "riva"})) == "riva"
+        assert merged_into_slug(TownloopsError(404, "not_found", "x")) is None
+        assert merged_into_slug(TownloopsError(409, "slug_taken", "x",
+                                               {"merged_into_slug": "riva"})) is None
+        assert merged_into({"merged_into_slug": "riva"}) == "riva"
+        assert merged_into(None) is None and merged_into({"merged_into_slug": ""}) is None
+
+    def test_follow_merges_reports_an_unresolved_chain(self):
+        from engine.live_lookup import follow_merges
+        names = {"a": "b", "b": "a"}
+        tried, repointed = [], []
+
+        def attempt(slug):
+            tried.append(slug)
+            return slug.upper(), names.get(slug)
+        assert follow_merges(attempt, "a", repointed.append) == ("B", "b", "a")
+        assert tried == ["a", "b"] and repointed == ["b"]
+
+    def test_lookup_follows_the_survivor(self):
+        api = FakeAPI(venues=[{"id": 7, "slug": "old", "name": "Riva"},
+                              {"id": 9, "slug": "riva", "name": "Riva"}])
+        api.merge("venues", "old", "riva", fields=())
+        assert find_live_entity(api, "venues", "old")["slug"] == "riva"
+
+    def test_a_chain_is_followed_up_to_the_hop_limit(self):
+        from engine.live_lookup import MAX_MERGE_HOPS
+        slugs = [f"s{i}" for i in range(MAX_MERGE_HOPS + 2)]
+        api = FakeAPI(venues=[{"id": i, "slug": s, "name": "Riva"} for i, s in enumerate(slugs)])
+        for a, b in zip(slugs, slugs[1:]):
+            api.merge("venues", a, b, fields=())
+        assert find_live_entity(api, "venues", slugs[1])["slug"] == slugs[-1]
+        assert find_live_entity(api, "venues", slugs[0]) is None
+
+    def test_a_loop_ends(self):
+        api = FakeAPI()
+        api.merged_into.update({("venues", "a"): "b", ("venues", "b"): "a"})
+        assert find_live_entity(api, "venues", "a") is None
+
+
+ENTITY_KINDS = {"venue": "venues", "business": "businesses", "community": "communities",
+                "performer": "performers", "creator": "creators"}
+
+
+class TestShipMergedRecords:
+    """An entity we shipped that a curator merged into a published one: ship
+    adopts the survivor (slug persisted, kept up to date) — never re-POSTs,
+    never flags it as gone. (Event 404s never name a survivor.)"""
+
+    @pytest.mark.parametrize("kind", ENTITY_KINDS)
+    def test_merged_entity_is_repointed_and_kept_updated(self, ship, conn, kind):
+        from engine import entity_enrich
+        table = ENTITY_KINDS[kind]
+        api = FakeAPI(entities={table: [{"id": 3, "slug": "hermes-slt-old", "name": "Riva Grill"},
+                                        {"id": 9, "slug": "riva-grill", "name": "Riva Grill"}]})
+        api.merge(table, "hermes-slt-old", "riva-grill", fields=())
+        insert_entity(conn, table, "e-uid", {"source": "derived", "source_kind": "derived",
+                                             "name": "Riva Grill", "townloops_slug": "hermes-slt-old",
+                                             "pushed_at": "2026-10-01T00:00:00+00:00"})
+
+        assert ship._ship_entity(api, conn, kind, "e-uid") == "riva-grill"
+        entity_enrich.fill_blanks(conn, kind, "e-uid", {"website": "https://riva.example"},
+                                  "enriched")
+        api.calls.clear()
+        assert ship._ship_entity(api, conn, kind, "e-uid") == "riva-grill"
+
+        assert api.creates() == []
+        assert api.tables[table]["riva-grill"]["website"] == "https://riva.example"
+        assert {c[2] for c in api.calls} == {"riva-grill"}     # no detour via the old slug
+        row = conn.execute(f"SELECT * FROM {table} WHERE entity_uid = 'e-uid'").fetchone()
+        assert row["townloops_slug"] == "riva-grill"
+        assert row["pushed_hash"] == row["content_hash"]
+        extra = json.loads(row["extra_json"])
+        assert extra["live_id"] == 9 and "live_sync" not in extra

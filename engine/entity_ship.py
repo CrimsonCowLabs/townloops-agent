@@ -103,11 +103,13 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     a 409 on create is resolved the same way — never assumed. Adopted,
     created and since-enriched rows are then synced (engine/entity_sync):
     live values kept, live blanks filled, GET-verified. A row we shipped
-    before that is gone from live is flagged for the operator, not
-    re-created. A create the submission gate holds (autonomous mode) raises
-    autonomy.SubmissionsHeld, and a never-shipped bare performer/creator
-    research hasn't verified raises AwaitingResearch before any lookup —
-    holds, not failures; the caller decides."""
+    before that a curator merged into another is re-pointed at the survivor
+    (the lookup follows the 404's `merged_into_slug`); one otherwise gone
+    from live is flagged for the operator, not re-created. A create the
+    submission gate holds (autonomous mode) raises autonomy.SubmissionsHeld,
+    and a never-shipped bare performer/creator research hasn't verified
+    raises AwaitingResearch before any lookup — holds, not failures; the
+    caller decides."""
     from engine import entity_sync
     from engine.autonomy import SubmissionsHeld
     from engine.live_lookup import find_live_entity, is_conflict

@@ -127,9 +127,8 @@ def _after_404(client, conn: sqlite3.Connection, sub: dict,
                 else ("gone", None)
         survivor = _event_survivor(client, conn, sub)
     else:
-        details = getattr(err, "details", None)
-        survivor = (details.get("merged_into_slug") if isinstance(details, dict) else None) \
-            or _entity_survivor(client, conn, sub)
+        from engine.live_lookup import merged_into_slug
+        survivor = merged_into_slug(err) or _entity_survivor(client, conn, sub)
     return ("merged", survivor) if survivor else ("gone", None)
 
 
