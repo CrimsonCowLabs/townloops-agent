@@ -3,10 +3,12 @@
 <h1>Blocked egress requests</h1>
 
 <p class="muted">
-  Squid is denying every host not on the allowlist. Add legitimate hosts to
-  <code>town-profile.yaml</code> → <code>allowed_hosts</code> AND to
-  <code>templates/_shared/egress/squid.conf</code>'s <code>tahoe_north</code>
-  ACL (or wherever your town's ACL lives), then restart the egress stack.
+  Squid is denying every host not on the allowlist. To allow a legitimate
+  host, add it (bare hostname, e.g. <code>example.org</code>) to this town's
+  <code>town-profile.yaml</code> → <code>allowed_hosts</code> — the only list
+  you edit — then on the host regenerate the shared allowlist and reload Squid:
+  <code>bin/townloops-agent-add --egress</code> and
+  <code>docker exec squid-egress squid -k reconfigure</code>.
 </p>
 
 {% if not log_exists %}

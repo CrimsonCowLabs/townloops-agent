@@ -5,10 +5,13 @@ slug:   "{{SLUG}}"
 name:   "PLACEHOLDER — the town's display name, e.g. \"South Lake Tahoe\""
 region: "PLACEHOLDER — state/province, e.g. \"California\""
 
-# Hosts the agent may talk to for discovery / seed scrapes. Also feeds
-# event-source-discovery auto-approve (only sources on this list get
-# auto-approved) AND the Squid egress allowlist per §_shared/egress/squid.conf.
-# Add carefully — every entry is an implicit trust decision.
+# Hosts this town's agent may reach directly through the shared Squid egress
+# proxy (each entry also allows its subdomains). Compiled into
+# templates/_shared/egress/squid.conf by `bin/townloops-agent-add --egress`,
+# then `docker exec squid-egress squid -k reconfigure`. Bare hostnames only —
+# "example.org", not "https://example.org/events" (that's an error).
+# Firecrawl scrapes don't go through Squid, so seeds scraped that way don't
+# need listing. Add carefully — every entry is an implicit trust decision.
 allowed_hosts:
   - "example-chamber.org"
   - "visitexample.com"

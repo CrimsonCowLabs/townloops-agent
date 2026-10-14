@@ -2,12 +2,18 @@
 # =====================================================
 # Per-town agents set HTTP_PROXY / HTTPS_PROXY to `http://squid.egress-net:3128`.
 # Squid's allowlist (squid.conf) restricts CONNECT to a small set of hosts
-# the agent legitimately needs (Anthropic, TownLoops, Telegram, Listmonk,
-# Firecrawl cloud fallback, and per-town allowed_hosts from the profile).
+# the agent legitimately needs (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk,
+# and each town's town-profile.yaml allowed_hosts). Firecrawl is local and
+# reached in-network, never through this proxy.
+#
+# squid.conf is GENERATED — never edit it. After changing any town's
+# allowed_hosts:
+#   bin/townloops-agent-add --egress
+#   docker exec squid-egress squid -k reconfigure
+# A host every agent needs belongs in engine/egress.py's PLATFORM block.
 #
 # The container itself is intentionally simple — squid, plain config, no
-# TLS interception, no logging beyond stderr. If you add capabilities to
-# the agent, extend squid.conf here.
+# TLS interception; the access log feeds the dashboard's Blocked page.
 #
 # Bring up: docker compose -f templates/_shared/egress/docker-compose.yml up -d
 

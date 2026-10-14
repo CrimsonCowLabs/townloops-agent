@@ -3,6 +3,7 @@ from the template keeps the stack bootable, or refuses without touching it."""
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import stat
@@ -10,22 +11,22 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 @pytest.fixture
 def env(tmp_path):
-    """A copy of the tool whose template mounts a stub Codex login, so the
-    tests never depend on this host's ~/.codex."""
+    """The tool run out of a tmp copy of the repo by a user whose HOME holds a
+    stub Codex login, so the real template renders against the tmp fixture and
+    the tests never depend on this host's paths."""
     home = tmp_path / "home"
     (home / ".codex").mkdir(parents=True)
     (home / ".codex" / "auth.json").write_text("{}")
     repo = tmp_path / "repo"
-    shutil.copytree(ROOT / "bin", repo / "bin")
-    shutil.copytree(ROOT / "templates", repo / "templates")
-    tmpl = repo / "templates" / "per-town-agent.docker-compose.yml.tmpl"
-    tmpl.write_text(tmpl.read_text().replace("/home/aaron/.codex:", f"{home}/.codex:"))
+    for d in ("bin", "templates", "cron", "engine"):
+        shutil.copytree(ROOT / d, repo / d)
     return {**os.environ, "HOME": str(home), "TOWNLOOPS_AGENTS_ROOT": str(tmp_path / "towns"),
             "TOWNLOOPS_CONTAINER_UID": str(os.getuid()), "ADD": str(repo / "bin" / "townloops-agent-add")}
 
@@ -166,3 +167,137 @@ def test_autonomous_flag_on_rerender_is_refused(env, town):
     silently disagree with it."""
     r = run(env, "testtown", "--rerender", "--autonomous")
     assert r.returncode != 0 and "town-profile.yaml" in r.stderr
+
+
+# ---- what a scaffolded town gets is the repo's own, and portable ------------
+
+SKILLS = {p.name for p in (ROOT / "skills" / "business").iterdir() if (p / "SKILL.md").exists()}
+SCRIPTS = {p.name for p in (ROOT / "scripts").iterdir() if p.is_file()}
+SCRIPTS_IN_CONTAINER = "/home/agent/.hermes/scripts/"
+SKILLS_IN_CONTAINER = "/home/agent/.hermes/skills/business/"
+
+
+def _scheduled(jobs: list[dict]) -> tuple[set[str], set[str], set[str]]:
+    """(skills, scripts, skill files) a cron schedule runs."""
+    skills, scripts, files = set(), set(), set()
+    for job in jobs:
+        skills.update(job.get("skills") or [])
+        if job.get("script"):
+            scripts.add(job["script"])
+        for word in (job.get("prompt") or "").split():
+            if word.startswith(SCRIPTS_IN_CONTAINER):
+                scripts.add(word[len(SCRIPTS_IN_CONTAINER):])
+            elif word.startswith(SKILLS_IN_CONTAINER):
+                files.add(word[len(SKILLS_IN_CONTAINER):])
+    return skills, scripts, files
+
+
+def test_scaffolded_town_schedules_only_what_the_repo_has(env, tmp_path):
+    assert run(env, "testtown").returncode == 0
+    jobs = json.loads((tmp_path / "towns" / "testtown" / "cron" / "jobs.json").read_text())["jobs"]
+    skills, scripts, files = _scheduled(jobs)
+    assert skills and scripts
+    assert skills <= SKILLS, f"scheduled skills not in skills/business/: {sorted(skills - SKILLS)}"
+    assert scripts <= SCRIPTS, f"scheduled scripts not in scripts/: {sorted(scripts - SCRIPTS)}"
+    missing = sorted(f for f in files if not (ROOT / "skills" / "business" / f).is_file())
+    assert not missing, f"scheduled skill files not in skills/business/: {missing}"
+
+
+def test_scaffolded_town_installs_the_repos_schedule(env, tmp_path):
+    assert run(env, "testtown").returncode == 0
+    cron = tmp_path / "towns" / "testtown" / "cron"
+    assert (cron / "jobs.json").read_text() == (ROOT / "cron" / "jobs.json").read_text()
+    assert json.loads((cron / "jobs.empty.json").read_text()) == {"version": 1, "jobs": []}
+
+
+def _host_paths(compose: str) -> list[str]:
+    """Every absolute host path the compose bind-mounts or builds from."""
+    paths = []
+    for line in compose.splitlines():
+        line = line.split("#", 1)[0].strip()
+        host, _, inside = line[2:].partition(":")
+        if line.startswith("- /") and inside.startswith("/"):  # a bind mount, not a tmpfs
+            paths.append(host)
+        elif line.startswith("context:"):
+            paths.append(line.split(":", 1)[1].strip())
+    return paths
+
+
+def test_rendered_compose_mounts_only_the_running_repo_and_users_codex(env, town, tmp_path):
+    compose = (town / "docker-compose.yml").read_text()
+    paths = _host_paths(compose)
+    assert paths
+    outside = [p for p in paths if not p.startswith(str(tmp_path) + "/")]
+    assert not outside, outside
+    assert "{{" not in compose
+    repo = tmp_path / "repo"
+    assert f"context: {repo}\n" in compose
+    assert f"- {repo}/engine:/app/engine:ro" in compose
+    assert f"- {env['HOME']}/.codex:/home/agent/.codex:rw" in compose
+
+
+def test_no_template_names_a_host_path():
+    for tmpl in (ROOT / "templates").rglob("*"):
+        if tmpl.is_file():
+            assert "/home/aaron" not in tmpl.read_text(), tmpl
+
+
+def test_rerender_picks_up_host_paths(env, town, tmp_path):
+    """A town rendered when the template hardcoded the author's paths is
+    recovered by --rerender."""
+    compose = town / "docker-compose.yml"
+    compose.write_text(compose.read_text().replace(str(tmp_path / "repo"), "/home/aaron/workspace/townloops-agent"))
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert "/home/aaron" not in compose.read_text()
+
+
+# ---- --egress: the shared Squid allowlist compiled from every town ---------
+
+def _towns_with_hosts(env, tmp_path, towns: dict[str, list[str]]) -> Path:
+    for slug, hosts in towns.items():
+        assert run(env, slug).returncode == 0
+        profile = tmp_path / "towns" / slug / "town-profile.yaml"
+        data = yaml.safe_load(profile.read_text())
+        data["allowed_hosts"] = hosts
+        profile.write_text(yaml.safe_dump(data))
+    return tmp_path / "repo" / "templates" / "_shared" / "egress" / "squid.conf"
+
+
+def test_egress_compiles_every_towns_allowed_hosts(env, tmp_path):
+    conf = _towns_with_hosts(env, tmp_path, {"slt": ["cityofslt.us"], "north-shore": ["sierrasun.com"]})
+    r = run(env, "--egress")
+    assert r.returncode == 0, r.stderr
+    text = conf.read_text()
+    assert "acl town_slt dstdomain .cityofslt.us" in text
+    assert "acl town_north_shore dstdomain .sierrasun.com" in text
+    assert "http_access allow townloops" in text
+    assert "squid -k reconfigure" in r.stdout  # the reload is the operator's step
+
+
+def test_egress_rerun_is_a_byte_identical_noop_written_in_place(env, tmp_path):
+    conf = _towns_with_hosts(env, tmp_path, {"slt": ["cityofslt.us"]})
+    assert run(env, "--egress").returncode == 0
+    before, inode = conf.read_bytes(), conf.stat().st_ino
+    r = run(env, "--egress")
+    assert r.returncode == 0, r.stderr
+    assert conf.read_bytes() == before
+    assert "unchanged" in r.stdout
+    _towns_with_hosts(env, tmp_path, {"other": ["two.com"]})
+    assert run(env, "--egress").returncode == 0
+    assert conf.stat().st_ino == inode  # Squid's single-file bind mount keeps seeing it
+    assert "town_other" in conf.read_text()
+
+
+def test_egress_refuses_a_bad_entry_and_leaves_the_file(env, tmp_path):
+    conf = _towns_with_hosts(env, tmp_path, {"slt": ["https://cityofslt.us/events"]})
+    before = conf.read_text()
+    r = run(env, "--egress")
+    assert r.returncode != 0
+    assert "slt" in r.stderr and "https://cityofslt.us/events" in r.stderr
+    assert conf.read_text() == before
+
+
+def test_egress_takes_no_slug(env):
+    r = run(env, "slt", "--egress")
+    assert r.returncode != 0 and "--egress" in r.stderr

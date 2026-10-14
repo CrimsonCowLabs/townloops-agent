@@ -3,7 +3,9 @@
 # Rendered per-town by `bin/townloops-agent-add {slug}` into
 # ~/townloops-agents/{slug}/docker-compose.yml. Re-render an existing town
 # with `bin/townloops-agent-add {slug} --rerender` (never by hand) — it checks
-# hermes-home and the logins first. Host-specific changes go in that town's
+# hermes-home and the logins first. Rendering fills in the town's slug, the
+# repo the scaffolder ran out of, and the invoking user's Codex login
+# ($HOME/.codex). Host-specific changes go in that town's
 # docker-compose.override.yml, not in this file — e.g. a LAN dashboard port
 # (`!override` replaces the list instead of adding a second binding):
 #   services: {dashboard: {ports: !override ["0.0.0.0:8090:8090"]}}
@@ -31,7 +33,7 @@
 services:
   agent:
     build:
-      context: /home/aaron/workspace/townloops-agent
+      context: {{REPO}}
       dockerfile: Dockerfile
     image: townloops-agent:local
     container_name: townloops-agent-{{SLUG}}
@@ -114,15 +116,16 @@ services:
       #     auth add openai-codex --type oauth --no-browser
       # The mounts below layer on top of this one.
       - ./hermes-home:/home/agent/.hermes
-      # Repo mounted read-only by absolute path. `git pull` on the repo
+      # Repo mounted read-only by absolute path (rendered from where the
+      # scaffolder ran — move the repo, then --rerender). `git pull` on the repo
       # updates every per-town stack on next `docker compose up -d`.
-      - /home/aaron/workspace/townloops-agent/skills/business:/home/agent/.hermes/skills/business:ro
-      - /home/aaron/workspace/townloops-agent/config.yaml:/home/agent/.hermes/config.yaml:ro
-      - /home/aaron/workspace/townloops-agent/SOUL.md:/home/agent/.hermes/SOUL.md:ro
-      - /home/aaron/workspace/townloops-agent/engine:/app/engine:ro
+      - {{REPO}}/skills/business:/home/agent/.hermes/skills/business:ro
+      - {{REPO}}/config.yaml:/home/agent/.hermes/config.yaml:ro
+      - {{REPO}}/SOUL.md:/home/agent/.hermes/SOUL.md:ro
+      - {{REPO}}/engine:/app/engine:ro
       # Hermes cron no_agent jobs use `script:` (path under $HERMES_HOME/scripts/)
       # — repo-owned wrappers that call the actual skill CLIs.
-      - /home/aaron/workspace/townloops-agent/scripts:/home/agent/.hermes/scripts:ro
+      - {{REPO}}/scripts:/home/agent/.hermes/scripts:ro
       # Per-town cron file lives in this per-town dir so a follower can
       # bind an empty jobs.json without changing the shared repo. RW —
       # Hermes needs to create cron/output/ and write next_run/last_run
@@ -135,7 +138,7 @@ services:
       # OpenAI Codex CLI session auth. RW so the CLI can refresh tokens
       # in-container. Same trust boundary as the TownLoops bearer in .env
       # — do not mount for containers you wouldn't trust with either.
-      - /home/aaron/.codex:/home/agent/.codex:rw
+      - {{CODEX_HOME}}:/home/agent/.codex:rw
 
     command: python -m hermes_cli.main gateway run --replace
 
@@ -204,9 +207,9 @@ services:
       - "host.docker.internal:host-gateway"
 
     volumes:
-      - /home/aaron/workspace/townloops-agent/dashboard:/app/dashboard:ro
-      - /home/aaron/workspace/townloops-agent/engine:/app/engine:ro
-      - /home/aaron/workspace/townloops-agent/skills/business:/home/agent/.hermes/skills/business:ro
+      - {{REPO}}/dashboard:/app/dashboard:ro
+      - {{REPO}}/engine:/app/engine:ro
+      - {{REPO}}/skills/business:/home/agent/.hermes/skills/business:ro
       # State is rw — dashboard flips discovery_candidates.status on approve/reject.
       - ./state:/home/agent/.hermes/state
       - ./town-profile.yaml:/home/agent/.hermes/town-profile.yaml:ro
@@ -216,7 +219,7 @@ services:
       - squid-egress-log:/squid-log:ro
       # Codex CLI ChatGPT session — dashboard-spawned skills (event-find,
       # category classify) call the LLM too; same auth as the agent.
-      - /home/aaron/.codex:/home/agent/.codex:rw
+      - {{CODEX_HOME}}:/home/agent/.codex:rw
 
     # Bypass the base image entrypoint (which swaps to a venv that lacks
     # our pip-installed deps). Use system python3 directly — that's the
