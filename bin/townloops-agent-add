@@ -7,7 +7,7 @@
 #   docker-compose.yml    — hardened per-town compose (references the shared repo)
 #   .env                  — from templates/env.example (with {{SLUG}} substituted)
 #   town-profile.yaml     — from templates/town-profile.example.yaml
-#   cron/jobs.json        — a copy of the repo's own cron/jobs.json
+#   cron/jobs.json        — a copy of the repo's own cron/jobs.json (--rerender refreshes it)
 #   cron/jobs.empty.json  — optional follower-mode override target
 #   state/                — empty; agent creates state/townloops.db + others on first tick
 #
@@ -22,7 +22,9 @@
 # error until they're brought up.
 #
 # --rerender: re-render an EXISTING town's docker-compose.yml from the current
-# template (nothing else is touched). It refuses, leaving the compose as it
+# template, and refresh a leader town's cron/jobs.json from the repo's (a
+# follower's emptied schedule or jobs.empty.json binding is left alone; the old
+# jobs.json is kept as jobs.json.bak-<time>). Nothing else is touched. It refuses, leaving the compose as it
 # was, unless the re-rendered stack can boot: hermes-home exists (created if
 # missing) and is owned by the container user, Hermes' own ChatGPT login
 # (hermes-home/auth.json) is there, and the host's Codex CLI login is there.
@@ -41,9 +43,9 @@ BASE_DIR="${TOWNLOOPS_AGENTS_ROOT:-$HOME/townloops-agents}"
 
 usage() {
   echo "usage: $0 <slug> [--target-dir DIR] [--autonomous | --rerender]" >&2
-  echo "       $0 --egress [--target-dir DIR]" >&2
+  echo "       $0 --egress [--target-dir DIR]   (writes DIR/_egress/squid.conf)" >&2
   echo "  <slug>              lowercase alphanumeric + hyphens (matches TownLoops)" >&2
-  echo "  --target-dir DIR    override BASE_DIR (default: \$HOME/townloops-agents)" >&2
+  echo "  --target-dir DIR    override BASE_DIR (default: \$TOWNLOOPS_AGENTS_ROOT or \$HOME/townloops-agents)" >&2
   echo "  --autonomous        scaffold in autonomous mode (no local dashboard)" >&2
   echo "  --rerender          re-render an existing town's docker-compose.yml" >&2
   echo "  --egress            compile every town's allowed_hosts into the shared Squid allowlist" >&2
@@ -85,46 +87,11 @@ if [[ "$EGRESS" == 1 ]]; then
     echo "--egress compiles every town under $BASE_DIR; it takes no slug, --rerender or --autonomous" >&2
     exit 2
   fi
-  # engine/egress.py does the compiling; this reads the profiles and writes
-  # the file in place (same inode — Squid's single-file bind mount keeps
-  # seeing it). Reloading the shared Squid stays the operator's step.
-  SQUID_CONF="$TEMPLATES/_shared/egress/squid.conf"
-  PYTHONPATH="$REPO" "${PYTHON:-python3}" - "$BASE_DIR" "$SQUID_CONF" <<'PY'
-import sys
-from pathlib import Path
-
-import yaml
-
-from engine.egress import EgressError, render_squid_conf
-
-base, out = Path(sys.argv[1]), Path(sys.argv[2])
-towns = []
-for profile in sorted(base.glob("*/town-profile.yaml")):
-    slug = profile.parent.name
-    try:
-        data = yaml.safe_load(profile.read_text()) or {}
-    except yaml.YAMLError as e:
-        sys.exit(f"{profile}: not valid YAML: {e}")
-    hosts = data.get("allowed_hosts") or []
-    if not isinstance(hosts, list):
-        sys.exit(f"{profile}: allowed_hosts must be a list of hostnames")
-    towns.append((slug, hosts))
-try:
-    text = render_squid_conf(towns)
-except EgressError as e:
-    sys.exit(f"{e} — in {base}/<town>/town-profile.yaml; {out} unchanged")
-names = ", ".join(slug for slug, _ in towns) or "none"
-if out.exists() and out.read_text() == text:
-    print(f"{out} unchanged (towns: {names})")
-    sys.exit(0)
-with open(out, "r+" if out.exists() else "w") as f:  # in place: keep the inode
-    f.write(text)
-    f.truncate()
-print(f"wrote {out} (towns: {names})")
-print("Reload the shared Squid (every town's egress goes through it):")
-print("  docker exec squid-egress squid -k reconfigure")
-PY
-  exit $?
+  # engine/egress.py reads every town's profile and writes
+  # $BASE_DIR/_egress/squid.conf — outside the repo, in place (same inode:
+  # Squid's single-file bind mount keeps seeing it). Reloading the shared
+  # Squid stays the operator's step.
+  PYTHONPATH="$REPO" exec "${PYTHON:-python3}" -m engine.egress "$BASE_DIR"
 fi
 
 if [[ -z "$SLUG" ]]; then usage; fi
@@ -140,8 +107,19 @@ fi
 TARGET="$BASE_DIR/$SLUG"
 # The compose template runs the agent as this uid ("user:" line).
 CONTAINER_UID="${TOWNLOOPS_CONTAINER_UID:-1000}"
-# The invoking user's Codex CLI login, bind-mounted into both containers.
-CODEX_DIR="$HOME/.codex"
+# The invoking user's Codex CLI login, bind-mounted into both containers:
+# an explicit CODEX_HOME (the Codex CLI's own override) wins over ~/.codex.
+CODEX_DIR="${CODEX_HOME:-$HOME/.codex}"
+
+# Both land in compose's short volume syntax (host:container:mode), where a
+# ':' in the host path splits it wrong.
+for host_path in "$REPO" "$CODEX_DIR"; do
+  if [[ "$host_path" == *:* ]]; then
+    echo "refusing: $host_path contains ':', which breaks docker compose's host:container volume syntax —" >&2
+    echo "move/clone it to a path without ':' and run the scaffolder from there" >&2
+    exit 2
+  fi
+done
 
 sed_escape() {  # a literal for the right-hand side of s|...|...|
   printf '%s' "$1" | sed -e 's/[\\|&]/\\&/g'
@@ -178,6 +156,37 @@ write_dashboard_override() {  # a new override file only — never overwrites
 # is autonomous (the dashboard refuses to start in that mode anyway).
 $DASHBOARD_OFF
 EOF
+}
+
+is_follower_town() {  # cron is switched off: the override binds jobs.empty.json, or jobs.json was emptied
+  grep -q "jobs.empty.json" "$1/docker-compose.override.yml" 2>/dev/null \
+    || grep -Eq '"jobs"[[:space:]]*:[[:space:]]*\[[[:space:]]*\]' "$1/cron/jobs.json" 2>/dev/null
+}
+
+refresh_cron() {  # a leader town's cron/jobs.json ← the repo's schedule
+  local town="$1" jobs="$1/cron/jobs.json"
+  if is_follower_town "$town"; then
+    echo "$jobs left alone: follower town (cron switched off)"
+    return
+  fi
+  if [[ ! -f "$REPO/cron/jobs.json" ]]; then
+    echo "missing schedule: $REPO/cron/jobs.json" >&2; exit 4
+  fi
+  if cmp -s "$REPO/cron/jobs.json" "$jobs"; then
+    echo "$jobs is up to date with the repo's schedule"
+    return
+  fi
+  mkdir -p "$town/cron"
+  if [[ -f "$jobs" ]]; then
+    local backup
+    backup="$jobs.bak-$(date +%Y%m%d-%H%M%S)"
+    cp -p "$jobs" "$backup"
+    echo "refreshed $jobs from $REPO/cron/jobs.json (previous: $backup)."
+    echo "Hermes' run state in it (next/last run, pauses) starts over; apply with: cd $town && docker compose restart agent"
+  else
+    echo "wrote $jobs from $REPO/cron/jobs.json"
+  fi
+  cp "$REPO/cron/jobs.json" "$jobs"
 }
 
 if [[ "$RERENDER" == 1 ]]; then
@@ -229,6 +238,7 @@ if [[ "$RERENDER" == 1 ]]; then
     write_dashboard_override "$TARGET"
     echo "wrote $OVERRIDE (autonomous town: dashboard disabled) — apply with: cd $TARGET && docker compose up -d --remove-orphans"
   fi
+  refresh_cron "$TARGET"
   if cmp -s "$new" "$COMPOSE"; then
     echo "$COMPOSE is up to date with the template"
     exit 0
@@ -278,9 +288,11 @@ fi
 # real .env isn't populated with placeholders that ship secrets.
 cp "$TARGET/.env.example" "$TARGET/.env"
 
-# Cron: the repo's own schedule (cron/jobs.json — the one source of truth),
-# never a copy kept here. Per-town divergence goes in the town's
-# docker-compose.override.yml. Follower mode: `mv cron/jobs.empty.json cron/jobs.json`.
+# Cron: a copy of the repo's own schedule (cron/jobs.json — the one source of
+# truth; this folder keeps no schedule of its own). The town gets a copy, not a
+# mount, because Hermes writes run state back into it; `--rerender` refreshes
+# the copy from the repo (leader towns only). Per-town divergence goes in the
+# town's docker-compose.override.yml. Follower mode: `mv cron/jobs.empty.json cron/jobs.json`.
 if [[ ! -f "$REPO/cron/jobs.json" ]]; then
   echo "missing schedule: $REPO/cron/jobs.json" >&2; exit 4
 fi
@@ -296,7 +308,8 @@ if ! docker network inspect firecrawl-shared-net >/dev/null 2>&1; then
   echo "  docker compose -f $TEMPLATES/_shared/firecrawl/docker-compose.yml up -d" >&2
 fi
 if ! docker network inspect egress-net >/dev/null 2>&1; then
-  echo "warning: docker network egress-net not found — start the shared egress stack first:" >&2
+  echo "warning: docker network egress-net not found — generate the allowlist and start the shared egress stack first:" >&2
+  echo "  $REPO/bin/townloops-agent-add --egress" >&2
   echo "  docker compose -f $TEMPLATES/_shared/egress/docker-compose.yml up -d" >&2
 fi
 

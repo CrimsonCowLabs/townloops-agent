@@ -60,7 +60,8 @@ from engine import firecrawl_env
 # behavior), it can pass tz_=... to any of the helpers below or reassign
 # ingest_core.DEFAULT_TZ at import time.
 
-DEFAULT_TZ = tz.gettz(os.environ.get("AGENT_TZ", "America/Los_Angeles"))
+DEFAULT_TZ_NAME = "America/Los_Angeles"   # AGENT_TZ unset (legacy SLT parity)
+DEFAULT_TZ = tz.gettz(os.environ.get("AGENT_TZ", DEFAULT_TZ_NAME))
 
 
 def _now_pt(tz_=None) -> datetime:

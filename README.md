@@ -16,6 +16,13 @@ Every deployment cascades: research sources → ingest events → mine + enrich 
 
 ## Deploy
 
+**Operators: follow [docs/vps-quickstart.md](docs/vps-quickstart.md).** That is the one documented
+deployment: one repo checkout, `bin/townloops-agent-add <slug>` scaffolding a folder per town under
+`~/townloops-agents/`, and the shared Firecrawl + Squid egress stacks in `templates/_shared/`.
+
+The repo-root `docker-compose.yml` below is the **single-town developer setup** (a clone per town,
+Firecrawl bundled, no egress proxy) — for working on the agent, not for running towns.
+
 ```bash
 git clone <repo> ~/townloops-agent-<town>
 cd ~/townloops-agent-<town>

@@ -69,8 +69,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     town-scoped `Idempotency-Key`, and `verify_town()` (fail-closed cross-town guard).
   - `egress.py` — `render_squid_conf([(slug, allowed_hosts)])` → the whole shared `squid.conf` (pure, no I/O):
     fixed `PLATFORM` block (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk) + per town one `acl town_<slug>` and
-    its `http_access allow`, `deny all` last; entries → `.host` form, a scheme/path/port/wildcard is an
-    `EgressError` naming town + entry; sorted, byte-identical on rerun. Invoked by `townloops-agent-add --egress`.
+    its `http_access allow`, `deny all` last; entries → `.host` form, a scheme/path/port/wildcard, an IP literal or
+    a public suffix (`PUBLIC_SUFFIXES`, `co.uk`-shaped ccTLD levels) is an `EgressError` naming town + entry;
+    sorted, byte-identical on rerun. `towns_from(base_dir)` reads the profiles (non-slug folders like `slt.bak`,
+    `_egress` skipped with a note; a non-mapping profile is an error naming the file); `main` (`python -m
+    engine.egress BASE_DIR`, what `townloops-agent-add --egress` runs) writes `BASE_DIR/_egress/squid.conf`.
   - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
     `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
     same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"),
@@ -284,11 +287,15 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   Idempotency-Key dedup makes duplicate POSTs safe. See README §"Second instance / failover".
 - **The scaffolder hands out the repo's own artifacts.** `bin/townloops-agent-add <slug>` copies `cron/jobs.json`
   verbatim (no second schedule — per-town divergence goes in the town's `docker-compose.override.yml`) and
-  renders `{{SLUG}}`/`{{REPO}}`/`{{CODEX_HOME}}` (repo it runs from, `$HOME/.codex`) — never a host path in
-  `templates/`; `--rerender` re-applies them. `tests/test_townloops_agent_add.py` runs the real template and
+  renders `{{SLUG}}`/`{{REPO}}`/`{{CODEX_HOME}}` (repo it runs from, `$CODEX_HOME` else `$HOME/.codex`; a `:` in
+  either path is refused) — never a host path in `templates/`; `--rerender` re-applies them and refreshes a
+  leader town's `cron/jobs.json` from the repo (a follower's — `jobs.empty.json` bound by the override, or an
+  emptied `jobs.json` — is left alone). `tests/test_townloops_agent_add.py` runs the real template and
   asserts everything a scaffolded town schedules exists. `--egress` compiles every town's `allowed_hosts`
-  under `TOWNLOOPS_AGENTS_ROOT` into `templates/_shared/egress/squid.conf` (generated — never hand-edit; written
-  in place) and prints, but never runs, the shared reload (`docker exec squid-egress squid -k reconfigure`).
+  under `TOWNLOOPS_AGENTS_ROOT` into `$TOWNLOOPS_AGENTS_ROOT/_egress/squid.conf` — outside the repo, the file the
+  shared egress compose mounts (generated — never hand-edit; written in place) — and prints, but never runs, the
+  shared reload (`docker exec squid-egress squid -k reconfigure`). `templates/_shared/egress/squid.conf` is the
+  legacy hand-written list, unmounted, kept only for a `squid-egress` created before the move (recreate it once).
 - **Firecrawl is always the local instance, never cloud.** Every Firecrawl call resolves its endpoint through
   `engine/firecrawl_env.base_url()` (`TOWNLOOPS_FIRECRAWL_URL` → `FIRECRAWL_API_URL`); unset, or a
   `firecrawl.dev` URL, raises `FirecrawlNotConfigured`. Don't add a cloud default or a second endpoint resolver.

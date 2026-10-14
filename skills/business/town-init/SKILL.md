@@ -32,14 +32,14 @@ python skills/business/town-init/init.py status
 2. Apply pending SQL migrations from `/app/engine/migrations/`.
 3. Run preflight.
 
-Prints a JSON summary to stdout (`findings`, `ok`) and preflight's human report to stderr. Exit 0 when
-preflight has no errors, 1 otherwise — `ok: true` means the town will work, not just that setup ran.
+Prints a JSON summary to stdout (`findings`, `ok`) and preflight's human report to stderr. **Exits 1 on
+any preflight error** (0 when there are none) — `ok: true` means the town will work, not just that setup ran.
 
 ### `preflight`
 Read-only and cheap (`engine/preflight.py`): no writes, no probe-by-create, no pagination, the state DB
 opened read-only. Each finding is a severity (`error` = the agent cannot work, `warning` = it works with a
 piece missing, `info` = can't be checked), a stable `code`, the file + key it concerns, and the
-consequence. Exit 0 with no errors, 1 with any — warnings never fail. `--json` prints
+consequence. **Exits 1 on any error**, 0 otherwise — warnings never fail. `--json` prints
 `{"ok", "findings": [{severity, code, where, message, detail}]}`.
 
 Checks: TownLoops healthz + one-row read + `verify_town()` (`api-unreachable`, `credential-rejected`,
@@ -47,11 +47,13 @@ Checks: TownLoops healthz + one-row read + `verify_town()` (`api-unreachable`, `
 `profile-unverifiable` info for `name`/`region`); every `discovery.community.query_groups[].category_slug`
 against the snapshot (`category-unknown` lists the known slugs, `category-snapshot-stale` when live has it
 — re-run `setup`; `categories-snapshot-missing`); operating mode (`dashboard-password-missing` supervised,
+`dashboard-parked-supervised` warning when a supervised town's override parks the dashboard,
 `dashboard-enabled-autonomous` when `docker-compose.override.yml` doesn't park the dashboard,
 `dashboard-unverified` when the town folder isn't visible — set `TOWNLOOPS_TOWN_DIR`); an open autonomy
 circuit (`circuit-open`, reason + evidence verbatim — the publish-key case included; `state-db-missing`);
 Firecrawl (`firecrawl-not-configured` incl. cloud, `firecrawl-unreachable`); `codex-login-missing`;
-`AGENT_TZ` (`tz-invalid`, `tz-fallback`); `listmonk-unconfigured` / `listmonk-unreachable` and, autonomous
+`AGENT_TZ` (`tz-invalid`; `tz-fallback` unset / `tz-region-mismatch` set to the Pacific default while the
+profile's `region` isn't CA/WA/OR/NV/BC); `listmonk-unconfigured` / `listmonk-unreachable` and, autonomous
 only, `telegram-missing` (warnings).
 
 ### `status`

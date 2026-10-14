@@ -1,16 +1,20 @@
 """The shared Squid egress allowlist, compiled from every town's `allowed_hosts`.
 
-`render_squid_conf(towns)` is the whole module: a list of `(slug, allowed_hosts)`
-in, the full `squid.conf` text out. No I/O — `bin/townloops-agent-add --egress`
-reads the town profiles and writes the file.
+`render_squid_conf(towns)` is the core: a list of `(slug, allowed_hosts)` in,
+the full `squid.conf` text out, no I/O. `towns_from(base_dir)` reads every
+town's `town-profile.yaml` under $TOWNLOOPS_AGENTS_ROOT (a folder whose name
+isn't a slug — `slt.bak`, `_egress` — is skipped with a note, not fatal), and
+`main()` is what `bin/townloops-agent-add --egress` runs: compile, then write
+`<base_dir>/_egress/squid.conf` in place.
 
 The platform block (the LLM, TownLoops, Telegram, Listmonk) is always emitted,
 so regenerating can never cut an agent off from what it ships to. Each town
 adds one `acl town_<slug> dstdomain …` and its `http_access allow town_<slug>`,
 emitted together. Entries are normalized to Squid's leading-dot dstdomain form
 (the host and its subdomains); anything that isn't a bare hostname — a scheme,
-a path, a port, a wildcard — is an error naming the town and the entry, so a
-typo can't silently widen the boundary. Output is sorted: the same profiles
+a path, a port, a wildcard, an IP literal, or a public suffix that would open a
+whole registry (`co.uk`, `github.io`, …) — is an error naming the town and the
+entry, so a typo can't silently widen the boundary. Output is sorted: the same profiles
 give byte-identical text.
 
 Firecrawl is not here: agents reach the local instance in-network (NO_PROXY),
@@ -20,13 +24,33 @@ and the cloud service is never allowed (engine/firecrawl_env.py).
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+import sys
+from collections.abc import Callable, Iterable
+from pathlib import Path
 
 GENERATOR = "bin/townloops-agent-add --egress (engine/egress.py)"
 
 _SLUG = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
 _LABEL = r"[a-z0-9]([a-z0-9-]*[a-z0-9])?"
 _HOST = re.compile(rf"^{_LABEL}(\.{_LABEL})+$")
+
+
+# Where --egress writes, relative to $TOWNLOOPS_AGENTS_ROOT — outside the repo,
+# so a generated, host-specific file never dirties the checkout.
+OUT_DIR = "_egress"
+OUT_NAME = "squid.conf"
+
+# Public suffixes a town might plausibly type: allowing one would allow every
+# site registered under it. Not the full Public Suffix List — the shared
+# hosting platforms and the second-level ccTLD shapes (_CC_SECOND_LEVEL).
+PUBLIC_SUFFIXES = frozenset({
+    "co.uk", "org.uk", "ac.uk", "gov.uk", "com.au", "net.au", "org.au", "co.nz",
+    "github.io", "gitlab.io", "herokuapp.com", "appspot.com", "vercel.app",
+    "netlify.app", "pages.dev", "workers.dev", "web.app", "firebaseapp.com",
+    "blogspot.com", "wordpress.com", "wixsite.com", "squarespace.com",
+    "weebly.com", "azurewebsites.net", "cloudfront.net", "amazonaws.com",
+})
+_CC_SECOND_LEVEL = {"co", "com", "net", "org", "gov", "govt", "edu", "ac", "mil", "nic", "ltd", "plc", "sch"}
 
 
 class EgressError(ValueError):
@@ -80,7 +104,27 @@ def _normalize(slug: str, entry: object) -> str:
         raise EgressError(
             f"town {slug!r}: allowed_hosts entry {entry!r} is not a bare hostname "
             f"(write it like 'example.org' — no scheme, path, port or wildcard)")
+    labels = bare.split(".")
+    if labels[-1].isdigit():
+        raise EgressError(
+            f"town {slug!r}: allowed_hosts entry {entry!r} is an IP address — "
+            f"name the site's hostname instead")
+    if _is_public_suffix(labels):
+        raise EgressError(
+            f"town {slug!r}: allowed_hosts entry {entry!r} is a public suffix — it would "
+            f"allow every site under it; name the site itself (e.g. 'mysite.{bare}')")
     return "." + bare
+
+
+def _is_public_suffix(labels: list[str]) -> bool:
+    if len(labels) < 2:  # a bare TLD (the hostname pattern already refuses one)
+        return True
+    if ".".join(labels) in PUBLIC_SUFFIXES:
+        return True
+    if len(labels) == 2 and len(labels[1]) == 2:  # a ccTLD's registry level
+        # co.uk, com.au, … and the US state level (ca.us, nv.us).
+        return labels[0] in _CC_SECOND_LEVEL or (labels[1] == "us" and len(labels[0]) == 2)
+    return False
 
 
 def _collapse(hosts: set[str]) -> list[str]:
@@ -141,3 +185,82 @@ def _allow(name: str, hosts: list[str]) -> str:
 def _town_acl(slug: str) -> str:
     # Slugs never hold '_', so swapping '-' for it can't make two towns collide.
     return "town_" + slug.replace("-", "_")
+
+
+# --------------------------------------------------------------------------
+# Reading the towns + writing the file (bin/townloops-agent-add --egress)
+# --------------------------------------------------------------------------
+
+def _stderr(msg: str) -> None:
+    print(msg, file=sys.stderr)
+
+
+def towns_from(base_dir: Path | str,
+               note: Callable[[str], None] = _stderr) -> list[tuple[str, list]]:
+    """`(slug, allowed_hosts)` for every `<base_dir>/<slug>/town-profile.yaml`.
+
+    A folder whose name isn't a slug (a backup like `slt.bak`, this module's own
+    `_egress`) is skipped with a `note`, so one stray copy can't fail every
+    town. A profile that isn't a YAML mapping, or whose allowed_hosts isn't a
+    list, is an `EgressError` naming the file.
+    """
+    import yaml
+
+    towns = []
+    for profile in sorted(Path(base_dir).glob("*/town-profile.yaml")):
+        slug = profile.parent.name
+        if not _SLUG.match(slug):
+            note(f"skipping {profile.parent}: {slug!r} is not a town slug (not a town folder)")
+            continue
+        try:
+            data = yaml.safe_load(profile.read_text())
+        except (OSError, yaml.YAMLError) as e:
+            raise EgressError(f"{profile}: not readable YAML: {e}") from None
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise EgressError(f"{profile}: not a YAML mapping (got {type(data).__name__})")
+        hosts = data.get("allowed_hosts") or []
+        if not isinstance(hosts, list):
+            raise EgressError(f"{profile}: allowed_hosts must be a list of hostnames")
+        towns.append((slug, hosts))
+    return towns
+
+
+def compile_from(base_dir: Path | str, note: Callable[[str], None] = _stderr) -> str:
+    """The squid.conf for every town under `base_dir`."""
+    return render_squid_conf(towns_from(base_dir, note))
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m engine.egress BASE_DIR` — write BASE_DIR/_egress/squid.conf."""
+    args = sys.argv[1:] if argv is None else argv
+    if len(args) != 1:
+        _stderr("usage: python -m engine.egress BASE_DIR")
+        return 2
+    base = Path(args[0])
+    out = base / OUT_DIR / OUT_NAME
+    try:
+        towns = towns_from(base)
+        text = render_squid_conf(towns)
+    except EgressError as e:
+        _stderr(f"{e} — {out} unchanged")
+        return 1
+    names = ", ".join(slug for slug, _ in towns) or "none"
+    if out.exists() and out.read_text() == text:
+        print(f"{out} unchanged (towns: {names})")
+        return 0
+    out.parent.mkdir(parents=True, exist_ok=True)
+    # In place: the shared Squid bind-mounts this one file, and a new inode
+    # (write-and-rename) would leave the running container on the old copy.
+    with open(out, "r+" if out.exists() else "w") as f:
+        f.write(text)
+        f.truncate()
+    print(f"wrote {out} (towns: {names})")
+    print("Reload the shared Squid (every town's egress goes through it):")
+    print("  docker exec squid-egress squid -k reconfigure")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

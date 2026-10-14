@@ -235,6 +235,18 @@ def test_autonomous_without_a_visible_town_dir_is_a_warning(town, monkeypatch):
     assert "dashboard-unverified" in town.codes("warning")
 
 
+def test_supervised_with_the_dashboard_parked_is_a_warning(town):
+    (town.dir / "docker-compose.override.yml").write_text(
+        'services: {dashboard: {profiles: ["supervised-dashboard"]}}\n')
+    assert "dashboard-parked-supervised" in town.codes("warning")
+
+
+def test_supervised_without_a_visible_town_dir_is_not_second_guessed(town, monkeypatch):
+    monkeypatch.setenv("TOWNLOOPS_TOWN_DIR", str(town.dir / "nope"))
+    assert "dashboard-parked-supervised" not in town.codes()
+    assert "dashboard-unverified" not in town.codes()
+
+
 def test_autonomous_does_not_need_a_dashboard_password(town, monkeypatch):
     _autonomous(town)
     monkeypatch.setenv("DASHBOARD_PASSWORD", "")
@@ -299,9 +311,40 @@ def test_an_invalid_timezone_is_an_error(town, monkeypatch):
     assert "tz-invalid" in town.codes("error")
 
 
-def test_the_pacific_fallback_timezone_is_a_warning(town, monkeypatch):
+def test_the_pacific_fallback_timezone_is_a_warning_outside_pacific_time(town, monkeypatch):
     monkeypatch.delenv("AGENT_TZ")
+    town.profile["region"] = "Colorado"
     assert "tz-fallback" in town.codes("warning")
+
+
+@pytest.mark.parametrize("region", ["California", "CA", "ca", " nevada ", "Oregon", "WA",
+                                    "Washington", "British Columbia", "bc"])
+def test_the_pacific_fallback_is_fine_in_a_pacific_region(town, monkeypatch, region):
+    monkeypatch.delenv("AGENT_TZ")
+    town.profile["region"] = region
+    assert not {"tz-fallback", "tz-region-mismatch"} & town.codes()
+
+
+def test_an_explicit_pacific_timezone_outside_pacific_time_is_a_warning(town, monkeypatch):
+    monkeypatch.setenv("AGENT_TZ", "America/Los_Angeles")
+    town.profile["region"] = "Montana"
+    assert "tz-region-mismatch" in town.codes("warning")
+
+
+def test_an_explicit_pacific_timezone_in_california_is_fine(town, monkeypatch):
+    monkeypatch.setenv("AGENT_TZ", "America/Los_Angeles")
+    assert not {"tz-fallback", "tz-region-mismatch"} & town.codes()
+
+
+def test_a_non_pacific_timezone_is_never_second_guessed(town):
+    town.profile["region"] = "California"  # AGENT_TZ is America/Denver in the fixture
+    assert not {"tz-fallback", "tz-region-mismatch"} & town.codes()
+
+
+def test_the_fallback_is_ingest_cores_default():
+    from engine import ingest_core
+    assert ingest_core.DEFAULT_TZ_NAME == "America/Los_Angeles"
+    assert not hasattr(preflight, "FALLBACK_TZ")
 
 
 # --------------------------------------------------------------------------

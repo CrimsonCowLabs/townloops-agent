@@ -29,6 +29,7 @@ from typing import Callable, Optional
 
 from engine import autonomy, db, firecrawl_env, policy
 from engine.derive_helpers import load_town_profile
+from engine.ingest_core import DEFAULT_TZ_NAME
 
 ERROR, WARNING, INFO = "error", "warning", "info"
 PROFILE = "town-profile.yaml"
@@ -36,7 +37,9 @@ ENV = ".env"
 # The compose profile bin/townloops-agent-add's autonomous override parks the
 # dashboard behind — the same marker its `--rerender` check greps for.
 DASHBOARD_PROFILE = "supervised-dashboard"
-FALLBACK_TZ = "America/Los_Angeles"   # engine/ingest_core.DEFAULT_TZ's default
+# `region` values on Pacific time — where the Pacific default is plausibly right.
+PACIFIC_REGIONS = frozenset({"ca", "california", "wa", "washington", "or", "oregon",
+                             "nv", "nevada", "bc", "british columbia"})
 PLACEHOLDER = "PLACEHOLDER"
 
 
@@ -69,7 +72,7 @@ def run(client=None, *, profile: Optional[dict] = None,
     _circuit(out)
     _firecrawl(http_get or _http_get, out)
     _codex(out)
-    _timezone(out)
+    _timezone(profile or {}, out)
     _listmonk(listmonk, out)
     if s.autonomous and not (_env("TELEGRAM_BOT_TOKEN") and _env("TELEGRAM_CHAT_ID")):
         out.append(Finding(WARNING, "telegram-missing", f"{ENV}: TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID",
@@ -169,24 +172,26 @@ def _categories(profile: dict, client, out: list[Finding]) -> None:
 
 
 def _operating_mode(s: autonomy.Settings, out: list[Finding]) -> None:
+    town_dir = _town_dir()
     if not s.autonomous:
         if not _env("DASHBOARD_PASSWORD"):
             out.append(Finding(ERROR, "dashboard-password-missing", f"{ENV}: DASHBOARD_PASSWORD",
                                "supervised mode reviews in the dashboard, and every login fails "
                                "without a password hash"))
+        if town_dir is not None and DASHBOARD_PROFILE in _read(town_dir / "docker-compose.override.yml"):
+            out.append(Finding(WARNING, "dashboard-parked-supervised",
+                               f"{town_dir / 'docker-compose.override.yml'}: services.dashboard.profiles",
+                               f"supervised mode but the dashboard is parked behind the "
+                               f"{DASHBOARD_PROFILE!r} profile — nothing gets reviewed until you "
+                               "remove it (or set operating_mode: autonomous)"))
         return
-    town_dir = _town_dir()
     if town_dir is None:
         out.append(Finding(WARNING, "dashboard-unverified", "docker-compose.override.yml",
                            "can't see the town folder from here (set TOWNLOOPS_TOWN_DIR or run "
                            "on the host) — the dashboard being off is unchecked"))
         return
     override = town_dir / "docker-compose.override.yml"
-    try:
-        text = override.read_text()
-    except OSError:
-        text = ""
-    if DASHBOARD_PROFILE not in text:
+    if DASHBOARD_PROFILE not in _read(override):
         out.append(Finding(ERROR, "dashboard-enabled-autonomous", f"{override}: services.dashboard.profiles",
                            f"autonomous mode but the dashboard isn't parked behind the "
                            f"{DASHBOARD_PROFILE!r} profile — add "
@@ -194,7 +199,7 @@ def _operating_mode(s: autonomy.Settings, out: list[Finding]) -> None:
 
 
 def _circuit(out: list[Finding]) -> None:
-    path = Path(db._db_path_from_env())
+    path = Path(db.db_path_from_env())
     if not path.exists():
         out.append(Finding(WARNING, "state-db-missing", str(path),
                            "no state DB yet (run `town-init setup`) — the autonomy circuit is unchecked"))
@@ -242,19 +247,33 @@ def _codex(out: list[Finding]) -> None:
                            "no-ops; run `codex login` on the host"))
 
 
-def _timezone(out: list[Finding]) -> None:
+def _timezone(profile: dict, out: list[Finding]) -> None:
+    """An invalid zone is an error; the Pacific default (unset, or set to it)
+    is a warning only when the profile's region isn't on Pacific time."""
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
     name = _env("AGENT_TZ")
+    if name:
+        try:
+            ZoneInfo(name)
+        except (ZoneInfoNotFoundError, ValueError):
+            out.append(Finding(ERROR, "tz-invalid", f"{ENV}: AGENT_TZ",
+                               f"{name!r} is not a time zone — every event date would be wrong"))
+            return
+    if (name or DEFAULT_TZ_NAME) != DEFAULT_TZ_NAME or _pacific_region(profile.get("region")):
+        return
+    region = str(profile.get("region") or "").strip() or "unset"
     if not name:
         out.append(Finding(WARNING, "tz-fallback", f"{ENV}: AGENT_TZ",
-                           f"unset, so every date is computed in {FALLBACK_TZ} — set it if "
-                           "the town isn't on Pacific time"))
-        return
-    try:
-        ZoneInfo(name)
-    except (ZoneInfoNotFoundError, ValueError):
-        out.append(Finding(ERROR, "tz-invalid", f"{ENV}: AGENT_TZ",
-                           f"{name!r} is not a time zone — every event date would be wrong"))
+                           f"unset, so every date is computed in {DEFAULT_TZ_NAME}, but the "
+                           f"town's region ({region}) isn't on Pacific time — set it"))
+    else:
+        out.append(Finding(WARNING, "tz-region-mismatch", f"{ENV}: AGENT_TZ",
+                           f"set to {DEFAULT_TZ_NAME}, but the town's region ({region}) isn't on "
+                           "Pacific time — every event date may be off by hours"))
+
+
+def _pacific_region(region) -> bool:
+    return str(region or "").strip().lower() in PACIFIC_REGIONS
 
 
 def _listmonk(factory: Optional[Callable], out: list[Finding]) -> None:
@@ -278,6 +297,13 @@ def _listmonk(factory: Optional[Callable], out: list[Finding]) -> None:
 
 def _env(key: str) -> str:
     return (os.environ.get(key) or "").strip()
+
+
+def _read(path: Path) -> str:
+    try:
+        return path.read_text()
+    except OSError:
+        return ""
 
 
 def _town_dir() -> Optional[Path]:

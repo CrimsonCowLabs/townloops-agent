@@ -13,12 +13,14 @@ from pathlib import Path
 # event-source-discovery, newsletter-weekly). db.py used to hardcode
 # /home/agent/.hermes/... which broke bare-systemd deploys where the agent
 # home isn't `/home/agent/`. Fixed 2026-07-08 to match the pattern.
-def _db_path_from_env() -> str:
+def db_path_from_env() -> str:
+    """The state DB path the environment names right now ($TOWNLOOPS_DB_PATH,
+    else $HERMES_HOME/state/townloops.db) — unlike DEFAULT_DB_PATH, read fresh."""
     return os.environ.get("TOWNLOOPS_DB_PATH") or os.path.join(
         os.environ.get("HERMES_HOME", "/home/agent/.hermes"), "state", "townloops.db")
 
 
-DEFAULT_DB_PATH = _db_path_from_env()
+DEFAULT_DB_PATH = db_path_from_env()
 MIGRATIONS_DIR = Path(__file__).parent / "migrations"
 
 
@@ -144,7 +146,7 @@ def migrate(path: str | None = None) -> list[str]:
     an older schema. The path is resolved now, not at import, so it follows
     the caller's TOWNLOOPS_DB_PATH / HERMES_HOME.
     """
-    conn = connect(path or _db_path_from_env())
+    conn = connect(path or db_path_from_env())
     try:
         return run_migrations(conn)
     finally:

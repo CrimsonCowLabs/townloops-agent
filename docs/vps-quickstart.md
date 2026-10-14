@@ -252,9 +252,24 @@ cd ~/workspace/townloops-agent
 # Firecrawl (5 containers — takes about a minute the first time to download)
 docker compose -f templates/_shared/firecrawl/docker-compose.yml up -d
 
-# Squid egress
+# Squid egress — first generate its allowlist (written outside the repo, to
+# ~/townloops-agents/_egress/squid.conf; with no towns yet it holds just the
+# hosts every agent needs), then start it
+./bin/townloops-agent-add --egress
 docker compose -f templates/_shared/egress/docker-compose.yml up -d
 ```
+
+The Squid allowlist lives at `~/townloops-agents/_egress/squid.conf`
+(`$TOWNLOOPS_AGENTS_ROOT/_egress/` if you set that variable — set it the
+same way for the generator and for `docker compose up`). It's generated;
+never edit it.
+
+**Upgrading a server set up before the allowlist moved out of the repo?**
+Once: run `./bin/townloops-agent-add --egress`, then
+`docker compose -f templates/_shared/egress/docker-compose.yml up -d` —
+that recreates `squid-egress` on the new file (the mount changed, so a
+reload alone keeps it on the old one). From then on,
+`docker exec squid-egress squid -k reconfigure` is enough.
 
 **Check they're all healthy**:
 
@@ -302,7 +317,14 @@ Later, to pick up a newer compose template for an existing town, run
 The command first checks that the town's `hermes-home` folder and its logins are
 in place, and it refuses to re-render if they aren't. It keeps the old file as a
 backup and shows you the diff. Put host-specific edits in the town's
-`docker-compose.override.yml`.
+`docker-compose.override.yml`. It also refreshes the town's `cron/jobs.json`
+from the repo's schedule (old copy kept as `jobs.json.bak-<time>`; restart the
+agent to load it) — except on a follower, whose switched-off schedule it
+leaves alone.
+
+The scaffolder mounts your Codex CLI login from `$CODEX_HOME` if you set it,
+else `~/.codex`. Keep the repo at a path without a `:` — Docker's volume
+syntax can't take one, and the scaffolder refuses.
 
 ### Fill in the `.env` file
 
@@ -413,9 +435,10 @@ any, so you can use it in a script. A few you may see:
 | `category-snapshot-stale` | Your profile is right; re-run `setup` to refresh the category list |
 | `dashboard-password-missing` | Supervised town without `DASHBOARD_PASSWORD` — see above |
 | `dashboard-enabled-autonomous` | Autonomous town whose `docker-compose.override.yml` doesn't park the dashboard |
+| `dashboard-parked-supervised` | Supervised town whose override still parks the dashboard — remove the `supervised-dashboard` profile line, or switch the town to autonomous |
 | `firecrawl-unreachable` | Start the shared Firecrawl stack (Step 4) |
 | `codex-login-missing` | Run `codex login` on the server (Step 3c) |
-| `tz-invalid` / `tz-fallback` | Set `AGENT_TZ` to your town's zone |
+| `tz-invalid` / `tz-fallback` / `tz-region-mismatch` | Set `AGENT_TZ` to your town's zone (Pacific time is the default; preflight warns when your `region` isn't CA/WA/OR/NV/BC) |
 | `circuit-open` | Submissions are stopped — the finding says why; fix it, then run `autonomy resume` |
 
 Preflight runs inside the agent container, which can't see the town
@@ -630,8 +653,10 @@ overwrites it. To allow a website:
 
 1. Add it to the town's `allowed_hosts` — just the host, like
    `visitexample.com` (no `https://`, no path; those are rejected).
-2. Regenerate the shared `templates/_shared/egress/squid.conf` from all
-   towns' profiles:
+2. Regenerate the shared `~/townloops-agents/_egress/squid.conf` from all
+   towns' profiles (a folder that isn't a town, like `slt.bak`, is skipped
+   with a note; an entry that's an IP address or a whole hosting platform
+   like `github.io` is refused — name the site itself):
 
    ```
    cd ~/workspace/townloops-agent
@@ -646,7 +671,9 @@ overwrites it. To allow a website:
    ```
 
 Reloading doesn't interrupt running agents; the website becomes reachable
-on the next connection. Running `--egress` again with no profile change
+on the next connection. (If `squid-egress` was created before the allowlist
+moved to `~/townloops-agents/_egress/`, reload isn't enough once: recreate it
+with `docker compose -f templates/_shared/egress/docker-compose.yml up -d`.) Running `--egress` again with no profile change
 leaves the file unchanged.
 
 ### The Telegram messages stopped
@@ -706,10 +733,13 @@ cd ~/workspace/townloops-agent
 git pull
 docker compose build agent
 
-# Restart every town so it picks up the new engine/skills code, then check it.
-for town in ~/townloops-agents/*/; do
-  cd "$town"
+# Re-render every town (compose from the template, and a leader's cron
+# schedule from the repo's), restart it on the new engine/skills code, check it.
+for town in ~/townloops-agents/*/docker-compose.yml; do
+  cd "$(dirname "$town")"
+  ~/workspace/townloops-agent/bin/townloops-agent-add "$(basename "$PWD")" --rerender
   docker compose up -d
+  docker compose restart agent   # reload the refreshed cron/jobs.json
   docker compose exec agent /usr/bin/python3 /home/agent/.hermes/skills/business/town-init/init.py preflight
 done
 ```
@@ -745,8 +775,8 @@ To tear down the entire installation:
 
 ```
 # Stop every town
-for town in ~/townloops-agents/*/; do
-  cd "$town" && docker compose down
+for town in ~/townloops-agents/*/docker-compose.yml; do
+  cd "$(dirname "$town")" && docker compose down
 done
 
 # Stop shared services

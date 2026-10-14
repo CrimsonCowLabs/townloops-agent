@@ -6,11 +6,18 @@
 # and each town's town-profile.yaml allowed_hosts). Firecrawl is local and
 # reached in-network, never through this proxy.
 #
-# squid.conf is GENERATED — never edit it. After changing any town's
-# allowed_hosts:
+# squid.conf is GENERATED, outside the repo, at
+#   ${TOWNLOOPS_AGENTS_ROOT:-$HOME/townloops-agents}/_egress/squid.conf
+# by `bin/townloops-agent-add --egress` — never edit it. Run the generator
+# before the first `up` (Squid won't start without the file). After changing
+# any town's allowed_hosts:
 #   bin/townloops-agent-add --egress
 #   docker exec squid-egress squid -k reconfigure
 # A host every agent needs belongs in engine/egress.py's PLATFORM block.
+# Set TOWNLOOPS_AGENTS_ROOT the same for the generator and for `up`.
+# (./squid.conf next to this file is the legacy hand-written list, no longer
+# mounted. A container created before the move still mounts it: recreate it
+# once with the `up -d` below — after that, reconfigure is enough.)
 #
 # The container itself is intentionally simple — squid, plain config, no
 # TLS interception; the access log feeds the dashboard's Blocked page.
@@ -26,7 +33,7 @@ services:
     networks:
       - egress-net
     volumes:
-      - ./squid.conf:/etc/squid/squid.conf:ro
+      - ${TOWNLOOPS_AGENTS_ROOT:-${HOME}/townloops-agents}/_egress/squid.conf:/etc/squid/squid.conf:ro
       # Shared named volume so per-town dashboard containers can read
       # /var/log/squid/access.log to surface DENIED requests in the UI.
       - squid-egress-log:/var/log/squid

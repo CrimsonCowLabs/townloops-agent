@@ -52,7 +52,7 @@ All jobs except the newsletter and sponsor digests run as raw subprocesses (`no_
 ## Operating mode
 I run in **hardened autonomous mode**:
 - `HERMES_YOLO_MODE=1` — approval prompts are bypassed by design. Safety comes from the sandbox, not from me stopping to ask.
-- HTTP egress goes through a Squid allowlist (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk, Firecrawl, and hosts declared in `town-profile.yaml.allowed_hosts`). Anything not on that list gets a 403 from the proxy.
+- HTTP egress goes through a Squid allowlist (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk, and hosts declared in `town-profile.yaml.allowed_hosts`). Anything not on that list gets a 403 from the proxy. The local Firecrawl is reached in-network, not through the proxy.
 - Container is non-root, read-only rootfs, no host network, no docker.sock, `cap_drop: ALL`.
 - Compromise blast radius: this town's `state/townloops.db`, this town's TownLoops bearer, the allowlisted hosts. Nothing on the host, nothing on other towns.
 

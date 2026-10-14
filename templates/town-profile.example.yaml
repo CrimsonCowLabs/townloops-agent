@@ -7,9 +7,10 @@ region: "PLACEHOLDER — state/province, e.g. \"California\""
 
 # Hosts this town's agent may reach directly through the shared Squid egress
 # proxy (each entry also allows its subdomains). Compiled into
-# templates/_shared/egress/squid.conf by `bin/townloops-agent-add --egress`,
+# ~/townloops-agents/_egress/squid.conf by `bin/townloops-agent-add --egress`,
 # then `docker exec squid-egress squid -k reconfigure`. Bare hostnames only —
-# "example.org", not "https://example.org/events" (that's an error).
+# "example.org", not "https://example.org/events", an IP address, or a whole
+# hosting platform like "github.io" (those are errors).
 # Firecrawl scrapes don't go through Squid, so seeds scraped that way don't
 # need listing. Add carefully — every entry is an implicit trust decision.
 allowed_hosts:

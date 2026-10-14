@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import pytest
 
-from engine.egress import EgressError, render_squid_conf
+from engine.egress import EgressError, compile_from, main, render_squid_conf, towns_from
 
 
 def _lines(conf: str) -> list[str]:
@@ -141,3 +141,93 @@ def test_hardening_and_access_log_are_preserved():
                  "http_access deny !Safe_ports",
                  "http_access deny CONNECT !SSL_ports"):
         assert line in lines, line
+
+
+@pytest.mark.parametrize("entry", ["192.168.1.10", "10.0.0.1", ".127.0.0.1", "1.2.3.4"])
+def test_ip_literals_are_rejected_naming_town_and_entry(entry):
+    with pytest.raises(EgressError) as e:
+        render_squid_conf([("slt", [entry])])
+    assert "slt" in str(e.value) and repr(entry) in str(e.value)
+
+
+@pytest.mark.parametrize("entry", [
+    "co.uk", ".co.uk", "com.au", "org.uk", "github.io", "herokuapp.com", "appspot.com",
+    "vercel.app", "netlify.app", "pages.dev", "blogspot.com", "wordpress.com",
+    "wixsite.com", "squarespace.com", "ca.us", "gov.uk", "com", ".org",
+])
+def test_public_suffixes_are_rejected_naming_town_and_entry(entry):
+    with pytest.raises(EgressError) as e:
+        render_squid_conf([("good", ["fine.com"]), ("slt", [entry])])
+    assert "slt" in str(e.value) and repr(entry) in str(e.value)
+
+
+@pytest.mark.parametrize("entry", [
+    "tahoe.github.io", "bbc.co.uk", "slt.wordpress.com", "cityofslt.us",
+    "ci.south-lake-tahoe.ca.us", "tahoe.ca", "123events.com",
+])
+def test_a_site_under_a_public_suffix_is_fine(entry):
+    assert _acl(render_squid_conf([("t", [entry])]), "town_t") == ["." + entry]
+
+
+# ---- towns_from / compile_from: reading $TOWNLOOPS_AGENTS_ROOT -------------
+
+def _profile(base, slug, text):
+    (base / slug).mkdir(parents=True, exist_ok=True)
+    (base / slug / "town-profile.yaml").write_text(text)
+
+
+def test_towns_from_reads_every_town_profile(tmp_path):
+    _profile(tmp_path, "slt", "name: SLT\nallowed_hosts: [cityofslt.us]\n")
+    _profile(tmp_path, "north-shore", "name: NS\n")
+    _profile(tmp_path, "empty", "")
+    assert towns_from(tmp_path) == [("empty", []), ("north-shore", []), ("slt", ["cityofslt.us"])]
+    assert "acl town_slt dstdomain .cityofslt.us" in compile_from(tmp_path)
+
+
+def test_folders_that_are_not_town_slugs_are_skipped_with_a_note(tmp_path):
+    _profile(tmp_path, "slt", "allowed_hosts: [cityofslt.us]\n")
+    _profile(tmp_path, "slt.bak", "allowed_hosts: [https://broken]\n")
+    _profile(tmp_path, "_egress", "allowed_hosts: [evil.com]\n")
+    (tmp_path / "notes").mkdir()  # no profile at all: not a town, no note
+    notes: list[str] = []
+    assert towns_from(tmp_path, notes.append) == [("slt", ["cityofslt.us"])]
+    assert len(notes) == 2
+    assert any("slt.bak" in n for n in notes) and any("_egress" in n for n in notes)
+
+
+@pytest.mark.parametrize("text", ["- just\n- a list\n", "just a string\n", "42\n"])
+def test_a_profile_that_is_not_a_mapping_is_an_error_naming_the_file(tmp_path, text):
+    _profile(tmp_path, "slt", text)
+    with pytest.raises(EgressError) as e:
+        towns_from(tmp_path)
+    assert str(tmp_path / "slt" / "town-profile.yaml") in str(e.value)
+
+
+def test_invalid_yaml_and_a_non_list_allowed_hosts_name_the_file(tmp_path):
+    _profile(tmp_path, "slt", "allowed_hosts: [unclosed\n")
+    with pytest.raises(EgressError) as e:
+        towns_from(tmp_path)
+    assert "slt/town-profile.yaml" in str(e.value)
+    _profile(tmp_path, "slt", "allowed_hosts: cityofslt.us\n")
+    with pytest.raises(EgressError) as e:
+        towns_from(tmp_path)
+    assert "slt/town-profile.yaml" in str(e.value) and "list" in str(e.value)
+
+
+def test_main_writes_under_the_agents_root_not_the_repo(tmp_path, capsys):
+    _profile(tmp_path, "slt", "allowed_hosts: [cityofslt.us]\n")
+    assert main([str(tmp_path)]) == 0
+    out = tmp_path / "_egress" / "squid.conf"
+    assert "town_slt" in out.read_text()
+    assert "squid -k reconfigure" in capsys.readouterr().out
+    # the generated folder is never mistaken for a town on the next run
+    assert main([str(tmp_path)]) == 0
+    assert "unchanged" in capsys.readouterr().out
+
+
+def test_main_reports_a_bad_profile_without_a_traceback(tmp_path, capsys):
+    _profile(tmp_path, "slt", "- not a mapping\n")
+    assert main([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "slt/town-profile.yaml" in err and "Traceback" not in err
+    assert not (tmp_path / "_egress" / "squid.conf").exists()

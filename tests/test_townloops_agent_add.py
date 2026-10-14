@@ -27,7 +27,8 @@ def env(tmp_path):
     repo = tmp_path / "repo"
     for d in ("bin", "templates", "cron", "engine"):
         shutil.copytree(ROOT / d, repo / d)
-    return {**os.environ, "HOME": str(home), "TOWNLOOPS_AGENTS_ROOT": str(tmp_path / "towns"),
+    base = {k: v for k, v in os.environ.items() if k != "CODEX_HOME"}
+    return {**base, "HOME": str(home), "TOWNLOOPS_AGENTS_ROOT": str(tmp_path / "towns"),
             "TOWNLOOPS_CONTAINER_UID": str(os.getuid()), "ADD": str(repo / "bin" / "townloops-agent-add")}
 
 
@@ -261,7 +262,7 @@ def _towns_with_hosts(env, tmp_path, towns: dict[str, list[str]]) -> Path:
         data = yaml.safe_load(profile.read_text())
         data["allowed_hosts"] = hosts
         profile.write_text(yaml.safe_dump(data))
-    return tmp_path / "repo" / "templates" / "_shared" / "egress" / "squid.conf"
+    return tmp_path / "towns" / "_egress" / "squid.conf"
 
 
 def test_egress_compiles_every_towns_allowed_hosts(env, tmp_path):
@@ -290,14 +291,98 @@ def test_egress_rerun_is_a_byte_identical_noop_written_in_place(env, tmp_path):
 
 
 def test_egress_refuses_a_bad_entry_and_leaves_the_file(env, tmp_path):
-    conf = _towns_with_hosts(env, tmp_path, {"slt": ["https://cityofslt.us/events"]})
+    conf = _towns_with_hosts(env, tmp_path, {"slt": ["cityofslt.us"]})
+    assert run(env, "--egress").returncode == 0
     before = conf.read_text()
+    _towns_with_hosts(env, tmp_path, {"other": ["https://cityofslt.us/events"]})
     r = run(env, "--egress")
     assert r.returncode != 0
-    assert "slt" in r.stderr and "https://cityofslt.us/events" in r.stderr
+    assert "other" in r.stderr and "https://cityofslt.us/events" in r.stderr
+    assert "Traceback" not in r.stderr
     assert conf.read_text() == before
+
+
+def test_egress_writes_outside_the_repo_and_leaves_the_tracked_conf_alone(env, tmp_path):
+    tracked = tmp_path / "repo" / "templates" / "_shared" / "egress" / "squid.conf"
+    before = tracked.read_bytes()
+    conf = _towns_with_hosts(env, tmp_path, {"slt": ["cityofslt.us"]})
+    r = run(env, "--egress")
+    assert r.returncode == 0, r.stderr
+    assert "town_slt" in conf.read_text()
+    assert tracked.read_bytes() == before
+
+
+def test_egress_target_dir_moves_the_output_with_the_towns(env, tmp_path):
+    _towns_with_hosts(env, tmp_path, {"slt": ["cityofslt.us"]})
+    r = run(env, "--egress", "--target-dir", str(tmp_path / "towns"))
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / "towns" / "_egress" / "squid.conf").is_file()
+
+
+def test_egress_skips_folders_that_are_not_towns(env, tmp_path):
+    conf = _towns_with_hosts(env, tmp_path, {"slt": ["cityofslt.us"]})
+    shutil.copytree(tmp_path / "towns" / "slt", tmp_path / "towns" / "slt.bak")
+    r = run(env, "--egress")
+    assert r.returncode == 0, r.stderr
+    assert "slt.bak" in r.stderr
+    assert run(env, "--egress").returncode == 0  # its own _egress folder is no town either
+    assert "town_slt" in conf.read_text()
 
 
 def test_egress_takes_no_slug(env):
     r = run(env, "slt", "--egress")
     assert r.returncode != 0 and "--egress" in r.stderr
+
+
+# ---- --rerender refreshes a leader's cron; host-path hygiene ---------------
+
+def test_rerender_refreshes_a_leader_towns_cron_from_the_repo(env, town, tmp_path):
+    jobs = town / "cron" / "jobs.json"
+    jobs.write_text('{"version": 1, "jobs": [{"id": "old-job"}]}\n')
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert jobs.read_text() == (tmp_path / "repo" / "cron" / "jobs.json").read_text()
+    [backup] = (town / "cron").glob("jobs.json.bak-*")
+    assert "old-job" in backup.read_text()
+    assert "restart agent" in r.stdout
+
+
+def test_rerender_leaves_an_emptied_follower_schedule(env, town):
+    cron = town / "cron"
+    (cron / "jobs.empty.json").rename(cron / "jobs.json")
+    before = (cron / "jobs.json").read_text()
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert (cron / "jobs.json").read_text() == before
+    assert "follower" in r.stdout
+
+
+def test_rerender_leaves_a_follower_bound_by_override(env, town):
+    (town / "docker-compose.override.yml").write_text(
+        "services:\n  agent:\n    volumes:\n"
+        "      - ./cron/jobs.empty.json:/home/agent/.hermes/cron/jobs.json:ro\n")
+    jobs = town / "cron" / "jobs.json"
+    jobs.write_text('{"version": 1, "jobs": [{"id": "old-job"}]}\n')
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert "old-job" in jobs.read_text()
+    assert not list((town / "cron").glob("jobs.json.bak-*"))
+
+
+def test_an_explicit_codex_home_is_mounted_instead_of_home_codex(env, tmp_path):
+    codex = tmp_path / "elsewhere" / "codex"
+    codex.mkdir(parents=True)
+    (codex / "auth.json").write_text("{}")
+    assert run({**env, "CODEX_HOME": str(codex)}, "testtown").returncode == 0
+    compose = (tmp_path / "towns" / "testtown" / "docker-compose.yml").read_text()
+    assert f"- {codex}:/home/agent/.codex:rw" in compose
+    assert f"{env['HOME']}/.codex" not in compose
+
+
+def test_a_repo_path_with_a_colon_is_refused(env, tmp_path):
+    colon = tmp_path / "re:po"
+    shutil.copytree(tmp_path / "repo", colon)
+    r = run({**env, "ADD": str(colon / "bin" / "townloops-agent-add")}, "testtown")
+    assert r.returncode != 0
+    assert "':'" in r.stderr
+    assert not (tmp_path / "towns" / "testtown").exists()
