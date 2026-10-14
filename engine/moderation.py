@@ -11,10 +11,7 @@ in `submissions`).
 A merge and a delete both 404. A change submission counts as merged when
 its target now shows any value it carried that the target didn't (recorded
 by event-ship on the event as `change_submission`); a cancellation, when the
-target shows the cancelled marking; an entity's listing-website clear, when
-the target shows no listing website — and only then is the local website
-cleared (engine/listing_website_cleanup.settle, after each poll that
-decided something).
+target shows the cancelled marking.
 
 An entity GET with no `status` field (TownLoops before the entity gate) is
 published; a merged entity's 404 names its survivor (`merged_into_slug`). Outcomes are attributed to the event's seed and Series (and an
@@ -22,7 +19,8 @@ entity's discovery source): seed trust is refreshed, a high rejection rate
 opens the circuit (engine/autonomy.check_rejection_rate), and a rejected
 discovered organisation is remembered by name so it is never proposed again.
 
-`digest()` is the nightly digest's autonomous section, and `digest_markdown`
+`digest()` is the nightly digest's autonomous section (including the
+listing-page websites still live that listing-website-cleanup flagged), and `digest_markdown`
 / `digest_telegram` format it (engine/orchestrator.summary sends them).
 """
 
@@ -73,12 +71,6 @@ def poll(client, conn: sqlite3.Connection, s: autonomy.Settings, *, limit: int =
         if sub.get("seed"):
             seeds.add(sub["seed"])
     conn.commit()
-    if out["checked"] - out["pending"] - len(out["errors"]):
-        # A decided listing-website clear: its local clear follows acceptance.
-        from engine import listing_website_cleanup
-        settled = listing_website_cleanup.settle(conn, client)
-        if settled:
-            out["listing_websites"] = settled
     if seeds:
         autonomy.refresh_trust(conn, seeds)
     breaker = autonomy.check_rejection_rate(conn, s)
@@ -136,15 +128,8 @@ def _after_404(client, conn: sqlite3.Connection, sub: dict,
                 else ("gone", None)
         survivor = _event_survivor(client, conn, sub)
     else:
-        from engine import listing_website_cleanup as lwc
         from engine.live_lookup import merged_into_slug
-        survivor = merged_into_slug(err)
-        if not survivor and sub.get("kind") == lwc.CLEAR_KIND and sub.get("target_slug"):
-            # A listing-website clear merged into its target shows there.
-            if lwc.shows_clear(lwc.read_target(client, sub["resource"], sub["target_slug"])):
-                survivor = sub["target_slug"]
-        elif not survivor:
-            survivor = _entity_survivor(client, conn, sub)
+        survivor = merged_into_slug(err) or _entity_survivor(client, conn, sub)
     return ("merged", survivor) if survivor else ("gone", None)
 
 
@@ -267,6 +252,7 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
     if stuck:
         attention.append(f"{stuck} event(s) stuck, waiting out a retry backoff")
     report = series_report or {}
+    from engine.listing_website_cleanup import flagged
     return {
         "events_submitted": o["submitted"].get("events", 0),
         "entities_submitted": sum(v for k, v in o["submitted"].items() if k != "events"),
@@ -287,6 +273,10 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
         "series_candidates": report.get("clusters") or [],
         "suspect_series": (report.get("multi_venue") or []) + (report.get("duplicate_dates") or []),
         "needs_attention": attention,
+        # Listing-page websites still live (listing-website-cleanup flags them;
+        # the agent never PATCHes them) — listed until an apply sees live fixed.
+        "listing_websites_live": [f"{r['name'] or r['target']} ({r['live_slug']}): {r['url']}"
+                                  for r in flagged(conn)],
     }
 
 
@@ -318,6 +308,11 @@ def digest_markdown(a: dict) -> list[str]:
                      if d.get("dates") else "") for d in a["suspect_series"]]
     lines += ["", "## Needs attention"] + ([f"- {x}" for x in a["needs_attention"]]
                                           or ["- nothing"])
+    if a["listing_websites_live"]:
+        lines += ["", "## Listing websites live",
+                  "Live still holds a listing page as the website — fix in TownLoops admin, "
+                  "then `listing-website-cleanup apply` clears the flag:"]
+        lines += [f"- {x}" for x in a["listing_websites_live"]]
     return lines
 
 
@@ -333,6 +328,9 @@ def digest_telegram(a: dict) -> str:
            f"seeds: +{len(a['seeds_added'])} added, {len(a['seeds_retired'])} retired\n")
     if a["series_candidates"]:
         out += f"Series candidates: {len(a['series_candidates'])}\n"
+    if a["listing_websites_live"]:
+        out += (f"listing websites live: {len(a['listing_websites_live'])} "
+                "(fix in TownLoops admin)\n")
     if a["needs_attention"]:
         out += "needs attention:\n" + "\n".join(f"• {x}" for x in a["needs_attention"][:8]) + "\n"
     return out

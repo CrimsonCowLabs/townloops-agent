@@ -35,9 +35,12 @@ import sqlite3
 from typing import NamedTuple, Optional
 
 from engine.derive_helpers import dict_rows as _rows, parse_extra_json
-from engine.entity_classify import TABLES as KINDS   # kind → resource / table, report order
-from engine.entity_sync import is_cross_town
+from engine.entity_sync import RESOURCES, is_cross_town
 from engine.listing_hosts import is_listing_url
+
+
+# The kinds with a website the audit covers: kind → resource / table, report order.
+KINDS = {k: RESOURCES[k] for k in ("venue", "business", "community")}
 
 
 # How a local row found its live row, best first: the primary of several.

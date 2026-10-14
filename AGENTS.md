@@ -153,13 +153,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     listing slug → `live_id` → merge-following GET (no re-point); one row per entity, `side` local/live/both,
     `live_unread` when the GET failed, a shared live row counted once (`duplicate_of`) — the listing-website
     cleanup works from `find_listing_websites`' rows + `unverified`; LIST/GET only),
-    `listing_website_cleanup.py` (the `listing-website-cleanup` skill: clear those websites live *and* local, ledger
-    `listing_website_clears`. Supervised: `clear_listing_websites` widget → `apply` (also the first pass of the daily
-    `entity-live-sync` run): `live_patch.clear_entity_fields` (`website: ""` + GET verify) first, then local.
-    Autonomous: a pending copy of the live row with `website: null` (`submissions.kind 'clear-website'`) for the
-    merge flow; `settle` (moderation poll + each run) clears local only once the target shows no listing website.
-    Local clear keeps the URL in `extra_json.listing_pages`, takes live's own site or blanks + `pending` → `reenrich`;
-    `live_unread` rows never cleared; each row says `changed` live/local/both/none).
+    `listing_website_cleanup.py` (the one-off `listing-website-cleanup` skill — operator-run `apply`, no cron; ledger
+    `listing_website_clears`, optimistic status moves, entity writes under the `workqueue-drain` lock. Supervised:
+    `clear_listing_websites` widget → `apply`: `live_patch.clear_entity_fields` (`website: ""` + GET verify) first,
+    then local. Autonomous: local cleared, a live listing website `flagged` (never PATCHed — TownLoops has no entity
+    change submission yet) and listed in the nightly digest until a later `apply` sees live fixed. Local clear keeps
+    the URL in `extra_json.listing_pages`, takes live's own site or blanks + `pending` → `reenrich`; `live_unread`
+    rows never cleared; each row says `changed` live/local/both/none).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the

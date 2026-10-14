@@ -179,8 +179,8 @@ def _dismiss_cancellations(uids: list[str]) -> dict:
 
 
 def _clear_listing_websites(uids: list[str]) -> dict:
-    """Confirm listing-page website clears — the next listing-website-cleanup
-    apply (or the daily entity-live-sync run) clears them live, then
-    locally, and re-enriches."""
+    """Confirm listing-page website clears — the operator-triggered
+    `listing-website-cleanup apply` then clears them live, then locally, and
+    re-enriches. Inactive in autonomous mode."""
     with db_v2.connect() as c:
         return {"kind": "clear_listing_websites", **listing_website_cleanup.confirm(c, uids)}

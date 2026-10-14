@@ -11,7 +11,6 @@ event in stuck-people-derived."""
 
 from __future__ import annotations
 
-import os
 import sys
 import time
 
@@ -51,11 +50,7 @@ def main() -> int:
         "ORDER BY link_id", (event_uid,),
     ).fetchall() if r["entity_kind"] in entity_enrich.SPECS]
 
-    try:
-        max_lookups = int(os.environ.get("TOWNLOOPS_ENRICH_MAX_LOOKUPS", _DEFAULT_MAX_LOOKUPS))
-    except ValueError:
-        max_lookups = _DEFAULT_MAX_LOOKUPS
-    budget = entity_enrich.Budget(max_lookups)
+    budget = entity_enrich.Budget.from_env(_DEFAULT_MAX_LOOKUPS)
     llm = entity_classify.codex_llm(_MAX_LLM_CALLS, _LLM_TIMEOUT_S, started + _LLM_DEADLINE_S)
     town = town_name()
     notes = []

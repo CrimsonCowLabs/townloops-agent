@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""listing-website-cleanup — clear listing-page websites (restaurantji, Yelp,
-maps, ...) local and live, then re-enrich. Logic:
+"""listing-website-cleanup — one-off clear of listing-page websites
+(restaurantji, Yelp, maps, ...), then re-enrich. Logic:
 engine/listing_website_cleanup.py, on the audit's rows
-(engine/listing_website_audit.py).
+(engine/listing_website_audit.py). No cron: it runs when the operator asks.
 
 Subcommands:
   list                          every clear, its status and what changed (read-only)
@@ -10,13 +10,14 @@ Subcommands:
                                 (supervised); --uid takes targets, uid
                                 prefixes or names
   apply [--limit N]             supervised: clear what the OPERATOR confirmed,
-                                live first. Autonomous: settle submitted clears,
-                                submit new ones for the merge flow. Then
-                                re-enrich cleared entities.
+                                live first, then local. Autonomous: clear local,
+                                flag live ones for TownLoops admin (never a
+                                PATCH). Then re-enrich cleared entities.
 
 list/propose-clear never write. `apply` writes only what the operator
 confirmed in supervised mode — there is no flag to confirm; confirmation is
-the operator's click. The daily entity-live-sync run does the same pass.
+the operator's click. Every subcommand first brings the DB up to the repo's
+migrations, so the widget's confirm finds the ledger table.
 """
 
 from __future__ import annotations
@@ -64,7 +65,8 @@ def _apply(args) -> int:
         return 0
     conn = open_db()
     try:
-        # entity-live-sync's lock: never alongside a sync of the same entity.
+        # entity-live-sync's lock: never alongside a drain or sync writing the
+        # same entity rows.
         with _lock.acquire("workqueue-drain"):
             out = lwc.run(conn, _client(), enrich=lwc.enricher(), limit=args.limit)
     except _lock.LockHeld:
@@ -88,6 +90,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     apply = sub.add_parser("apply")
     apply.add_argument("--limit", type=int, default=20)
     args = ap.parse_args(argv)
+    from engine import db
+    db.migrate()  # a code update must not meet an older schema
     return {"list": _list, "propose-clear": _propose, "apply": _apply}[args.cmd](args)
 
 

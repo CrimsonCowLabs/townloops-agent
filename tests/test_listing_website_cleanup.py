@@ -1,10 +1,10 @@
-"""listing-website-cleanup: clear listing-page websites local and live, then
+"""listing-website-cleanup: the one-off clear of listing-page websites, then
 re-enrich (engine/listing_website_cleanup.py).
 
 Supervised mode is driven through the engine against FakeAPI + a fresh DB
 (no town profile → supervised); autonomous mode through a whole town
-(tests/autonomy_town.py): the entity-live-sync run, the moderator's merge or
-rejection, and the moderation poll.
+(tests/autonomy_town.py) and the skill's `apply`: local cleared, live
+flagged for the nightly digest, never PATCHed or submitted.
 """
 
 from __future__ import annotations
@@ -254,8 +254,26 @@ def test_confirm_widget_confirms_the_clear(dash_db):
     assert _row(dash_db)["website"] == RESTAURANTJI     # confirming changes nothing yet
 
 
+def test_a_clear_another_run_already_made_is_skipped(conn):
+    _shipped(conn)
+    lwc.confirm(conn, ["business:b1"])
+    conn.execute("UPDATE listing_website_clears SET status = 'cleared'")
+    row = {"kind": "business", "entity_uid": "b1", "live_slug": SLUG, "url": RESTAURANTJI,
+           "live_website": RESTAURANTJI, "name": CASCADE}
+    assert lwc._finish(conn, "business:b1", "confirmed", "cleared", row=row) is None
+    assert _row(conn)["website"] == RESTAURANTJI       # the local clear rolled back with it
+
+
+def test_cli_migrates_before_it_reads_the_ledger(tmp_state_dir, monkeypatch, capsys):
+    from tests.autonomy_town import SKILLS, load
+    monkeypatch.setattr("engine.derive_helpers._DB_PATH", tmp_state_dir / "townloops.db")
+    mod = load(SKILLS / "listing-website-cleanup" / "cleanup.py", "lwc_cli")
+    assert mod.main(["list"]) == 0
+    assert json.loads(capsys.readouterr().out) == []
+
+
 # --------------------------------------------------------------------------
-# Autonomous
+# Autonomous: local cleared, live flagged — never PATCHed, never submitted
 # --------------------------------------------------------------------------
 
 @pytest.fixture
@@ -271,65 +289,79 @@ def town(fresh_db, tmp_state_dir, monkeypatch):
     return t
 
 
-def _pending_copy(town):
-    [copy] = [p for p in town.api.creates() if p["slug"] != SLUG]
-    return copy
+def _apply(town, *argv):
+    import contextlib
+    import io
+    from tests.autonomy_town import SKILLS, load
+    mod = load(SKILLS / "listing-website-cleanup" / "cleanup.py", "town_lwc")
+    town.conn.commit()
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        assert mod.main(["apply", *argv]) == 0
+    return json.loads(out.getvalue())
+
+
+def _digest_live(town):
+    from engine import moderation
+    return moderation.digest(town.conn, "2000-01-01")["listing_websites_live"]
 
 
 class TestAutonomous:
-    def test_live_clear_is_a_pending_change_never_a_patch(self, town):
-        out = town.live_sync()
-        assert out["listing_websites"]["submitted"] == 1
-        copy = _pending_copy(town)
-        assert copy["name"] == CASCADE and copy["website"] is None
-        assert _website_patches(town.api) == []
+    def test_clears_local_and_flags_live_without_touching_townloops(self, town):
+        out = _apply(town)
+        [rep] = out["flagged"]
+        assert (rep["status"], rep["changed"], rep["reenrich"]) == ("flagged", "local", "queued")
+        assert lwc.LIVE_FIX_NOTE in rep["note"]
+        assert town.api.creates() == [] and town.api.patches() == []
         assert town.api.tables["businesses"][SLUG]["website"] == RESTAURANTJI
-        assert _row(town.conn)["website"] == RESTAURANTJI       # local waits for moderation
-        sub = dict(town.conn.execute("SELECT * FROM submissions WHERE slug = ?",
-                                     (copy["slug"],)).fetchone())
-        assert (sub["kind"], sub["target_slug"], sub["status"]) == ("clear-website", SLUG, "pending")
-        town.live_sync()
-        assert len(town.api.creates()) == 1                     # submitted once
-
-    def test_merge_accepted_clears_local_then_re_enriches(self, town, net, monkeypatch):
-        town.live_sync()
-        copy = _pending_copy(town)
-        town.api.merge("businesses", copy["slug"], SLUG, fields=("website",))
-        assert not town.api.tables["businesses"][SLUG]["website"]
-        out = town.poll()
-        assert out["merged"] == 1
-        [rep] = out["listing_websites"]
-        assert (rep["status"], rep["changed"], rep["reenrich"]) == ("cleared", "both", "queued")
         row = _row(town.conn)
-        assert row["website"] is None
+        assert row["website"] is None and row["enrichment_status"] == "pending"
         assert json.loads(row["extra_json"])["listing_pages"] == [RESTAURANTJI]
-        # The next run looks for the own site; it fills the live blank (a fill, not a change).
+        assert _digest_live(town) == [f"{CASCADE} ({SLUG}): {RESTAURANTJI}"]
+        [d] = town.decisions("listing-website")
+        assert d["verdict"] == "flag-live"
+
+    def test_re_enrichment_finds_the_own_site_and_resync_keeps_the_listing_out(
+            self, town, net, monkeypatch):
         monkeypatch.setenv("TOWNLOOPS_ENRICH_MAX_LOOKUPS", "8")
+        out = _apply(town)
+        assert out["reenriched"] == [{"target": "business:b1", "reenrich": "enriched",
+                                      "website": OWN_SITE}]
         town.live_sync()
-        assert _row(town.conn)["website"] == OWN_SITE
-        assert town.api.tables["businesses"][SLUG]["website"] == OWN_SITE
+        assert _row(town.conn)["website"] == OWN_SITE      # live's listing not pulled back
+        # Live isn't blank, so the own site doesn't fill it: a full-body PATCH
+        # (the phone fill) only resends live's own website.
+        assert {p[3]["website"] for p in _website_patches(town.api)} <= {RESTAURANTJI}
+        assert town.api.tables["businesses"][SLUG]["website"] == RESTAURANTJI
 
-    def test_rejected_clear_leaves_local_and_is_not_resubmitted(self, town):
-        town.live_sync()
-        copy = _pending_copy(town)
-        town.api.reject("businesses", copy["slug"])
-        [rep] = town.poll()["listing_websites"]
-        assert (rep["status"], rep["changed"]) == ("not-accepted", "none")
-        assert _row(town.conn)["website"] == RESTAURANTJI
-        town.live_sync()
-        assert len(town.api.creates()) == 1
-        [d] = [d for d in town.decisions("listing-website") if d["verdict"] == "not-accepted"]
-        assert d["evidence"]["pending_slug"] == copy["slug"]
+    def test_flag_stays_until_live_is_fixed_and_is_recorded_once(self, town):
+        _apply(town)
+        _apply(town)
+        assert len(town.decisions("listing-website")) == 1
+        assert len(_digest_live(town)) == 1
+        town.api.tables["businesses"][SLUG]["website"] = OWN_SITE   # fixed in admin
+        [rep] = _apply(town)["resolved"]
+        assert (rep["status"], rep["changed"]) == ("resolved", "none")
+        assert _digest_live(town) == []
 
-    def test_local_only_listing_is_cleared_locally_at_once(self, town):
+    def test_local_only_listing_is_cleared_not_flagged(self, town):
         town.api.tables["businesses"][SLUG]["website"] = OWN_SITE
-        out = town.live_sync()
-        assert out["listing_websites"]["cleared"] == 1
-        assert town.api.creates() == [] and _website_patches(town.api) == []
+        out = _apply(town)
+        assert out["flagged"] == [] and out["cleared"][0]["changed"] == "local"
         assert _row(town.conn)["website"] == OWN_SITE
+        assert _digest_live(town) == []
 
-    def test_proposer_is_inactive(self, town, capsys):
+    def test_supervised_widget_and_proposer_are_inactive(self, town, capsys):
         from tests.autonomy_town import SKILLS, load
         mod = load(SKILLS / "listing-website-cleanup" / "cleanup.py", "town_lwc")
         assert mod.main(["propose-clear"]) == 0
         assert json.loads(capsys.readouterr().out)["inactive"] is True
+        out = lwc.confirm(town.conn, ["business:b1"])
+        assert out["inactive"] is True and out["confirmed"] == 0
+        assert lwc.ledger(town.conn) == []
+
+    def test_entity_live_sync_does_not_run_the_cleanup(self, town):
+        out = town.live_sync()
+        assert "listing_websites" not in out
+        assert lwc.ledger(town.conn) == []
+        assert _row(town.conn)["website"] == RESTAURANTJI

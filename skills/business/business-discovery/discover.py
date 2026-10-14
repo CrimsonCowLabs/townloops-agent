@@ -150,11 +150,7 @@ def _promote(args) -> int:
         print(json.dumps({"processed": 0}))
         return 0
     started = time.monotonic()
-    try:
-        max_lookups = int(os.environ.get("TOWNLOOPS_ENRICH_MAX_LOOKUPS", _DEFAULT_MAX_LOOKUPS))
-    except ValueError:
-        max_lookups = _DEFAULT_MAX_LOOKUPS
-    budget = entity_enrich.Budget(max_lookups)
+    budget = entity_enrich.Budget.from_env(_DEFAULT_MAX_LOOKUPS)
     llm = entity_classify.codex_llm(_MAX_CLASSIFY_CALLS, _CLASSIFY_TIMEOUT_S,
                                     started + _CLASSIFY_DEADLINE_S)
     town = town_name()

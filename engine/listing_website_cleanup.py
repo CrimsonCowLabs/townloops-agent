@@ -1,9 +1,10 @@
-"""Clear listing-page websites (engine/listing_hosts) local and live, then
-re-enrich — working from the audit's rows (engine/listing_website_audit).
+"""One-off cleanup of listing-page websites (engine/listing_hosts): clear
+them and re-enrich, working from the audit's rows
+(engine/listing_website_audit). Run only when the operator asks — no cron.
 
-Both sides, or the clear is undone: entity_sync's resync copies live values
-into local rows (it never copies a listing-page website either way, so a
-clear holds even while live still shows one).
+entity_sync's resync copies live values into local rows, but never a
+listing-page website (in either direction), so a local clear holds even
+while live still shows one.
 
 Supervised (default) — nothing changes without the operator:
 
@@ -15,53 +16,50 @@ Supervised (default) — nothing changes without the operator:
   PATCH that doesn't land parks the row `failed` (local untouched) until the
   operator confirms it again.
 
-Autonomous — a published value is never PATCHed:
+Autonomous — a published value is never PATCHed, and TownLoops has no
+entity change-submission endpoint yet:
 
-    run ──▶ submitted (a pending copy of the live row without its website,
-            for the TownLoops merge flow) ──moderation poll──▶ cleared |
-            not-accepted
+    apply ──▶ cleared (local only)  |  flagged (live still holds a listing
+              page: listed in the nightly digest for a fix in TownLoops
+              admin) ──a later apply sees live fixed──▶ resolved
 
-  The local clear follows only once the target shows no listing website
-  (`settle`, from the moderation poll and each run). A listing website that
-  is local only (live is right, or not shipped) is no published value: it is
-  cleared locally at once. Each target is tried once; `not-accepted` isn't
-  resubmitted.
+  The local listing website is cleared either way. `confirm` and `propose`
+  are supervised-only (they answer inactive).
 
 A local clear keeps the listing URL as research evidence
 (`extra_json.listing_pages`), takes live's own site when live has one,
 else blanks `website` and sets `enrichment_status` 'pending' so `reenrich`
 (the injected entity_enrich call) looks for the entity's own site — which
-then reaches live as a fill-blank (entity_sync). Live mirrors aren't
-researched (their values are TownLoops'). Rows the audit couldn't read live
-(`live_unread`) are never cleared — skipped and reported. Every row says
-what `changed`: 'live', 'local', 'both' or 'none'.
+reaches live as a fill-blank once live's website is blank. Live mirrors
+(`source_kind='live'`) and live rows with no local row aren't researched:
+enrich_entity never fills a mirror (its values are TownLoops'), so their
+own site is a live fix, said in the row's note. Rows the audit couldn't
+read live (`live_unread`) are never cleared — skipped and reported. Every
+row says what `changed`: 'live', 'local', 'both' or 'none'.
 
-Ledger: `listing_website_clears` (migration 026), one row per target —
-'<kind>:<entity_uid>', or '<kind>#<live id>' for a live row with no local
-row.
+Ledger: `listing_website_clears` (migration 026; its `pending_slug` column
+is unused), one row per target — '<kind>:<entity_uid>', or '<kind>#<live
+id>' for a live row with no local row. Status changes are optimistic
+(`UPDATE ... WHERE status = <old>`; rowcount 0 → another run got there
+first, skipped). Callers that write entity rows hold the `workqueue-drain`
+lock, as entity-live-sync does.
 """
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import sqlite3
 from typing import Callable, Iterable, Optional
 
-from engine.derive_helpers import (
-    dict_rows as _rows, iso_utc_now, parse_extra_json, record_activity,
-)
-from engine.entity_classify import TABLES as KINDS   # kind → resource / table
+from engine.derive_helpers import dict_rows, iso_utc_now, parse_extra_json, record_activity
 from engine.listing_hosts import is_listing_url
+from engine.listing_website_audit import KINDS   # kind → resource / table
 
 
 PROPOSAL_KIND = "clear_listing_websites"
-CLEAR_KIND = "clear-website"          # submissions.kind of an autonomous clear
 EVIDENCE_KEY = "listing_pages"        # extra_json: listing URLs once held as website
+LIVE_FIX_NOTE = "live still holds a listing page; fix in TownLoops admin"
 _WORKER = "listing-website-cleanup"
-# Statuses a target is done with until the operator confirms it again.
-_OPEN = ("confirmed", "submitted")
 
 # enrich(conn, kind, entity_uid) → an entity_enrich.EnrichOutcome status.
 Enrich = Callable[[sqlite3.Connection, str, str], str]
@@ -75,7 +73,11 @@ def target_of(row: dict) -> str:
 
 
 def _clearable(row: dict) -> bool:
-    return not row["live_unread"] and (row["entity_uid"] or row["live_id"] is not None)
+    return not row["live_unread"] and bool(row["entity_uid"] or row["live_id"] is not None)
+
+
+def _live_listing(row: dict) -> bool:
+    return row["side"] in ("live", "both")
 
 
 # --------------------------------------------------------------------------
@@ -86,13 +88,11 @@ def propose(conn: sqlite3.Connection, client, targets: Optional[list[str]] = Non
             limit: int = 50) -> dict:
     """A read-only proposal for the chat Confirm widget: every clearable
     audit row — or those whose target, entity uid or name starts with one
-    of `targets`.
-    Rows whose live side couldn't be read are listed in `skipped`, never
-    proposed. `proposal` is None when nothing matches."""
+    of `targets`. Rows whose live side couldn't be read are listed in
+    `skipped`, never proposed. `proposal` is None when nothing matches."""
     from engine.listing_website_audit import find_listing_websites
-    found = find_listing_websites(conn, client)
     rows, skipped = [], []
-    for r in found.rows:
+    for r in find_listing_websites(conn, client).rows:
         if targets and not any(t and ((_clearable(r) and target_of(r).startswith(t))
                                       or (r["entity_uid"] or "").startswith(t)
                                       or (r["name"] or "").lower().startswith(t.lower()))
@@ -117,11 +117,17 @@ def preview(row: dict) -> dict:
 
 def confirm(conn: sqlite3.Connection, targets: Iterable[str]) -> dict:
     """The operator confirmed these clears: the next `apply` makes them. A
-    target already confirmed or submitted is skipped."""
+    target already confirmed is skipped. Supervised only — in autonomous
+    mode nothing is recorded (apply wouldn't act on it)."""
+    from engine import autonomy
+    targets = list(targets)
+    if autonomy.is_autonomous():
+        return {"confirmed": 0, "skipped": len(targets), "skipped_uids": targets,
+                **autonomy.inactive_message("clear_listing_websites")}
     done, skipped = 0, []
     now = iso_utc_now()
     for t in targets:
-        kind, uid, _ = _parse_target(t)
+        kind, uid = _parse_target(t)
         if kind is None or (uid and not conn.execute(
                 f"SELECT 1 FROM {KINDS[kind]} WHERE entity_uid = ?", (uid,)).fetchone()):
             skipped.append(t)
@@ -131,8 +137,8 @@ def confirm(conn: sqlite3.Connection, targets: Iterable[str]) -> dict:
             "  updated_at) VALUES (?, ?, ?, 'confirmed', ?, ?) "
             "ON CONFLICT (target) DO UPDATE SET status = 'confirmed', note = NULL, "
             "  updated_at = excluded.updated_at "
-            f"WHERE listing_website_clears.status NOT IN ({','.join('?' * len(_OPEN))})",
-            (t, kind, uid, now, now, *_OPEN))
+            "WHERE listing_website_clears.status != 'confirmed'",
+            (t, kind, uid, now, now))
         if cur.rowcount:
             done += 1
         else:
@@ -141,23 +147,25 @@ def confirm(conn: sqlite3.Connection, targets: Iterable[str]) -> dict:
     return {"confirmed": done, "skipped": len(skipped), "skipped_uids": skipped}
 
 
-def _parse_target(t: str) -> tuple[Optional[str], Optional[str], Optional[int]]:
+def _parse_target(t) -> tuple[Optional[str], Optional[str]]:
+    """(kind, entity_uid) — entity_uid None for a '<kind>#<live id>' target;
+    (None, None) for anything else."""
     if not isinstance(t, str):
-        return None, None, None
-    for sep in (":", "#"):
-        kind, found, rest = t.partition(sep)
-        if found and kind in KINDS and rest:
-            if sep == ":":
-                return kind, rest, None
-            return (kind, None, int(rest)) if rest.isdigit() else (None, None, None)
-    return None, None, None
+        return None, None
+    kind, sep, rest = t.partition(":")
+    if sep and kind in KINDS and rest:
+        return kind, rest
+    kind, sep, rest = t.partition("#")
+    if sep and kind in KINDS and rest.isdigit():
+        return kind, None
+    return None, None
 
 
 def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> list[dict]:
     """Clear what the operator confirmed, live first. Returns one report row
     per target touched."""
-    confirmed = _rows(conn, "SELECT * FROM listing_website_clears WHERE status = 'confirmed' "
-                            "ORDER BY updated_at, target LIMIT ?", (limit,))
+    confirmed = dict_rows(conn, "SELECT * FROM listing_website_clears WHERE status = 'confirmed' "
+                                "ORDER BY updated_at, target LIMIT ?", (limit,))
     if not confirmed:
         return []
     from engine.listing_website_audit import find_listing_websites
@@ -166,63 +174,166 @@ def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> list[d
     for led in confirmed:
         row = found.get(led["target"])
         if row is None:
-            out.append(_set(conn, led["target"], "resolved", "none",
-                            note="no listing website any more — nothing to clear"))
+            rep = _finish(conn, led["target"], "confirmed", "resolved", "none",
+                          note="no listing website any more — nothing to clear")
         elif row["live_unread"]:
-            # Live side unknown: stays confirmed for the next run.
-            out.append({"target": led["target"], "status": "confirmed", "changed": "none",
-                        "note": "live side unread — retried next run"})
+            # Live side unknown: stays confirmed for the next apply.
+            rep = {"target": led["target"], "status": "confirmed", "changed": "none",
+                   "note": "live side unread — retried next apply"}
         else:
-            out.append(_clear_supervised(conn, client, row))
+            rep = _clear_supervised(conn, client, row)
+        if rep:
+            out.append(rep)
     return out
 
 
-def _clear_supervised(conn: sqlite3.Connection, client, row: dict) -> dict:
+def _clear_supervised(conn: sqlite3.Connection, client, row: dict) -> Optional[dict]:
     from engine.live_patch import clear_entity_fields
     target, resource = target_of(row), KINDS[row["kind"]]
     live_cleared = False
-    if row["side"] in ("live", "both"):
+    if _live_listing(row):
         try:
             res = clear_entity_fields(client, resource, row["live_slug"], ("website",))
         except Exception as e:  # noqa: BLE001 — parked, not retried blind
-            return _set(conn, target, "failed", "none", row=row,
-                        note=f"live clear failed: {str(e)[:300]}")
+            return _finish(conn, target, "confirmed", "failed", "none", row=row,
+                           note=f"live clear failed: {str(e)[:300]}")
         if res.mismatches:
-            return _set(conn, target, "failed", "none", row=row,
-                        note="live clear didn't land: " + "; ".join(res.mismatches)[:500])
+            return _finish(conn, target, "confirmed", "failed", "none", row=row,
+                           note="live clear didn't land: " + "; ".join(res.mismatches)[:500])
         live_cleared = True
-    local = _clear_local(conn, row, live_verified=live_cleared) if row["entity_uid"] else None
-    rep = _set(conn, target, "cleared", _changed(live_cleared, local), row=row,
-               reenrich=(local or {}).get("reenrich"), note=(local or {}).get("note"))
-    record_activity(conn, _WORKER, "cleared", target,
-                    detail=f"{row['name']}: {row['url']} — changed {rep['changed']}")
-    conn.commit()
+    rep = _finish(conn, target, "confirmed", "cleared", row=row, live_changed=live_cleared,
+                  live_verified=live_cleared)
+    if rep:
+        record_activity(conn, _WORKER, "cleared", target,
+                        detail=f"{row['name']}: {row['url']} — changed {rep['changed']}")
+        conn.commit()
     return rep
 
 
 # --------------------------------------------------------------------------
-# Local clear (both modes)
+# Autonomous: clear local, flag live
 # --------------------------------------------------------------------------
 
-def _clear_local(conn: sqlite3.Connection, row: dict, *, live_verified: bool,
-                 live_website: Optional[str] = None) -> Optional[dict]:
+def run_autonomous(conn: sqlite3.Connection, client, limit: int = 50) -> dict:
+    """Clear every listing website the audit finds locally; a live one is
+    `flagged` for TownLoops admin, never PATCHed. A target already handled
+    is left alone; a flagged one whose live row no longer shows a listing
+    page is `resolved`."""
+    from engine import autonomy
+    from engine.listing_website_audit import find_listing_websites
+    out: dict = {"cleared": [], "flagged": [], "resolved": [], "skipped": []}
+    ledger_status = {r["target"]: r["status"] for r in dict_rows(
+        conn, "SELECT target, status FROM listing_website_clears")}
+    rows = find_listing_websites(conn, client).rows
+    still_live, unread = set(), set()
+    n = 0
+    for row in rows:
+        if row["live_unread"]:
+            unread.add(target_of(row))
+            out["skipped"].append({"name": row["name"], "why": "live side unread"})
+            continue
+        if not _clearable(row):
+            continue
+        target = target_of(row)
+        if _live_listing(row):
+            still_live.add(target)
+        old = ledger_status.get(target)
+        if old not in (None, "confirmed", "resolved") or n >= limit:
+            continue
+        n += 1
+        new = "flagged" if _live_listing(row) else "cleared"
+        rep = _finish(conn, target, old, new, row=row, live_changed=False, live_verified=False,
+                      flag_note=LIVE_FIX_NOTE if new == "flagged" else None)
+        if rep is None:
+            continue
+        autonomy.record(conn, "listing-website", target, autonomy.Decision(
+            "flag-live" if new == "flagged" else "clear-local", "listing-page-website",
+            {"url": row["url"], "changed": rep["changed"], "live_slug": row["live_slug"]}))
+        conn.commit()
+        out[new].append(rep)
+    for target, status in ledger_status.items():
+        if status == "flagged" and target not in still_live and target not in unread:
+            rep = _finish(conn, target, "flagged", "resolved", "none",
+                          note="live no longer shows a listing page")
+            if rep:
+                out["resolved"].append(rep)
+    return out
+
+
+def flagged(conn: sqlite3.Connection) -> list[dict]:
+    """Targets whose live row still held a listing page when last looked at
+    — the nightly digest lists them until an apply sees live fixed."""
+    return [r for r in ledger(conn) if r["status"] == "flagged"]
+
+
+# --------------------------------------------------------------------------
+# Ledger transitions + the local clear
+# --------------------------------------------------------------------------
+
+def _finish(conn: sqlite3.Connection, target: str, old: Optional[str], new: str,
+            changed: Optional[str] = None, *, row: Optional[dict] = None,
+            note: Optional[str] = None, live_changed: bool = False,
+            live_verified: bool = False, flag_note: Optional[str] = None) -> Optional[dict]:
+    """Move `target` from `old` (None: no ledger row yet) to `new`, in one
+    transaction with the local clear when `changed` is None (computed from
+    it and `live_changed`). None when another run moved it first."""
+    kind, uid = _parse_target(target)
+    now = iso_utc_now()
+    if conn.in_transaction:
+        conn.commit()
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        if old is None:
+            cur = conn.execute(
+                "INSERT INTO listing_website_clears (target, kind, entity_uid, status, "
+                "  created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (target) DO NOTHING", (target, kind, uid, new, now, now))
+        else:
+            cur = conn.execute("UPDATE listing_website_clears SET status = ?, updated_at = ? "
+                               "WHERE target = ? AND status = ?", (new, now, target, old))
+        if not cur.rowcount:
+            conn.execute("ROLLBACK")
+            return None
+        local = None
+        if changed is None:
+            local = _clear_local(conn, row, live_verified=live_verified) if uid else None
+            changed = _changed(live_changed, local)
+            note = "; ".join(x for x in ((local or {}).get("note"), flag_note) if x) or None
+            if uid is None and new == "cleared":
+                note = "no local row; set its own site in TownLoops admin"
+        vals = {"changed": changed, "note": note}
+        if row is not None:
+            vals.update(live_slug=row.get("live_slug"), url=row.get("url"))
+        if local is not None:
+            vals["reenrich"] = local["reenrich"]
+        conn.execute(f"UPDATE listing_website_clears SET {', '.join(f'{k} = ?' for k in vals)} "
+                     "WHERE target = ?", (*vals.values(), target))
+        conn.execute("COMMIT")
+    except Exception:
+        conn.execute("ROLLBACK")
+        raise
+    led = dict_rows(conn, "SELECT * FROM listing_website_clears WHERE target = ?", (target,))[0]
+    return report_row(led, name=(row or {}).get("name"))
+
+
+def _clear_local(conn: sqlite3.Connection, row: dict, *, live_verified: bool) -> Optional[dict]:
     """Take the listing website off the local row: live's own site when it
-    has one (`live_website`, else the audit row's), else blank + re-enrich.
-    Keeps the listing URL as evidence. `live_verified`: live was just
-    cleared and GET-verified, so a row that was in sync stays in sync.
-    None when the local website is no listing (nothing changed)."""
+    has one, else blank + re-enrich. Keeps the listing URL as evidence.
+    `live_verified`: live was just cleared and GET-verified, so a row that
+    was in sync stays in sync. None when the local website is no listing
+    (nothing changed). Caller holds the transaction."""
     from engine.entity_sync import refresh_content_hash
     kind, uid = row["kind"], row["entity_uid"]
     table = KINDS[kind]
-    found = _rows(conn, f"SELECT * FROM {table} WHERE entity_uid = ?", (uid,))
+    found = dict_rows(conn, f"SELECT * FROM {table} WHERE entity_uid = ?", (uid,))
     if not found or not is_listing_url(found[0]["website"]):
         return None
     cur = found[0]
-    live = row["live_website"] if live_website is None else live_website
+    live = row.get("live_website")
     own = live if live and not is_listing_url(live) and not row.get("duplicate_of") else None
     extra = parse_extra_json(cur.get("extra_json"))
     pages = list(extra.get(EVIDENCE_KEY) or [])
-    for u in (cur["website"], row.get("live_website")):
+    for u in (cur["website"], live):
         if is_listing_url(u) and u not in pages:
             pages.append(u)
     extra[EVIDENCE_KEY] = pages
@@ -239,36 +350,14 @@ def _clear_local(conn: sqlite3.Connection, row: dict, *, live_verified: bool,
     if own:
         return {"reenrich": "skipped", "note": f"took live's own site {own}"}
     if mirror:
-        return {"reenrich": "skipped", "note": "live mirror — not researched locally"}
+        return {"reenrich": "skipped",
+                "note": "live mirror — not researched locally; set its own site in TownLoops admin"}
     return {"reenrich": "queued", "note": None}
 
 
 def _changed(live: bool, local: Optional[dict]) -> str:
     return {(True, True): "both", (True, False): "live",
             (False, True): "local"}.get((live, local is not None), "none")
-
-
-def _set(conn: sqlite3.Connection, target: str, status: str, changed: str, *,
-         row: Optional[dict] = None, note: Optional[str] = None,
-         reenrich: Optional[str] = None, pending_slug: Optional[str] = None) -> dict:
-    """Upsert the target's ledger row; returns its report row."""
-    kind, uid, _ = _parse_target(target)
-    now = iso_utc_now()
-    vals = {"status": status, "changed": changed, "note": note, "updated_at": now}
-    if row is not None:
-        vals.update(live_slug=row.get("live_slug"), url=row.get("url"))
-    if reenrich is not None:
-        vals["reenrich"] = reenrich
-    if pending_slug is not None:
-        vals["pending_slug"] = pending_slug
-    conn.execute(
-        "INSERT INTO listing_website_clears (target, kind, entity_uid, status, created_at, "
-        "  updated_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (target) DO NOTHING",
-        (target, kind, uid, status, now, now))
-    conn.execute(f"UPDATE listing_website_clears SET {', '.join(f'{k} = ?' for k in vals)} "
-                 "WHERE target = ?", (*vals.values(), target))
-    return report_row(_rows(conn, "SELECT * FROM listing_website_clears WHERE target = ?",
-                            (target,))[0], name=(row or {}).get("name"))
 
 
 def report_row(led: dict, name: Optional[str] = None) -> dict:
@@ -280,148 +369,15 @@ def report_row(led: dict, name: Optional[str] = None) -> dict:
 def ledger(conn: sqlite3.Connection) -> list[dict]:
     """Every target, newest change first, with the entity's name."""
     out = []
-    for led in _rows(conn, "SELECT * FROM listing_website_clears ORDER BY updated_at DESC, target"):
-        name = None
+    for led in dict_rows(conn, "SELECT * FROM listing_website_clears "
+                               "ORDER BY updated_at DESC, target"):
         if led["entity_uid"]:
-            r = next(iter(_rows(conn, f"SELECT name, website FROM {KINDS[led['kind']]} "
-                                      "WHERE entity_uid = ?", (led["entity_uid"],))), None)
-            name = r["name"] if r else None
-            out.append({**report_row(led, name), "website": r["website"] if r else None})
+            r = next(iter(dict_rows(conn, f"SELECT name, website FROM {KINDS[led['kind']]} "
+                                          "WHERE entity_uid = ?", (led["entity_uid"],))), None)
+            out.append({**report_row(led, r["name"] if r else None),
+                        "website": r["website"] if r else None})
         else:
             out.append(report_row(led))
-    return out
-
-
-# --------------------------------------------------------------------------
-# Autonomous: submit for the merge flow, settle on the moderator's outcome
-# --------------------------------------------------------------------------
-
-def submit_found(conn: sqlite3.Connection, client, limit: int = 10) -> dict:
-    """Autonomous: each listing website the audit finds and no earlier try
-    covers — a live one goes to the moderator as a pending copy of the live
-    row without its website (`client` is an autonomy.GatedClient); a local
-    one is cleared locally. A held gate stops the pass."""
-    from engine import autonomy
-    from engine.listing_website_audit import find_listing_websites
-    out = {"submitted": [], "cleared": [], "skipped": [], "held": None, "errors": []}
-    tried = {r[0] for r in conn.execute(
-        "SELECT target FROM listing_website_clears WHERE status != 'resolved'")}
-    n = 0
-    for row in find_listing_websites(conn, client).rows:
-        if not _clearable(row):
-            if row["live_unread"]:
-                out["skipped"].append({"name": row["name"], "why": "live side unread"})
-            continue
-        target = target_of(row)
-        if target in tried or n >= limit:
-            continue
-        n += 1
-        if row["side"] == "local":
-            local = _clear_local(conn, row, live_verified=False)
-            rep = _set(conn, target, "cleared", _changed(False, local), row=row,
-                       reenrich=(local or {}).get("reenrich"), note=(local or {}).get("note"))
-            autonomy.record(conn, "listing-website", target, autonomy.Decision(
-                "clear-local", "listing-page-website", {"url": row["url"]}))
-            out["cleared"].append(rep)
-            conn.commit()
-            continue
-        try:
-            rep = _submit(conn, client, row)
-        except autonomy.SubmissionsHeld as e:
-            out["held"] = e.reason
-            break
-        except Exception as e:  # noqa: BLE001 — tried again next run
-            out["errors"].append(f"{target}: {str(e)[:200]}")
-            continue
-        if rep.get("status") == "submitted":
-            out["submitted"].append(rep)
-        else:
-            out["skipped"].append(rep)
-        conn.commit()
-    return out
-
-
-def _submit(conn: sqlite3.Connection, client, row: dict) -> dict:
-    from engine import autonomy
-    from engine.live_lookup import is_conflict
-    from engine.live_patch import sendable
-    target, resource = target_of(row), KINDS[row["kind"]]
-    live = client.get(resource, row["live_slug"]) or {}
-    if live.get("status") not in (None, "published"):
-        return {"target": target, "name": row["name"],
-                "why": f"live row is {live.get('status')}, not published"}
-    payload = {k: v for k, v in live.items() if k != "website" and sendable(resource, k, v)}
-    payload["website"] = None
-    town = os.environ.get("TOWNLOOPS_TOWN_SLUG", "unknown")
-    key = hashlib.sha1(target.encode()).hexdigest()
-    payload["slug"] = f"hermes-{town}-clearweb-{key[:12]}"
-    try:
-        created = client.create(resource, payload,
-                                idempotency_key=f"hermes-{town}:clear-website:{key[:16]}")
-    except Exception as e:
-        if not is_conflict(e):
-            raise
-        created = {"slug": payload["slug"]}
-    slug = (created or {}).get("slug") or payload["slug"]
-    autonomy.attribute(conn, resource, slug, kind=CLEAR_KIND, target_slug=row["live_slug"],
-                       local_uid=row["entity_uid"] or target)
-    autonomy.record(conn, "listing-website", target, autonomy.Decision(
-        "submit", "listing-page-website",
-        {"url": row["url"], "target_slug": row["live_slug"], "pending_slug": slug}))
-    return _set(conn, target, "submitted", "none", row=row, pending_slug=slug,
-                note=f"pending clear {slug} submitted for merge into {row['live_slug']}")
-
-
-def read_target(client, resource: str, slug: Optional[str]) -> Optional[dict]:
-    """The live row a clear was submitted for (or its merge survivor): {}
-    when it's gone, None when it can't be read."""
-    from engine.live_lookup import find_live_entity
-    try:
-        return find_live_entity(client, resource, slug) or {}
-    except Exception:  # noqa: BLE001 — unanswered
-        return None
-
-
-def shows_clear(live: Optional[dict]) -> bool:
-    """Whether a target read shows the clear: a live row with no listing website."""
-    return bool(live) and not is_listing_url(live.get("website"))
-
-
-def settle(conn: sqlite3.Connection, client) -> list[dict]:
-    """Autonomous: each submitted clear the moderator has decided. Accepted —
-    the target no longer shows a listing website — clears local; otherwise
-    `not-accepted`. A target that can't be read is settled next time."""
-    from engine import autonomy
-    out = []
-    for led in _rows(conn, "SELECT l.*, s.status AS outcome, s.resource FROM "
-                           "listing_website_clears l JOIN submissions s ON s.slug = l.pending_slug "
-                           "AND s.kind = ? WHERE l.status = 'submitted' AND s.status != 'pending'",
-                     (CLEAR_KIND,)):
-        target = led["target"]
-        if led["outcome"] == "rejected":
-            rep = _set(conn, target, "not-accepted", "none", note="moderator rejected the clear")
-        else:
-            live = read_target(client, led["resource"], led["live_slug"])
-            if live is None:
-                continue
-            if not shows_clear(live):
-                rep = _set(conn, target, "not-accepted", "none",
-                           note=f"moderator {led['outcome']}; live still shows a listing website")
-            else:
-                local = None
-                if led["entity_uid"]:
-                    row = {"kind": led["kind"], "entity_uid": led["entity_uid"],
-                           "live_website": None, "duplicate_of": None}
-                    local = _clear_local(conn, row, live_verified=True,
-                                         live_website=live.get("website") or "")
-                rep = _set(conn, target, "cleared", _changed(True, local),
-                           reenrich=(local or {}).get("reenrich"), note=(local or {}).get("note"))
-        autonomy.record(conn, "listing-website", target, autonomy.Decision(
-            rep["status"], f"moderator-{led['outcome']}",
-            {"pending_slug": led["pending_slug"], "target_slug": led["live_slug"],
-             "changed": rep["changed"]}))
-        conn.commit()
-        out.append(rep)
     return out
 
 
@@ -433,40 +389,34 @@ def reenrich(conn: sqlite3.Connection, enrich: Enrich, limit: int = 10) -> list[
     """Look for the own site of each cleared entity still queued. One the
     lookup couldn't finish (budget, Firecrawl down) stays queued."""
     out = []
-    for led in _rows(conn, "SELECT * FROM listing_website_clears WHERE reenrich = 'queued' "
-                           "AND entity_uid IS NOT NULL ORDER BY updated_at, target LIMIT ?",
-                     (limit,)):
+    for led in dict_rows(conn, "SELECT * FROM listing_website_clears WHERE reenrich = 'queued' "
+                               "AND entity_uid IS NOT NULL ORDER BY updated_at, target LIMIT ?",
+                         (limit,)):
+        note = None
         try:
             status = enrich(conn, led["kind"], led["entity_uid"])
         except Exception as e:  # noqa: BLE001 — stays queued
             status, note = "deferred", f"enrichment failed: {str(e)[:200]}"
-        else:
-            note = None
-        website = conn.execute(f"SELECT website FROM {KINDS[led['kind']]} WHERE entity_uid = ?",
-                               (led["entity_uid"],)).fetchone()
         if status != "deferred":
             conn.execute("UPDATE listing_website_clears SET reenrich = ?, updated_at = ? "
-                         "WHERE target = ?", (status, iso_utc_now(), led["target"]))
+                         "WHERE target = ? AND reenrich = 'queued'",
+                         (status, iso_utc_now(), led["target"]))
         conn.commit()
+        website = conn.execute(f"SELECT website FROM {KINDS[led['kind']]} WHERE entity_uid = ?",
+                               (led["entity_uid"],)).fetchone()
         out.append({"target": led["target"], "reenrich": status,
                     "website": website[0] if website else None, **({"note": note} if note else {})})
     return out
 
 
-def enricher(max_lookups: Optional[int] = None, llm_calls: int = 2) -> Enrich:
+def enricher(llm_calls: int = 2) -> Enrich:
     """entity_enrich.enrich_entity under one shared budget, as
-    event-enrich-entities: `max_lookups` Firecrawl calls
-    ($TOWNLOOPS_ENRICH_MAX_LOOKUPS, default 8), `llm_calls` Codex calls
-    within the next 100s."""
+    event-enrich-entities: Budget.from_env() Firecrawl lookups, `llm_calls`
+    Codex calls within the next 100s."""
     import time
     from engine import entity_classify, entity_enrich
     from engine.derive_helpers import town_name
-    if max_lookups is None:
-        try:
-            max_lookups = int(os.environ.get("TOWNLOOPS_ENRICH_MAX_LOOKUPS", 8))
-        except ValueError:
-            max_lookups = 8
-    budget = entity_enrich.Budget(max_lookups)
+    budget = entity_enrich.Budget.from_env()
     llm = entity_classify.codex_llm(llm_calls, 30, time.monotonic() + 100)
     town = town_name()
     return lambda conn, kind, uid: entity_enrich.enrich_entity(
@@ -475,15 +425,14 @@ def enricher(max_lookups: Optional[int] = None, llm_calls: int = 2) -> Enrich:
 
 def run(conn: sqlite3.Connection, client, *, enrich: Optional[Enrich] = None,
         limit: int = 20) -> dict:
-    """One pass — the entity-live-sync cron's, or `apply`. Supervised: clear
-    what the operator confirmed. Autonomous: settle decided submissions, then
-    submit/clear what the audit finds. Then re-enrich. Without anything to
-    do in supervised mode, no API call is made."""
+    """The operator-triggered pass (`listing-website-cleanup apply`).
+    Supervised: clear what the operator confirmed. Autonomous: clear local,
+    flag live. Then re-enrich. In supervised mode with nothing confirmed or
+    queued, no API call is made."""
     from engine import autonomy
     out: dict = {"mode": "autonomous" if autonomy.is_autonomous() else "supervised"}
     if out["mode"] == "autonomous":
-        out["settled"] = settle(conn, client)
-        out.update(submit_found(conn, autonomy.gated(client, conn), limit=limit))
+        out.update(run_autonomous(conn, client, limit=limit))
     else:
         out["applied"] = apply_confirmed(conn, client, limit=limit)
     if enrich is not None:

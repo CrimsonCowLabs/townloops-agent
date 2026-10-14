@@ -144,6 +144,16 @@ class Budget:
     def __init__(self, n: int):
         self.left = n
 
+    @classmethod
+    def from_env(cls, default: int = 8) -> "Budget":
+        """The per-run lookup budget: $TOWNLOOPS_ENRICH_MAX_LOOKUPS, else
+        `default` (an entity costs 1-3 lookups)."""
+        import os
+        try:
+            return cls(int(os.environ.get("TOWNLOOPS_ENRICH_MAX_LOOKUPS", default)))
+        except ValueError:
+            return cls(default)
+
     def take(self) -> bool:
         if self.left <= 0:
             return False

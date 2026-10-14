@@ -51,11 +51,11 @@
 
       {% set is_business = proposal.kind in ('promote_businesses', 'decline_businesses') %}
       {% set is_entity = proposal.kind == 'clear_listing_websites' %}
-      {% set noun = 'business' if is_business else ('entit' if is_entity else 'event') %}
+      {% set singular = 'business' if is_business else ('entity' if is_entity else 'event') %}
       {% set plural = 'businesses' if is_business else ('entities' if is_entity else 'events') %}
       {% if envelope.preview %}
         <details class="chat-toolcall-preview">
-          <summary>{{ envelope.preview|length }} {{ noun }}{{ ('y' if is_entity else '') if envelope.preview|length == 1 else ('es' if is_business else ('ies' if is_entity else 's')) }} — show list</summary>
+          <summary>{{ envelope.preview|length }} {{ singular if envelope.preview|length == 1 else plural }} — show list</summary>
           <ul>
             {% for p in envelope.preview[:10] %}
               {% if is_entity %}

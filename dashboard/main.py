@@ -1455,10 +1455,13 @@ def v2_chat_confirm(request: Request,
         body = f"Dismissed {result['dismissed']} cancellation flags; they won't be flagged again."
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (no longer flagged)."
+    elif kind == "clear_listing_websites" and result.get("inactive"):
+        body = ("Nothing confirmed — this town runs in autonomous mode, where "
+                "listing-website-cleanup apply clears local websites and flags live ones itself.")
     elif kind == "clear_listing_websites":
-        body = (f"Confirmed {result['confirmed']} listing-website clears — the next "
-                "listing-website-cleanup apply (or the daily entity-live-sync run) clears "
-                "them on TownLoops, then locally, and re-enriches them.")
+        body = (f"Confirmed {result['confirmed']} listing-website clears. Ask me to run "
+                "listing-website-cleanup apply: it clears them on TownLoops, then locally, "
+                "and re-enriches them.")
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (already confirmed or unknown)."
     else:
