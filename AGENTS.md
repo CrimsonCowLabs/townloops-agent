@@ -79,7 +79,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"),
     `own_site.py` (the one "own page, not a page about it" rule: platform profile, a host carrying the name, else a
     homepage where the caller says one counts — performer research's presence test and discovery's verify; also
-    `UTILITY_PATH`, a site's jobs/member-application/deals pages, which discovery always rejects),
+    `UTILITY_PATH`, a site's jobs/member-application/deals pages, which discovery always rejects, and `ARTICLE_PATH`,
+    the one editorial-path rule — blog/post/article/visitor guide — for discovery's link filter and `roundup_reason`),
     `listing_hosts.py` (the one directory/listing/aggregator host list — restaurantji, Yelp, maps, ticketing,
     Facebook events: evidence at most, never an entity's `website`; enrichment, discovery's blocklist, promote and
     performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),

@@ -37,14 +37,16 @@ is for the ones that never host a listed event.
    a name. For a community or non-profit, a `.gov` page is the government's
    own site. Don't add blogs to the listing-host list. An article or roundup
    *about* organisations is rejected even on a host that passes — a
-   tourism board's "Best Restaurants and Bars in …" (`discovery.roundup_reason`):
-   a `/blog/`, `/post/`, `/article(s)` path; a title opening with a count
-   ("12 Best …", "All 196+ …"); a roundup phrase ("best", "top", "things to
-   do", "bucket list", "places to visit", "can't-miss", "a local's guide",
-   "guide to"); a search-result name cut short with "…". Read on the
-   search-result name and on the page's own title, whole. Never on a homepage
-   (its title is the organisation's name — "The Best of Tahoe"), nor on a
-   title segment the host carries.
+   tourism board's "Best Restaurants and Bars in …" (`discovery.roundup_reason`,
+   which names the signal): an editorial path (`own_site.ARTICLE_PATH` — blog,
+   post, article, visitor/travel guide; the directory link filter drops these
+   too); a count or roundup phrase in the URL's slug or the title ("12 Best …",
+   "All 196+ … Restaurants", "things to do"; "best"/"top" only beside a plural
+   or a place, so "Top Notch Plumbing" is a name); a search-result name cut
+   short with "…". Read on the search-result name and on the page's own title,
+   whole. A homepage's title is the organisation's name for a phrase ("The
+   Best of Tahoe"), not for a count; a title segment the host carries is never
+   read.
 3. **dedup against live** — at sweep *and* verify, every candidate is
    checked against the town's live businesses (fetched fresh each run):
    - its URL is a live business's `website`, or on the same host (social and

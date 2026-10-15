@@ -61,9 +61,9 @@ DIRECTORY_HOST_BLOCKLIST_SUBSTRINGS = [
 ]
 
 DIRECTORY_PATH_BLOCKLIST_SUBSTRINGS = [
+    # Visitor and travel guides are editorial pages: own_site.ARTICLE_PATH.
     "/map/", "/maps/",
-    "/visitor-guide", "/visitors-guide",
-    "/brochure", "/brochures", "/travel-guide",
+    "/brochure", "/brochures",
     "/p/", "/reel/", "/share/",
 ]
 
@@ -160,7 +160,9 @@ def directory_link_block_reason(seed_host: str, link: str) -> Optional[str]:
     if any(path.endswith(ext) for ext in DIRECTORY_FILE_EXTENSIONS):
         return "file asset/media URL"
     if any(token in path for token in DIRECTORY_PATH_BLOCKLIST_SUBSTRINGS):
-        return "directory utility/map/guide URL"
+        return "directory utility/map/brochure URL"
+    if own_site.is_article_page(link):
+        return "an article or guide page"
     generic_hits = sum(1 for seg in segments if seg in DIRECTORY_SECTION_PATH_TOKENS)
     if generic_hits >= 2:
         return "generic directory/resort section path"
@@ -191,50 +193,93 @@ def not_own_site_reason(url: str, name: Optional[str], *, allow_gov: bool = Fals
     return f"not its own site: {why}" if why else None
 
 
-_ARTICLE_PATH = re.compile(r"/(blogs?|posts?|articles?)(?=/|$|[-_.\d])", re.IGNORECASE)
-# "12 Best …", "The 25 Best …", "All 196+ …"
-_COUNT_OPENING = re.compile(r"^(?:the\s+|all\s+|our\s+)?\d+\+?\s+\w", re.IGNORECASE)
+# "12 Best …", "The 25 Best …", "All 196+ …" — the words after the count.
+_COUNT_OPENING = re.compile(r"^(?:the\s+|all\s+|our\s+)?\d+\+?\s+(.+)", re.IGNORECASE)
+_COUNT_ROUNDUP_WORD = re.compile(r"(?:best|top|great(?:est)?|favou?rite|must)\b", re.IGNORECASE)
+# Where a count's noun phrase ends: "12 Galleries | Worth a Visit", "15 Things | To Do".
+_PHRASE_STOP = re.compile(r"\s(?:in|near|around|to|for|of|on|at|worth|that|you|we)\b.*",
+                          re.IGNORECASE)
+_PLACE = re.compile(r"\b(?:in|near|around)\b", re.IGNORECASE)
 _ROUNDUP_PHRASES = [
-    (re.compile(r"\bbest\b", re.IGNORECASE), "'best'"),
-    # "Top of the Tram" is a name; "Top Restaurants", "Top 10" are a roundup.
-    (re.compile(r"\btop\b(?!\s+of\b)", re.IGNORECASE), "'top'"),
     (re.compile(r"\bthings\s+to\s+do\b", re.IGNORECASE), "'things to do'"),
     (re.compile(r"\bbucket\s+list\b", re.IGNORECASE), "'bucket list'"),
     (re.compile(r"\bplaces\s+to\s+visit\b", re.IGNORECASE), "'places to visit'"),
     (re.compile(r"\bcan[’']?t[\s-]+miss\b", re.IGNORECASE), "'can't-miss'"),
-    # "A Local's Guide to …", "Your Guide to …" — not a fishing guide service.
-    (re.compile(r"[’']s\s+guide\b|\bguide\s+to\b|\b(?:ultimate|complete|travel|insider)\s+guide\b",
-                re.IGNORECASE), "a 'guide' to somewhere"),
+    # "A Local's Guide to …", "Your Guide to …", "The Ultimate Guide" — not
+    # "Mike's Guide Service" or "Tahoe Guide to Fishing Charters".
+    (re.compile(r"[’']s\s+guide\b(?!\s+(?:service|services|company|co)\b)"
+                r"|^(?:(?:a|an|the|your|our)\s+)?guide\s+to\b"
+                r"|\b(?:ultimate|complete|travel|insider)\s+guide\b", re.IGNORECASE),
+     "a 'guide' to somewhere"),
 ]
+# "Best Restaurants …", "Top Restaurants in Tahoe" — but "Top of the Tram",
+# "Best Western Station House Inn", "Tahoe's Best Pizza" are names.
+_BEST_TOP = re.compile(r"\b(best|top)\b(?!\s+of\b)", re.IGNORECASE)
 
 
-def roundup_reason(url: str, title: Optional[str]) -> Optional[str]:
-    """Why `url` is an article or roundup *about* organisations rather than
-    one organisation's page, or None. `title` is the search-result name or
-    the page's own title. On a homepage the title is the organisation's own
-    name, whatever words it carries ("The Best of Tahoe"); elsewhere a title
-    segment its host carries (thebestoftahoe.com/about, "About Us | The Best
-    of Tahoe") is that name too, so only the other segments are read."""
-    path = urlparse(url).path or "/"
-    if m := _ARTICLE_PATH.search(path):
-        seg = m.group(0).lower() + ("/" if path[m.end():].startswith("/") else "")
-        return f"an article or roundup: path {seg}"
-    if not title or path.strip("/") == "":
+def _has_plural(text: str) -> bool:
+    """A plural word ("Galleries", "Restaurants") — not "Glass", "Tahoe's"."""
+    return any(len(w) >= 4 and w.endswith("s") and not w.endswith(("ss", "us", "is"))
+               for w in re.findall(r"[a-z]+(?![’'])", text.lower()))
+
+
+def _count_signal(text: str) -> Optional[str]:
+    """A count before a roundup word or a plural: "12 Best …", "All 196+ South
+    Lake Tahoe Restaurants" — not "3 Sisters Bakery" or "7 Eleven"."""
+    if not (m := _COUNT_OPENING.match(text)):
         return None
-    for part in _TITLE_SPLIT.split(title.strip()):
+    rest = m.group(1)
+    head = _PHRASE_STOP.sub("", rest).split()
+    if _COUNT_ROUNDUP_WORD.match(rest) or (head and _has_plural(head[-1])):
+        return "opens with a count"
+    return None
+
+
+def _phrase_signal(text: str) -> Optional[str]:
+    for rx, label in _ROUNDUP_PHRASES:
+        if rx.search(text):
+            return f"carries {label}"
+    if (m := _BEST_TOP.search(text)) and (_has_plural(text) or _PLACE.search(text)):
+        return f"carries '{m.group(1).lower()}'"
+    return None
+
+
+def _roundup_signal(url: str, title: Optional[str], from_search: bool) -> Optional[str]:
+    path = urlparse(url).path or "/"
+    if m := own_site.ARTICLE_PATH.search(path):
+        return f"path /{m.group(1).lower()}/"
+    for seg in filter(None, path.split("/")):
+        words = " ".join(filter(None, re.split(r"[-_.]+", seg)))
+        if why := _count_signal(words) or _phrase_signal(words):
+            return f"slug {seg[:60]!r} {why}"
+    homepage = own_site.is_homepage(url)
+    for part in _TITLE_SPLIT.split((title or "").strip()):
         part = part.strip()
         if not part or own_site.host_carries_name(part, url):
             continue
-        if _COUNT_OPENING.match(part):
-            return f"an article or roundup: title opens with a count ({part[:60]!r})"
-        for rx, label in _ROUNDUP_PHRASES:
-            if rx.search(part):
-                return f"an article or roundup: title carries {label} ({part[:60]!r})"
+        # A homepage's title is the organisation's name, whatever words it
+        # carries ("The Best of Tahoe") — but no organisation is named "The
+        # 10 Best Things To Do in Tahoe".
+        if why := _count_signal(part) or (None if homepage else _phrase_signal(part)):
+            return f"title {why} ({part[:60]!r})"
     # A search engine cut the title short: the name came from a results
-    # page, not from the organisation.
-    if title.rstrip().endswith(("…", "...")):
-        return "an article or roundup: truncated search-result title"
+    # page, not from the organisation. A page's own <title> may end "...".
+    if from_search and (title or "").rstrip().endswith(("…", "...")):
+        return "truncated search-result title"
     return None
+
+
+def roundup_reason(url: str, title: Optional[str], *, from_search: bool = False) -> Optional[str]:
+    """Why `url` is an article or roundup *about* organisations rather than
+    one organisation's page, or None: an editorial path (own_site.ARTICLE_PATH);
+    roundup words in its slug or `title` — a count before a roundup word or a
+    plural, a roundup phrase (not on a homepage: its title is the
+    organisation's name); or, `from_search` (`title` is the search-result
+    name), a title cut short. A title segment its host carries
+    (thebestoftahoe.com/about, "About Us | The Best of Tahoe") is the
+    organisation's name and isn't read."""
+    why = _roundup_signal(url, title, from_search)
+    return f"an article or roundup: {why}" if why else None
 
 
 # --------------------------------------------------------------------------
@@ -539,9 +584,11 @@ def verify_candidate(
     # Government departments are community discovery's, never a business.
     allow_gov = kind != "business"
     # Decided from the URL and the search-result name: no Firecrawl spent.
-    unscraped = [why for why in (
-        roundup_reason(canonical_url, name),
-        name and not_own_site_reason(canonical_url, name, allow_gov=allow_gov)) if why]
+    unscraped = []
+    if why := roundup_reason(canonical_url, name, from_search=True):
+        unscraped.append(why)
+    if name and (why := not_own_site_reason(canonical_url, name, allow_gov=allow_gov)):
+        unscraped.append(why)
     if unscraped:
         return {"verified": False, "reasons": unscraped, "fetched_at": _iso_now()}
     scraped = firecrawl_scrape(canonical_url)

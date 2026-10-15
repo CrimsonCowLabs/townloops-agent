@@ -55,3 +55,28 @@ def test_url_carries_name(name, url, matches):
 ])
 def test_utility_page(url, utility):
     assert own_site.is_utility_page(url) is utility
+
+
+@pytest.mark.parametrize("url, article", [
+    ("https://laketahoethisweek.com/blog/tahoes-art-scene", True),
+    ("https://example.com/blogs/news", True),
+    ("https://insidetheupgrade.com/post/x", True),
+    ("https://example.com/article-12345", True),
+    ("https://example.com/articles/", True),
+    ("https://example.com/visitor-guide", True),
+    ("https://example.com/visitors-guide/2024", True),
+    ("https://example.com/travel-guide", True),
+    ("https://example.com/blogger-tools", False),
+    ("https://example.com/posters", False),
+    ("https://example.com/", False),
+])
+def test_article_page(url, article):
+    assert own_site.is_article_page(url) is article
+
+
+@pytest.mark.parametrize("url, homepage", [
+    ("https://example.com", True), ("https://example.com/", True),
+    ("https://example.com/?ref=x", True), ("https://example.com/about", False),
+])
+def test_homepage(url, homepage):
+    assert own_site.is_homepage(url) is homepage

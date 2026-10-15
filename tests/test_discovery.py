@@ -78,6 +78,18 @@ class TestDirectoryLinkBlockReason:
             "seed.com", "https://realbiz.com/menu"
         ) is None
 
+    @pytest.mark.parametrize("link", [
+        "https://otherbiz.com/visitor-guide", "https://otherbiz.com/visitors-guide/2024",
+        "https://otherbiz.com/travel-guide", "https://otherbiz.com/blog/best-hikes",
+        "https://otherbiz.com/articles/tahoe",
+    ])
+    def test_an_editorial_page_is_dropped(self, link):
+        """One editorial-path rule (own_site.ARTICLE_PATH) for the link filter
+        and for verify."""
+        from engine import discovery
+        r = discovery.directory_link_block_reason("seed.com", link)
+        assert r and "article" in r, r
+
 
 class TestVerifyCandidate:
     def _mock_scrape(self, monkeypatch, md, title=""):
@@ -190,8 +202,8 @@ class TestVerifyOwnSite:
          "Member Application | Lake Tahoe South Shore Chamber of Commerce"),
         ("https://business.tahoechamber.org/jobs", "Job Board - Lake Tahoe South Shore Chamber"),
         ("https://business.tahoechamber.org/hotdeals", "Hot Deals | Tahoe Chamber"),
-        ("https://foxintheforest.net/best-south-lake-tahoe-hikes",
-         "15 Best South Lake Tahoe Hikes | Fox in the Forest"),
+        ("https://foxintheforest.net/south-lake-tahoe-hikes",
+         "South Lake Tahoe Hikes | Fox in the Forest"),
     ])
     def test_a_nameless_candidate_is_judged_by_its_page_title_name(self, monkeypatch, url, title, kind):
         from engine import discovery
@@ -273,20 +285,77 @@ class TestRoundupReason:
         ("https://example.com/x", "A Local’s Guide to South Lake Tahoe", "guide"),
         ("https://example.com/x", "Your Guide to Tahoe Galleries", "guide"),
         ("https://example.com/x", "Can't-Miss Spots in Tahoe", "can't-miss"),
-        ("https://example.com/x", "Tahoe's Art Scene: Tour Local Galleries and…", "truncated"),
-        ("https://example.com/x", "Tahoe's Art Scene: Tour Local Galleries and ...", "truncated"),
+        ("https://example.com/x", "15 Things To Do in Tahoe", "opens with a count"),
+        ("https://example.com/x", "The Ultimate Guide to Tahoe", "guide"),
+        ("https://example.com/x", "Guide to the Best Tahoe Beaches", "guide"),
+        ("https://example.com/x", "Best Hikes", "'best'"),
+        ("https://example.com/x", "Best Pizza in Tahoe", "'best'"),
+        # A homepage's title is its name for a phrase — not for a count.
+        ("https://some-blog.com/", "The 10 Best Things To Do in Tahoe", "opens with a count"),
+        # Roundup words in the URL's own slug, whatever the title says.
+        ("https://visitlaketahoe.com/food-and-wine/best-restaurants-and-bars-in-south-lake-tahoe",
+         None, "slug"),
+        ("https://visitlaketahoe.com/food-and-wine/best-restaurants-and-bars-in-south-lake-tahoe",
+         "Food and Wine | Visit Lake Tahoe", "slug"),
+        ("https://example.com/top-10-tahoe-restaurants", None, "slug"),
+        ("https://example.com/24-best-south-lake-tahoe-restaurants", None, "slug"),
+        ("https://example.com/things-to-do-in-tahoe", None, "slug"),
+        ("https://example.com/tahoe-bucket-list", None, "slug"),
+        ("https://example.com/places-to-visit-near-tahoe", None, "slug"),
     ])
     def test_a_signal_fires_and_is_named(self, url, title, signal):
         from engine import discovery
         why = discovery.roundup_reason(url, title)
         assert why and signal.lower() in why.lower(), why
+        assert why.startswith("an article or roundup: "), why
+
+    @pytest.mark.parametrize("url, title", [
+        ("https://example.com/x", "Tahoe's Art Scene: Tour Local Galleries and…"),
+        ("https://example.com/x", "Tahoe's Art Scene: Tour Local Galleries and ..."),
+        # A homepage found by a cut-short search-result title.
+        ("https://insidetheupgrade.com/", "Inside the Upgrade | South Lake Tahoe Restaur…"),
+        ("https://insidetheupgrade.com/", "Inside the Upgrade…"),
+    ])
+    def test_a_truncated_search_result_title_fires(self, url, title):
+        from engine import discovery
+        why = discovery.roundup_reason(url, title, from_search=True)
+        assert why and "truncated" in why, why
+
+    def test_a_pages_own_title_ending_in_dots_is_not_truncation(self):
+        """Only a search engine cuts a title short; a site may end its own
+        <title> with "..."."""
+        from engine import discovery
+        assert discovery.roundup_reason("https://example.com/x", "Coming Soon...") is None
+
+    @pytest.mark.parametrize("title", [
+        "3 Sisters Bakery", "1 Tahoe Place", "7 Eleven",
+        "Best Western Station House Inn", "Top Notch Plumbing", "Tahoe's Best Pizza",
+        "Mike's Guide Service", "Tahoe Guide to Fishing Charters",
+    ])
+    def test_a_name_shaped_title_on_a_deep_page_carries_no_signal(self, title):
+        """A count is a roundup only before a roundup word or a plural; 'best'
+        and 'top' only with a plural or a place ("in Tahoe"); 'guide' only as
+        someone's guide or a guide to somewhere."""
+        from engine import discovery
+        assert discovery.roundup_reason("https://example.com/menu", title) is None
+
+    @pytest.mark.parametrize("url", [
+        "https://tahoetoyshop.com/toys",
+        "https://topofthetram.com/top-of-the-tram-tours",
+        "https://tahoeoutdooradventures.com/kayak-tours",
+        "https://example.com/classes",
+    ])
+    def test_an_ordinary_slug_carries_no_signal(self, url):
+        from engine import discovery
+        assert discovery.roundup_reason(url, None) is None
 
     @pytest.mark.parametrize("url, title", [
         # A homepage: the name is the organisation's, whatever words it carries.
         ("https://thebestoftahoe.com/", "The Best of Tahoe"),
         ("https://topofthetram.com/", "Top of the Tram"),
         ("https://tahoeflyfishing.com/", "Tahoe Fly Fishing Guide Service"),
-        ("https://insidetheupgrade.com/", "Inside the Upgrade | 24 BEST South Lake Tahoe…"),
+        ("https://insidetheupgrade.com/", "Inside the Upgrade"),
+        ("https://thebestoftahoe.com/", "The Best of Tahoe…"),  # a page's own title: not truncation
         # A deep page whose title is the name its own host carries.
         ("https://thebestoftahoe.com/about", "About Us | The Best of Tahoe"),
         ("https://tahoeflyfishingguideservice.com/trips", "Tahoe Fly Fishing Guide Service"),
@@ -361,6 +430,24 @@ class TestVerifyRoundup:
         assert not v["verified"]
         assert any("article or roundup" in r for r in v["reasons"]), v["reasons"]
         assert scraped == []
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_a_homepage_with_a_truncated_search_title_rejects_unscraped(self, monkeypatch, kind):
+        from engine import discovery
+        scraped = self._scrape(monkeypatch)
+        v = discovery.verify_candidate("https://insidetheupgrade.com/", town_name="South Lake Tahoe",
+                                       kind=kind, name="Inside the Upgrade | South Lake Tahoe Restaur…")
+        assert not v["verified"]
+        assert any("truncated" in r for r in v["reasons"]), v["reasons"]
+        assert scraped == []
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_a_pages_own_title_ending_in_dots_still_verifies(self, monkeypatch, kind):
+        from engine import discovery
+        self._scrape(monkeypatch, title="Pacific Crest Gallery | Art of the Sierra...")
+        v = discovery.verify_candidate("https://pacificcrestgallerytahoe.com/",
+                                       town_name="South Lake Tahoe", kind=kind)
+        assert v["verified"], v["reasons"]
 
     @pytest.mark.parametrize("kind", KINDS)
     @pytest.mark.parametrize("url, name, title", [
