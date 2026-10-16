@@ -42,7 +42,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Callable, Literal, Optional
 from urllib.parse import urldefrag, urljoin, urlparse
 
-from engine import autonomy, listing_hosts, own_site, research
+from engine import blocked_page, listing_hosts, own_site, research
 from engine.listing_hosts import bare_host as _host
 from engine.derive_helpers import iso_utc_now, normalize_name, parse_extra_json
 from engine.entity_enrich import SPECS, Budget, fill_blanks, validate_payload
@@ -202,9 +202,9 @@ def venue_page_links(html: str, page_url: str, name: str) -> list[str]:
 def _unreadable(html: str) -> Optional[str]:
     """Why a fetched page can't be judged, or None: a bot challenge, block
     or error page, or a shell with no title to match the name against."""
-    failure = autonomy.page_failure(research.page_text(html))
-    if failure and failure != "empty-page":
-        return failure
+    blocked = blocked_page.reason(research.page_text(html))
+    if blocked and blocked != blocked_page.NEAR_EMPTY:   # a short profile is still read
+        return blocked
     if not (research.title_text(html) or research.og_tags(html).get("title")):
         return "empty-shell"
     return None

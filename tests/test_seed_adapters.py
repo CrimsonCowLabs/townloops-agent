@@ -199,7 +199,7 @@ def find(tmp_state_dir, monkeypatch):
 
     monkeypatch.setattr(mod, "_DB_PATH", tmp_state_dir / "townloops.db")
     monkeypatch.setattr(mod, "_load_town_profile", lambda: {})
-    monkeypatch.setattr(mod, "_firecrawl_markdown", no_generic)
+    monkeypatch.setattr(mod, "_firecrawl_listing", no_generic)
     monkeypatch.setattr(mod, "_codex_exec", no_generic)
     monkeypatch.setattr(mod, "_telegram", lambda text: None)
     monkeypatch.setattr("engine.seed_adapters._get_json", feed)

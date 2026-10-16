@@ -144,7 +144,7 @@ class TestEventFindWiring:
         spec.loader.exec_module(mod)
         monkeypatch.setattr(mod, "_DB_PATH", tmp_state_dir / "townloops.db")
         monkeypatch.setattr(mod, "_load_town_profile", lambda: {"source_health": SETTINGS})
-        monkeypatch.setattr(mod, "_firecrawl_markdown", lambda url: (url in pages, "md", "down"))
+        monkeypatch.setattr(mod, "_firecrawl_listing", lambda url: (url in pages, "md", "down"))
         monkeypatch.setattr(mod, "_build_extraction_prompt", lambda p, name, url, md: url)
         monkeypatch.setattr(mod, "_codex_exec", lambda url: (
             True, pages[url] if isinstance(pages[url], str) else json.dumps(pages[url]), ""))

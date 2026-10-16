@@ -22,6 +22,7 @@ import requests
 from dateutil import tz as _tz
 from dateutil.parser import isoparse as _isoparse
 
+from engine import blocked_page
 from engine import categories as _cats
 from engine import event_dedup
 from engine.derive_helpers import seed_ref
@@ -67,13 +68,10 @@ def utc_times(start, end) -> tuple[str | None, str | None]:
     return start_utc, end_utc
 
 
-def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[bool, str, str]:
-    """Fetch a page as markdown via Firecrawl. Returns (ok, markdown, error).
-
-    waitFor: 3500ms — many town calendars are ASP.NET / JS-rendered widgets
-    (Placer County Calendar.aspx, etc.) that show an ajax-loader placeholder
-    on first paint and only fill in via JS. Without a wait, Firecrawl-in-
-    markdown returns the pre-render skeleton and the LLM sees no events."""
+def _firecrawl_scrape(url: str, timeout_s: int) -> tuple[bool, str, str, dict]:
+    """One Firecrawl scrape: (ok, markdown, error, the target page's metadata
+    — `statusCode`, `title`). Firecrawl answers 200 whatever the target
+    returned; the target's own status is in the metadata."""
     firecrawl_bucket.wait()
     try:
         r = requests.post(
@@ -87,15 +85,44 @@ def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[
             timeout=timeout_s + 5,
         )
     except requests.RequestException as e:
-        return (False, "", f"{type(e).__name__}: {e}")
+        return (False, "", f"{type(e).__name__}: {e}", {})
     if not r.ok:
-        return (False, "", f"firecrawl http {r.status_code}")
+        return (False, "", f"firecrawl http {r.status_code}", {})
     try:
         body = r.json()
     except ValueError:
-        return (False, "", "firecrawl returned non-JSON")
-    md = (body.get("data") or {}).get("markdown") or ""
+        return (False, "", "firecrawl returned non-JSON", {})
+    data = body.get("data") or {}
+    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    return (True, data.get("markdown") or "", "", meta)
+
+
+def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[bool, str, str]:
+    """Fetch a page as markdown via Firecrawl. Returns (ok, markdown, error).
+
+    waitFor: 3500ms — many town calendars are ASP.NET / JS-rendered widgets
+    (Placer County Calendar.aspx, etc.) that show an ajax-loader placeholder
+    on first paint and only fill in via JS. Without a wait, Firecrawl-in-
+    markdown returns the pre-render skeleton and the LLM sees no events."""
+    ok, md, err, _meta = _firecrawl_scrape(url, timeout_s)
+    if not ok:
+        return (False, "", err)
     return (bool(md), md, "" if md else "empty markdown")
+
+
+def firecrawl_listing(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[bool, str, str]:
+    """`firecrawl_markdown` for a seed's listing page: a challenge or error
+    response (engine/blocked_page — the target's HTTP error status, an
+    Incapsula/Cloudflare challenge, a platform 404 page, `no action`, a
+    near-empty body) is a failed read named by its reason, never markdown
+    for the LLM to extract from."""
+    ok, md, err, meta = _firecrawl_scrape(url, timeout_s)
+    if not ok:
+        return (False, "", err)
+    blocked = blocked_page.reason(md, meta.get("statusCode"), meta.get("title"))
+    if blocked:
+        return (False, "", blocked)
+    return (True, md, "")
 
 
 # An explicit recurrence rule on a source page is expanded into dated

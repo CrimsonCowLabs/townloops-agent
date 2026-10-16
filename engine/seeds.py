@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from engine import autonomy, event_dedup, feed_probe, seed_adapters
+from engine import autonomy, blocked_page, event_dedup, feed_probe, seed_adapters
 from engine.derive_helpers import iso_utc_now, seed_ref
 from engine.event_extract import build_extraction_prompt, parse_json_array, utc_times
 
@@ -75,15 +75,28 @@ def set_status(conn: sqlite3.Connection, seed: dict, status: str, d: autonomy.De
     conn.commit()
 
 
+def _trial_failure(blocked: str) -> str:
+    """A blocked page's reason as the trial's: `not-found`, `challenge` or
+    `empty-page` (an empty widget too)."""
+    if blocked == blocked_page.NOT_FOUND or blocked in (blocked_page.http_status(404),
+                                                        blocked_page.http_status(410)):
+        return "not-found"
+    if blocked in (blocked_page.NEAR_EMPTY, blocked_page.NO_ACTION):
+        return "empty-page"
+    return "challenge"
+
+
 def trial(conn: sqlite3.Connection, profile: dict, mode: autonomy.Settings, tools: Tools,
           name: str, url: str) -> autonomy.Decision:
     """Dry-run one seed URL: scrape, extract, judge what it lists."""
     ok, md, err = tools.fetch(url)
     if not ok:
         return autonomy.Decision("reject", "trial-unreachable", {"url": url, "error": err[:200]})
-    failure = autonomy.page_failure(md)
-    if failure:
-        return autonomy.judge_trial([], [], failure, mode)
+    blocked = blocked_page.reason(md)
+    if blocked:
+        d = autonomy.judge_trial([], [], _trial_failure(blocked), mode)
+        d.evidence.update({"url": url, "page": blocked})
+        return d
     ok, out, err = tools.llm(build_extraction_prompt(profile, name, url, md))
     if not ok:
         return autonomy.Decision("defer", "ai-unavailable", {"url": url})

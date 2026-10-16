@@ -28,6 +28,7 @@ from urllib.parse import urljoin
 import requests
 from dateutil import tz as _tz
 
+from engine import blocked_page
 from engine.event_extract import town_tz_name
 from engine.research import UA
 from engine.feed_probe import TRIBE_REST_PATH
@@ -80,12 +81,13 @@ def _get_json(url: str, params: dict) -> dict:
                          headers={"Accept": "application/json", "User-Agent": UA})
     except requests.RequestException as e:
         raise AdapterError(f"{type(e).__name__}: {e}") from None
-    if not r.ok:
-        raise AdapterError(f"http {r.status_code}")
-    try:
-        return r.json()
-    except ValueError:
-        raise AdapterError("response is not JSON") from None
+    if r.ok:
+        try:
+            return r.json()
+        except ValueError:
+            pass
+    # An error status, or a challenge / `no action` answered 200, is named.
+    raise AdapterError(blocked_page.reason(r.text, r.status_code) or "response is not JSON")
 
 
 def _page_entry(e: dict) -> str:

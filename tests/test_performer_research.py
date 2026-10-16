@@ -549,6 +549,8 @@ class TestUnreadablePages:
     @pytest.mark.parametrize("html", [
         page("Just a moment...", body="Checking your browser before accessing the site."),
         page("Attention Required! | Cloudflare", body="Sorry, you have been blocked. Access denied."),
+        page("Jane Doe Music", body="Request unsuccessful. Incapsula incident ID: 1234-5678"),
+        page("Jane Doe Music", body="<h1>404 - Page Not Found</h1>"),
         # Firecrawl's `html` format drops <head>: no title, no meta — nothing to judge.
         "<html><body><div id='cookie-banner'>Manage consent</div>" + "<p>ABBA hits.</p>" * 40
         + "</body></html>",

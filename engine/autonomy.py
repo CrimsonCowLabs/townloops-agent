@@ -577,28 +577,6 @@ def event_item(row: dict, on_page: bool = True) -> dict:
             "source_url": row.get("source_url"), "on_page": on_page}
 
 
-# Calendar pages that aren't: error pages, bot walls, empty widgets.
-_PAGE_FAILURES = (
-    ("not-found", re.compile(r"\b(?:404|page not found|page cannot be found|no longer exists"
-                             r"|page you requested)\b", re.IGNORECASE)),
-    ("challenge", re.compile(r"just a moment|checking your browser|verify you are human"
-                             r"|captcha|attention required|access denied|enable javascript"
-                             r" and cookies", re.IGNORECASE)),
-)
-
-
-def page_failure(markdown: Optional[str]) -> Optional[str]:
-    """Why a 2xx page is still a failed run, or None. Only the top of the page
-    is read — a calendar can mention "404 Main St" further down. A bot wall
-    is short, so it is named before the page is judged empty."""
-    text = (markdown or "").strip()
-    head = text[:600]
-    for why, pattern in _PAGE_FAILURES:
-        if pattern.search(head):
-            return why
-    return "empty-page" if len(text) < 200 else None
-
-
 # --------------------------------------------------------------------------
 # Stuck events
 # --------------------------------------------------------------------------

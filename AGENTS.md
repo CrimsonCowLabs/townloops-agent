@@ -126,6 +126,12 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
     alert, held until it recovers or the operator accepts the new level).
+    `blocked_page.py` (the one challenge/error-page detector — `reason(text, status, title)`: HTTP 4xx/5xx,
+    Incapsula/Cloudflare/captcha challenge, access-denied, platform 404 page, Showare `no action`, near-empty body,
+    named by module constants; markers count on small bodies only. event-find's listing reads and adapter fetches
+    (`event_extract.firecrawl_listing`, `seed_adapters._get_json`) → a failed run with that reason, never
+    LLM-extracted, never a source-health zero, never a vanish miss; also the seed trial (`trial-not-found`/
+    `-challenge`/`-empty-page`) and performer research's unreadable-page check — extend it, don't add another),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
     its events take event-find's one path, a partial read is a failed run; `tribe` first — add to `ADAPTERS`),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the

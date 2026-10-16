@@ -171,7 +171,7 @@ class Town:
     def find(self, *argv: str) -> dict:
         mod = load(SKILLS / "event-find" / "find.py", "town_event_find")
         self.mp.setattr(mod, "_DB_PATH", self.state / "townloops.db")
-        self.mp.setattr(mod, "_firecrawl_markdown", self._fetch)
+        self.mp.setattr(mod, "_firecrawl_listing", self._fetch)
         self.mp.setattr(mod, "_codex_exec", self._codex)
         out = io.StringIO()
         with contextlib.redirect_stdout(out):

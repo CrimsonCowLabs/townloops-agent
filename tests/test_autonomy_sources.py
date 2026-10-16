@@ -54,6 +54,24 @@ class TestProposedSeeds:
         [d] = town.decisions("seed")
         assert d["reason"] == reason
 
+    @pytest.mark.parametrize("page,reason,named", [
+        ("Request unsuccessful. Incapsula incident ID: 1234000560137281234-5678901234",
+         "trial-challenge", "incapsula challenge"),
+        ("# Page Not Found\n\nThe page you requested could not be found.", "trial-not-found",
+         "platform 404 page"),
+        ("no action", "trial-empty-page", "showare no action"),
+        ("Loading...", "trial-empty-page", "near-empty body"),
+    ])
+    def test_the_trial_uses_the_one_blocked_page_detector(self, town, page, reason, named):
+        town.seed("Arena", ARENA, status="proposed")
+        town.listing(ARENA, [concert("Jazz Night")])
+        town.pages[ARENA] = page                  # unpadded: the page as it came back
+        town.seed_review()
+        assert town.seed_row("Arena")["status"] == "rejected"
+        [d] = town.decisions("seed")
+        assert d["reason"] == reason
+        assert d["evidence"]["page"] == named
+
     def test_seeds_with_a_feed_are_tried_first(self, town):
         town.seed("Plain", "https://plain.example/events", status="proposed")
         town.seed("Fed", "https://fed.example/events", status="proposed",

@@ -47,6 +47,9 @@ second run while one is going exits 0 and records `skipped-overlap`.
 ## Per-seed loop
 
 1. Firecrawl-scrape the seed URL as markdown (an adapter seed: read the adapter instead, skipping 2).
+   A challenge or error response (engine/blocked_page.py: the target's HTTP 4xx/5xx, an Incapsula or
+   Cloudflare challenge, a platform 404 page, Showare's `no action`, a near-empty body) is a failed run
+   named by its reason — it never reaches the LLM. An adapter's fetch is checked the same way.
 2. Ask the LLM for a JSON array of upcoming events for the configured town.
 3. Upsert each record with `event_uid = sha1(seed_name + normalized_title + start_iso)`.
 4. Set `state=metadata-extracted`, `approval_status=pending`, and `discovered_via=seed:<name>`.
@@ -74,7 +77,7 @@ missing from all their sources for `cancellation_miss_threshold` finds are flagg
 An established seed (`min_runs`+ successful runs) whose latest successful run lists 0 events
 (it averaged ≥1), or under half its trailing average (it averaged `min_baseline`+), gets
 `event_seeds.health_status` `zero`/`drop` and one Telegram alert plus a `source-health` activity
-row; the dashboard Seeds table shows the badge. Failed runs (Firecrawl/Codex errors, or Codex
+row; the dashboard Seeds table shows the badge. Failed runs (Firecrawl/Codex errors, challenge/error pages, or Codex
 output that isn't a JSON array — an explicit `[]` is a real zero) are never judged. The alert holds — no repeats — until a run is back to half the old average
 (`recovered`, also sent), or the operator accepts the new level (dashboard **Accept new level**,
 or `event-seed-discovery/discover.py health --ack SEED_ID`); the seed is then judged again only once
@@ -103,7 +106,7 @@ Select adapters through the seed's adapter key (`set-adapter`). Do not scatter h
 
 ## Failure and quality checks
 
-- Treat branded 404s, Cloudflare or Incapsula challenges, empty JS widgets, and vendor error text as failed source runs, not successful zero-event runs.
+- Treat branded 404s, Cloudflare or Incapsula challenges, empty JS widgets, and vendor error text as failed source runs, not successful zero-event runs. `engine/blocked_page.reason` does this for event-find's listing reads and adapter fetches (and for the autonomous seed trial and performer research); a new challenge or vendor message goes there as a specific marker.
 - Handle every pagination mechanism explicitly. Never infer full coverage from the first API response or rendered page.
 - Avoid passing entire large calendars through a fixed LLM content window; truncation silently drops events.
 - For annual landing pages, constrain extraction to the primary event section or canonical ticket listing. Social and news dates often become false events.

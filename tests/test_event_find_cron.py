@@ -83,7 +83,7 @@ class TestOutcomeVisibleToOperator:
                          "VALUES ('Arena', 'https://arena.test/events', 'venue', 'approved', '2026-10-01', '2026-10-01')")
         fresh_db.commit()
         monkeypatch.setattr(find, "_load_town_profile", lambda: {})
-        monkeypatch.setattr(find, "_firecrawl_markdown", lambda url: (True, "md", ""))
+        monkeypatch.setattr(find, "_firecrawl_listing", lambda url: (True, "md", ""))
         monkeypatch.setattr(find, "_build_extraction_prompt", lambda *a: "prompt")
         monkeypatch.setattr(find, "_codex_exec", lambda p: (True, "[]", ""))
 
