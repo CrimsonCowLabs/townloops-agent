@@ -20,17 +20,18 @@ allowed_hosts:
 discovery:
   # Business sweeps: category-based web-search + directory scrapes.
   business:
-    # Free-form terms fanned out as `{term} in {name}, {region}` /
-    # `best {term} {name}` / `local {term} {name}`. Draw from the
-    # town's live business categories, adjusted for local vocab.
+    # Free-form terms fanned out as `{term} {name}, {region} hours contact` /
+    # `{term} {name} official website` (engine/business_discovery.query_templates).
+    # Draw from the town's live business categories, adjusted for local vocab.
     category_query_terms:
       - "restaurants"
       - "coffee shops"
       - "outfitters"
       - "boutiques"
     # Seed directory pages whose outbound links are candidate businesses.
-    # Blocked link classes (site utilities, PDFs, generic section pages)
-    # are filtered by engine/discovery.directory_link_block_reason.
+    # Blocked link classes (the directory's own site and every other seed's,
+    # site utilities, PDFs, generic section pages) are filtered by
+    # engine/discovery.directory_link_block_reason.
     seed_directories:
       - "https://visitexample.com/things-to-do/"
     # Optional Facebook page search — `site:facebook.com "{town}" {term}`.

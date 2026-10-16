@@ -144,15 +144,35 @@ def host_blocked(url: str, allow_gov: bool = False) -> bool:
     return False
 
 
-def directory_link_block_reason(seed_host: str, link: str) -> Optional[str]:
+def same_site(url: str, host: str) -> bool:
+    """`url` is on `host`'s site: the same host, ignoring `www.`, or a
+    subdomain of either (tahoechamber.org's directory is on
+    business.tahoechamber.org)."""
+    a, b = listing_hosts.bare_host(url), listing_hosts.bare_host(f"https://{host}")
+    return bool(a and b) and (a == b or a.endswith("." + b) or b.endswith("." + a))
+
+
+def seed_directory_reason(url: str, directory_hosts: Iterable[str]) -> Optional[str]:
+    """A configured seed directory is a directory, never a candidate: not its
+    homepage, not any of its pages."""
+    for host in directory_hosts:
+        if same_site(url, host):
+            return f"a seed directory's own page ({host})"
+    return None
+
+
+def directory_link_block_reason(seed_host: str, link: str, *,
+                                directory_hosts: Iterable[str] = ()) -> Optional[str]:
     p = urlparse(link)
     host = p.netloc.lower()
     path = (p.path or "/").lower()
     segments = [seg for seg in path.split("/") if seg]
     if not host:
         return "missing host"
-    if host == seed_host:
-        return "same host as seed"
+    if same_site(link, seed_host):
+        return "same site as seed"
+    if why := seed_directory_reason(link, directory_hosts):
+        return why
     if host_blocked(link, allow_gov=True):
         return "host matches general blocklist"
     if any(bad in host for bad in DIRECTORY_HOST_BLOCKLIST_SUBSTRINGS):
@@ -161,6 +181,8 @@ def directory_link_block_reason(seed_host: str, link: str) -> Optional[str]:
         return "file asset/media URL"
     if any(token in path for token in DIRECTORY_PATH_BLOCKLIST_SUBSTRINGS):
         return "directory utility/map/brochure URL"
+    if own_site.is_utility_page(link) or own_site.EVENT_PATH.search(path):
+        return "a site utility page (joining, jobs, deals, member list, search, calendar, events)"
     if own_site.is_article_page(link):
         return "an article or guide page"
     generic_hits = sum(1 for seg in segments if seg in DIRECTORY_SECTION_PATH_TOKENS)
@@ -367,10 +389,13 @@ def firecrawl_scrape(url: str, *, raise_on_error: bool = False) -> dict:
         print(msg, file=sys.stderr)
         return {}
     data = body.get("data") or {}
+    meta = data.get("metadata") or {}
     return {
         "markdown": data.get("markdown") or "",
         "links": data.get("links") or [],
-        "title": ((data.get("metadata") or {}).get("title")) or "",
+        "title": meta.get("title") or "",
+        # Where the page landed after redirects.
+        "url": meta.get("url") or meta.get("sourceURL") or url,
     }
 
 
@@ -403,17 +428,16 @@ def sweep_web_search(
     kind: str = "business",
     per_source: int = 25,
     allow_gov: bool = False,
+    directory_hosts: Iterable[str] = (),
     error_sink: Optional[list[str]] = None,
 ) -> list[Candidate]:
     """Fan out a set of Firecrawl `/v1/search` queries and collect candidates.
 
-    query_templates are Python format strings with named placeholders
-    {town}, {region}, {category}. The caller loops through categories and
-    passes the resolved template; here we accept an already-templated list
-    so callers can inject arbitrary query shapes (`"nonprofit organizations
-    in {town}"`, `"{category} in {town}, {region}"`, `"best {category}
-    {town}"`, etc.).
+    query_templates are the resolved queries (business_discovery.query_templates
+    builds them). A result on a seed directory's site (`directory_hosts`) is
+    the directory, not an organisation, and is dropped.
     """
+    directory_hosts = list(directory_hosts)
     out: list[Candidate] = []
     seen: set[str] = set()
     for q in query_templates:
@@ -427,7 +451,8 @@ def sweep_web_search(
             continue
         for res in results:
             url = res.get("url") or ""
-            if not url or host_blocked(url, allow_gov=allow_gov):
+            if not url or host_blocked(url, allow_gov=allow_gov) \
+                    or seed_directory_reason(url, directory_hosts):
                 continue
             canon = canonicalize_url(url)
             if canon in seen:
@@ -454,8 +479,11 @@ def sweep_directories(
 ) -> list[Candidate]:
     """Scrape seed directory pages and collect the outbound links they surface.
 
-    Each seed's linkset is filtered through directory_link_block_reason.
+    Each seed's linkset is filtered through directory_link_block_reason; a
+    link to any seed's own site (one directory links another) is dropped.
     """
+    seed_urls = list(seed_urls)
+    directory_hosts = [listing_hosts.bare_host(u) for u in seed_urls]
     out: list[Candidate] = []
     seen: set[str] = set()
     for seed in seed_urls:
@@ -475,7 +503,7 @@ def sweep_directories(
                 break
             if not isinstance(link, str) or not link.startswith(("http://", "https://")):
                 continue
-            if directory_link_block_reason(seed_host, link):
+            if directory_link_block_reason(seed_host, link, directory_hosts=directory_hosts):
                 continue
             canon = canonicalize_url(link)
             if canon in seen:
@@ -561,12 +589,15 @@ def verify_candidate(
     aliases: list[str] | None = None,
     kind: str = "business",
     name: Optional[str] = None,
+    directory_hosts: Iterable[str] = (),
 ) -> dict:
     """Adversarial verify: scrape the candidate URL, decide whether it's a
     real customer-facing entity in the target town (member-facing, for a
     community group or non-profit `kind`) — on its own site, not a page
     about it (`not_own_site_reason`, judged with `name`, else the name the
     page title gives; a named candidate that fails is rejected unscraped).
+    A seed directory's own page (`directory_hosts`), or a host redirecting to
+    one, is the directory, not an organisation.
 
     Return shape matches `engine.policy.is_high_confidence()` expectations:
       {
@@ -584,7 +615,10 @@ def verify_candidate(
     # Government departments are community discovery's, never a business.
     allow_gov = kind != "business"
     # Decided from the URL and the search-result name: no Firecrawl spent.
+    directory_hosts = list(directory_hosts)
     unscraped = []
+    if why := seed_directory_reason(canonical_url, directory_hosts):
+        unscraped.append(why)
     if why := roundup_reason(canonical_url, name, from_search=True):
         unscraped.append(why)
     if name and (why := not_own_site_reason(canonical_url, name, allow_gov=allow_gov)):
@@ -608,6 +642,11 @@ def verify_candidate(
 
     md_lower = md.lower()
     reasons_reject: list[str] = []
+
+    landed = scraped.get("url") or canonical_url
+    if not same_site(landed, listing_hosts.bare_host(canonical_url)) \
+            and (why := seed_directory_reason(landed, directory_hosts)):
+        reasons_reject.append(f"redirects to {landed}: {why}")
 
     if not name and (why := not_own_site_reason(
             canonical_url, name_from_title(scraped.get("title")), allow_gov=allow_gov)):

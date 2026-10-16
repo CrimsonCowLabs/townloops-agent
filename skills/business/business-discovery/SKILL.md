@@ -16,10 +16,23 @@ is for the ones that never host a listed event.
 ## Flow
 
 1. **sweep** — reads `town-profile.yaml` → `discovery.business`:
-   - `category_query_terms`: each becomes `"{term} in {town}, {region}"`,
-     `"best {term} {town}"`, `"local {term} {town}"` Firecrawl searches.
-   - `seed_directories`: directory pages whose outbound links are candidates
-     (site utilities, maps, PDFs and generic section pages are filtered).
+   - `category_query_terms` (and every `query_groups` term, all kinds):
+     each becomes two Firecrawl searches (`business_discovery.query_templates`),
+     `"{term} {town}, {region} <signal>"` and `"{term} {town} official website"`,
+     where the signal is what an own site carries for the kind — `hours contact`
+     (business), `about us` (community), `donate` (non-profit). The old
+     `"best {term} {town}"` / `"{term} in {town}"` shapes ranked editorial
+     roundups above any actual organisation (SLT's harvest: 8 of 25 bad rows
+     from two queries), so no shape says "best", "top" or "in {town}".
+   - `seed_directories`: directory pages whose outbound links are candidates.
+     Filtered (`discovery.directory_link_block_reason`): the seed's own site
+     (`www.` and subdomains — the chamber's `business.` directory), every
+     other seed directory's site, site utilities (member application, jobs,
+     deals, member list, search, calendar, events — `own_site.UTILITY_PATH` +
+     `EVENT_PATH`), maps, PDFs, editorial and generic section pages. A seed
+     directory is never a candidate of any kind: a search result on one is
+     dropped, and verify rejects its pages and a host that redirects to one
+     (`tahoesouth.com` → `visitlaketahoe.com`).
    - `facebook_terms` (optional): `site:facebook.com "{town}" {term}`.
 
    Review sites, maps and wikis are dropped by the kernel's host blocklist.

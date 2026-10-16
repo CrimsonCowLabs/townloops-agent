@@ -399,19 +399,27 @@ def configured_kinds(profile: dict) -> list[str]:
         "category_query_terms", "query_groups", "seed_directories", "facebook_terms"))]
 
 
+# Search shapes that land on an organisation's own site, never a roundup:
+# no "best"/"top"/"in {town}" (those rank listicles first). One shape adds
+# what an own site carries for its kind; the other asks for the site itself.
+OWN_SITE_SIGNAL = {"business": "hours contact", "community": "about us", "nonprofit": "donate"}
+
+
 def query_templates(profile: dict, town_name: str, region: str, kind: str = KIND) -> list[str]:
     loc = f"{town_name}, {region}".strip(", ")
     cfg = _kind_profile(profile, kind)
     terms = list(cfg.get("category_query_terms") or [])
     for group in cfg.get("query_groups") or []:
         terms += list((group or {}).get("terms") or [])
-    out: list[str] = []
-    for term in terms:
-        if kind == KIND:
-            out += [f"{term} in {loc}", f"best {term} {town_name}", f"local {term} {town_name}"]
-        else:
-            out += [f"{term} in {loc}", f"{term} {town_name}"]
-    return out
+    return [q for term in terms for q in (
+        f"{term} {loc} {OWN_SITE_SIGNAL[kind]}", f"{term} {town_name} official website")]
+
+
+def seed_directory_hosts(profile: dict) -> list[str]:
+    """Every kind's seed directory hosts: a directory is never a candidate of
+    any kind."""
+    return sorted({listing_hosts.bare_host(u) for k in KINDS
+                   for u in _kind_profile(profile, k).get("seed_directories") or []})
 
 
 def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
@@ -429,7 +437,9 @@ def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
     templates = query_templates(profile, town_name, region, kind)
     if templates:
         found += discovery.sweep_web_search(town_name, region, templates, kind=kind,
-                                            per_source=per_source, error_sink=errors)
+                                            per_source=per_source,
+                                            directory_hosts=seed_directory_hosts(profile),
+                                            error_sink=errors)
     if cfg.get("seed_directories"):
         found += discovery.sweep_directories(cfg["seed_directories"], kind=kind,
                                              per_source=per_source, error_sink=errors)
@@ -448,6 +458,7 @@ def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
     down) leaves the candidate `new` for the next run rather than rejecting it."""
     index = LiveIndex.from_api(client, kind)
     town_name = profile.get("name") or town_slug
+    directory_hosts = seed_directory_hosts(profile)
     out = {"processed": 0, "verified": 0, "rejected": 0, "already_live": 0,
            "deferred": 0, "errors": []}
     for cand in pending_verify(conn, town_slug, limit, kind):
@@ -459,6 +470,7 @@ def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
                 aliases=list(profile.get("name_aliases") or []),
                 **({} if kind == KIND else {"kind": kind}),
                 name=cand.get("display_name"),
+                directory_hosts=directory_hosts,
             )
         except Exception as e:
             out["deferred"] += 1

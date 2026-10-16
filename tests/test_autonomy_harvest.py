@@ -82,11 +82,11 @@ class TestOrganisations:
                       "website": "https://cuppa.example", "status": "pending"},
             "shady": {"id": 2, "slug": "shady", "name": "Shady Biz",
                       "website": "https://shady.example", "status": "rejected"}}
-        results["coffee shops in"] = [
+        results["coffee shops"] = [
             {"url": "https://cuppa.example/", "title": "Cuppa Coffee"},
             {"url": "https://shady.example/", "title": "Shady Biz"},
             {"url": "https://newcafe.example/", "title": "New Cafe"}]
-        results["nonprofit organizations in"] = [
+        results["nonprofit organizations"] = [
             {"url": "https://lakefriends.org/", "title": "Friends of the Lake"}]
         sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
         sites["https://lakefriends.org"] = ("Friends of the Lake is a nonprofit in South Lake "
@@ -108,7 +108,7 @@ class TestOrganisations:
         town.api.tables["businesses"] = {
             "nouveau": {"id": 9, "slug": "nouveau", "name": "Nouveau Cafe & Bakery",
                         "website": "https://nouveau.example", "status": "published"}}
-        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        results["coffee shops"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
         sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
         discovery(town, "harvest")
         discovery(town, "promote", "--limit", "5")
@@ -122,7 +122,7 @@ class TestOrganisations:
     def test_entities_are_submitted_by_default(self, town, harvest):
         results, sites = harvest
         town.set_profile({k: v for k, v in town.profile.items() if k != "autonomy"})
-        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        results["coffee shops"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
         sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
         discovery(town, "harvest")
         discovery(town, "promote", "--limit", "5")
@@ -130,7 +130,7 @@ class TestOrganisations:
 
     def test_a_rejected_organisation_is_not_resubmitted_under_a_new_url(self, town, harvest):
         results, sites = harvest
-        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        results["coffee shops"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
         sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
         discovery(town, "harvest")
         discovery(town, "promote")
@@ -138,7 +138,7 @@ class TestOrganisations:
         town.api.reject("businesses", sent["slug"])
         town.poll()
 
-        results["coffee shops in"] = [{"url": "https://newcafe-tahoe.example/", "title": "New Cafe"}]
+        results["coffee shops"] = [{"url": "https://newcafe-tahoe.example/", "title": "New Cafe"}]
         sites["https://newcafe-tahoe.example"] = "New Cafe, South Lake Tahoe. Menu, hours."
         discovery(town, "harvest")
         discovery(town, "promote")
@@ -147,7 +147,7 @@ class TestOrganisations:
     def test_without_the_entity_gate_nothing_is_approved(self, town, harvest):
         results, sites = harvest
         town.set_profile(town.profile, entity_moderation=False)
-        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        results["coffee shops"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
         sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
         discovery(town, "harvest")
         discovery(town, "promote")
@@ -155,7 +155,7 @@ class TestOrganisations:
 
     def test_a_held_promote_spends_no_attempt(self, town, harvest):
         results, sites = harvest
-        results["coffee shops in"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
+        results["coffee shops"] = [{"url": "https://newcafe.example/", "title": "New Cafe"}]
         sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
         discovery(town, "harvest")
         town.set_profile(town.profile, entity_moderation=False)

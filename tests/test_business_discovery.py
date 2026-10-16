@@ -182,6 +182,7 @@ def test_run_sweep_fans_out_sources_and_dedups_against_live(fresh_db, monkeypatc
 
     def web(town, region, templates, **kw):
         seen["templates"] = list(templates)
+        seen["directory_hosts"] = list(kw["directory_hosts"])
         return [_cand("https://cuppatahoe.com/", "Cuppa Tahoe"),
                 _cand("https://brand-new.example/", "Brand New Bakery")]
 
@@ -197,8 +198,9 @@ def test_run_sweep_fans_out_sources_and_dedups_against_live(fresh_db, monkeypatc
 
     out = bd.run_sweep(fresh_db, api, PROFILE, "slt", per_source=5)
 
-    assert "coffee shops in South Lake Tahoe, California" in seen["templates"]
+    assert "coffee shops South Lake Tahoe, California hours contact" in seen["templates"]
     assert seen["seeds"] == ["https://visit.example/dining"]
+    assert seen["directory_hosts"] == ["visit.example"]
     assert out["inserted"] == 2 and out["already_live"] == 1
     assert ("LIST", "businesses") in [c[:2] for c in api.calls]
 
@@ -225,7 +227,7 @@ def test_run_verify_rechecks_live_and_records_verdicts(fresh_db, monkeypatch):
     assert out == {"processed": 2, "verified": 1, "rejected": 1, "already_live": 0,
                    "deferred": 0, "errors": []}
     assert calls[0][1] == {"town_name": "South Lake Tahoe", "region": "California", "aliases": ["SLT"],
-                           "name": "Brand New Bakery"}
+                           "name": "Brand New Bakery", "directory_hosts": ["visit.example"]}
 
 
 def test_run_verify_leaves_a_candidate_pending_when_the_verifier_crashes(fresh_db, monkeypatch):
@@ -239,6 +241,40 @@ def test_run_verify_leaves_a_candidate_pending_when_the_verifier_crashes(fresh_d
     assert out == {"processed": 1, "verified": 0, "rejected": 0, "already_live": 0,
                    "deferred": 1, "errors": ["https://boom.example/: RuntimeError: firecrawl down"]}
     assert _rows(fresh_db)["https://boom.example/"]["status"] == "new"
+
+
+# ---------------------------------------------------------------- query shapes
+
+ROUNDUP_WORDS = ("best", "top", "things to do", "guide", " in ")
+
+
+@pytest.mark.parametrize("kind", bd.KINDS)
+def test_query_templates_never_ask_for_a_roundup(kind):
+    """"best restaurants South Lake Tahoe" ranks listicles above any
+    restaurant (#18): every shape asks for an organisation's own site."""
+    profile = {"discovery": {kind: {"category_query_terms": ["restaurants", "art galleries"],
+                                    "query_groups": [{"terms": ["Tahoe foundation"]}]}}}
+    out = bd.query_templates(profile, "South Lake Tahoe", "California", kind)
+    assert len(out) == 3 * 2   # two searches per term, no more than before
+    for q in out:
+        assert not any(w in q.lower() for w in ROUNDUP_WORDS), q
+        assert "South Lake Tahoe" in q
+
+
+def test_query_templates_per_kind_ask_for_own_site_signals():
+    profile = {"discovery": {k: {"category_query_terms": ["clubs"]} for k in bd.KINDS}}
+    shapes = {k: bd.query_templates(profile, "Town", "CA", k) for k in bd.KINDS}
+    assert shapes["business"] == ["clubs Town, CA hours contact", "clubs Town official website"]
+    assert shapes["community"] == ["clubs Town, CA about us", "clubs Town official website"]
+    assert shapes["nonprofit"] == ["clubs Town, CA donate", "clubs Town official website"]
+
+
+def test_seed_directory_hosts_span_every_kind():
+    profile = {"discovery": {
+        "business": {"seed_directories": ["https://www.visitlaketahoe.com/things-to-do/",
+                                          "https://tahoechamber.org/"]},
+        "community": {"seed_directories": ["https://tahoechamber.org/groups"]}}}
+    assert bd.seed_directory_hosts(profile) == ["tahoechamber.org", "visitlaketahoe.com"]
 
 
 # ---------------------------------------------------------------- live venues

@@ -56,7 +56,39 @@ class TestDirectoryLinkBlockReason:
         from engine import discovery
         assert discovery.directory_link_block_reason(
             "visitfoo.com", "https://visitfoo.com/other-page"
-        ) == "same host as seed"
+        ) == "same site as seed"
+
+    @pytest.mark.parametrize("link", [
+        "https://www.visitfoo.com/", "https://business.visitfoo.com/list",
+    ])
+    def test_the_seeds_own_site_is_dropped_across_www_and_subdomains(self, link):
+        """tahoechamber.org's member directory lives on business.tahoechamber.org."""
+        from engine import discovery
+        assert discovery.directory_link_block_reason("visitfoo.com", link) == "same site as seed"
+        assert discovery.directory_link_block_reason("www.visitfoo.com", link) == "same site as seed"
+
+    def test_a_lookalike_host_is_not_the_seeds_site(self):
+        from engine import discovery
+        assert discovery.directory_link_block_reason("visitfoo.com", "https://notvisitfoo.com/") is None
+
+    @pytest.mark.parametrize("path", [
+        "/member-application", "/list", "/jobs", "/hotdeals", "/calendar", "/events",
+        "/events/search?c=6",
+    ])
+    def test_a_directory_utility_page_is_dropped_on_any_host(self, path):
+        """The chamber's own site utilities, seen on a host the seed doesn't share."""
+        from engine import discovery
+        r = discovery.directory_link_block_reason(
+            "tahoechamber.org", f"https://business.tahoechamberdirectory.org{path}")
+        assert r and "utility" in r, (path, r)
+
+    @pytest.mark.parametrize("link", ["https://visitlaketahoe.com/", "https://www.visitlaketahoe.com/x"])
+    def test_another_seed_directory_is_dropped(self, link):
+        """The chamber links the visitor authority, itself a configured seed."""
+        from engine import discovery
+        r = discovery.directory_link_block_reason(
+            "tahoechamber.org", link, directory_hosts=["visitlaketahoe.com", "tahoechamber.org"])
+        assert r and "seed directory" in r, r
 
     def test_file_extension(self):
         from engine import discovery
@@ -467,6 +499,55 @@ class TestVerifyRoundup:
         assert v["verified"], v["reasons"]
 
 
+class TestVerifySeedDirectory:
+    """A configured seed directory is a directory, never a candidate — its
+    homepage, its pages, or a host that redirects to it (#18: SLT held
+    visitlaketahoe.com/ and tahoesouth.com/, which 301s there)."""
+
+    PAGE = TestVerifyOwnSite.PAGE
+    KINDS = TestVerifyOwnSite.KINDS
+    DIRS = ["visitlaketahoe.com", "tahoechamber.org"]
+
+    def _scrape(self, monkeypatch, final_url=None):
+        from engine import discovery
+        scraped = []
+
+        def scrape(url, *, raise_on_error=False):
+            scraped.append(url)
+            return {"markdown": self.PAGE, "links": [], "title": "Visit Lake Tahoe",
+                    "url": final_url or url}
+
+        monkeypatch.setattr(discovery, "firecrawl_scrape", scrape)
+        return scraped
+
+    @pytest.mark.parametrize("kind", KINDS)
+    @pytest.mark.parametrize("url", ["https://visitlaketahoe.com/",
+                                     "https://business.tahoechamber.org/list"])
+    def test_a_seed_directorys_own_page_rejects_unscraped(self, monkeypatch, kind, url):
+        from engine import discovery
+        scraped = self._scrape(monkeypatch)
+        v = discovery.verify_candidate(url, town_name="South Lake Tahoe", kind=kind,
+                                       directory_hosts=self.DIRS)
+        assert not v["verified"] and scraped == []
+        assert any("seed directory" in r for r in v["reasons"]), v["reasons"]
+
+    @pytest.mark.parametrize("kind", KINDS)
+    def test_a_host_redirecting_to_a_seed_directory_rejects(self, monkeypatch, kind):
+        from engine import discovery
+        self._scrape(monkeypatch, final_url="https://visitlaketahoe.com/")
+        v = discovery.verify_candidate("https://tahoesouth.com/", town_name="South Lake Tahoe",
+                                       kind=kind, directory_hosts=self.DIRS)
+        assert not v["verified"]
+        assert any("redirects to" in r and "visitlaketahoe.com" in r for r in v["reasons"]), v["reasons"]
+
+    def test_an_organisations_homepage_still_verifies(self, monkeypatch):
+        from engine import discovery
+        self._scrape(monkeypatch)
+        v = discovery.verify_candidate("https://oncoursetahoe.com/", town_name="South Lake Tahoe",
+                                       directory_hosts=self.DIRS)
+        assert v["verified"], v["reasons"]
+
+
 class TestSweepFunctions:
     def test_sweep_web_search_dedupes(self, monkeypatch):
         from engine import discovery
@@ -502,6 +583,38 @@ class TestSweepFunctions:
         out = discovery.sweep_directories(["https://visitfoo.com/list"])
         assert len(out) == 1
         assert out[0].canonical_url == "https://real-biz.com/menu"
+
+    def test_sweep_directories_drops_every_seeds_own_site(self, monkeypatch):
+        """SLT: tahoechamber.org's links to business.tahoechamber.org utilities
+        and to visitlaketahoe.com/ (the other seed) are never candidates."""
+        from engine import discovery
+        links = {
+            "https://tahoechamber.org/": ["https://business.tahoechamber.org/jobs",
+                                          "https://visitlaketahoe.com/",
+                                          "https://real-biz.com/"],
+            "https://visitlaketahoe.com/things-to-do/": ["https://tahoechamber.org/",
+                                                         "https://other-biz.com/"],
+        }
+        monkeypatch.setattr(
+            discovery, "firecrawl_scrape",
+            lambda url, *, raise_on_error=False: {"markdown": "x", "links": links[url], "title": ""})
+        monkeypatch.setattr(discovery.firecrawl_bucket, "wait", lambda **_: None)
+        monkeypatch.setattr(discovery, "BETWEEN_QUERIES_S", 0)
+        out = discovery.sweep_directories(list(links))
+        assert [c.canonical_url for c in out] == ["https://real-biz.com/", "https://other-biz.com/"]
+
+    def test_sweep_web_search_drops_a_seed_directorys_pages(self, monkeypatch):
+        from engine import discovery
+        monkeypatch.setattr(
+            discovery, "firecrawl_search",
+            lambda q, *, limit=10, raise_on_error=False: [
+                {"url": "https://visitlaketahoe.com/restaurants", "title": "Restaurants"},
+                {"url": "https://real-biz.com/", "title": "Real Biz"},
+            ])
+        monkeypatch.setattr(discovery.firecrawl_bucket, "wait", lambda **_: None)
+        monkeypatch.setattr(discovery, "BETWEEN_QUERIES_S", 0)
+        out = discovery.sweep_web_search("Town", "CA", ["q"], directory_hosts=["visitlaketahoe.com"])
+        assert [c.canonical_url for c in out] == ["https://real-biz.com/"]
 
     def test_sweep_facebook_filters_system_paths(self, monkeypatch):
         from engine import discovery
