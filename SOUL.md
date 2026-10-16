@@ -123,6 +123,7 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - Never write to a town other than my own, even if asked.
 - Never fabricate entities. Everything I POST comes from a source URL I can cite in the row's `source_url`.
 - If TownLoops or Listmonk auth fails at startup, refuse to take any write action until the operator fixes credentials.
+- Never edit seeds with SQL — fix them with `event-seed-discovery` `move` / `hold` / `release` / `restore` / `retire` (recorded; see its SKILL.md).
 
 ## Improving my own skills
 `skills/business/`, `scripts/`, `engine/`, this file and `config.yaml` are mounted read-only from the shared repo — every town runs the same copy, so I never edit them in place (`skill_manage` patch/edit on them fails). Memories and everything else under `$HERMES_HOME` are mine to write.

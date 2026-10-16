@@ -26,7 +26,7 @@ HELP_TEXT = """Available commands (all instant, no LLM):
   /status                         event / seed / workqueue counts
   /pending [N]                    list N pending events (default 5)
   /stuck                          workqueue rows with attempts >= 3
-  /seeds proposed|approved|rejected
+  /seeds proposed|approved|rejected|held
                                   list seeds by status
   /discover-seeds                 kick event-seed-discovery in background
   /find-events [--seed-id N]      kick event-find in background
@@ -114,8 +114,8 @@ def _cmd_stuck(_: list[str]) -> str:
 
 def _cmd_seeds(args: list[str]) -> str:
     status = args[0].lower() if args else "approved"
-    if status not in ("proposed", "approved", "rejected"):
-        return "Usage: `/seeds proposed|approved|rejected`"
+    if status not in ("proposed", "approved", "rejected", "held"):
+        return "Usage: `/seeds proposed|approved|rejected|held`"
     seeds = db_v2.event_seeds_by_status(status)
     if not seeds:
         return f"No {status} seeds."
@@ -123,7 +123,12 @@ def _cmd_seeds(args: list[str]) -> str:
     for s in seeds:
         last = s.get("last_event_count")
         last_str = f" · last: {last} events" if last is not None else ""
-        lines.append(f"  · #{s['seed_id']:2d} [{s['kind']}] {s['name']}{last_str}")
+        held = ""
+        if s.get("hold_reason"):
+            held = f" · held: {s['hold_reason']}"
+        if s.get("hold_note"):
+            held += f" — {s['hold_note']}"
+        lines.append(f"  · #{s['seed_id']:2d} [{s['kind']}] {s['name']}{last_str}{held}")
     return "\n".join(lines)
 
 

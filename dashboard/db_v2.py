@@ -248,9 +248,14 @@ def workqueue_requeue(queue_id: int) -> int:
 # --------------------------------------------------------------------------
 
 def event_seeds_by_status(status: str, limit: int = 200) -> list[dict]:
-    """status in {proposed, approved, rejected}."""
-    if status not in ("proposed", "approved", "rejected"):
+    """status in {proposed, approved, rejected, held}; held seeds are
+    engine/seeds.held's list (with `hold_reason` and `hold_note`)."""
+    if status not in ("proposed", "approved", "rejected", "held"):
         raise ValueError(f"unknown seed status: {status}")
+    if status == "held":
+        from engine.seeds import held
+        with connect() as c:
+            return held(c)
     with connect() as c:
         rows = c.execute(
             "SELECT seed_id, name, url, kind, status, discovered_by, "
@@ -265,16 +270,22 @@ def event_seeds_by_status(status: str, limit: int = 200) -> list[dict]:
     return [{**dict(r), "health_label": LABELS.get(r["health_status"])} for r in rows]
 
 
+_SEED_VERDICTS = {"proposed": "propose", "approved": "approve", "rejected": "reject"}
+
+
 def set_seed_status(seed_id: int, status: str) -> int:
-    if status not in ("proposed", "approved", "rejected"):
+    """The operator's seed approve/reject — a recorded status change through
+    engine/seeds.set_status. Returns 1, or 0 for no such seed."""
+    if status not in _SEED_VERDICTS:
         raise ValueError(f"invalid seed status: {status}")
+    from engine import autonomy, seeds
     with connect() as c:
-        cur = c.execute(
-            "UPDATE event_seeds SET status = ?, last_seen_at = ? "
-            "WHERE seed_id = ?",
-            (status, _iso_utc_now(), seed_id),
-        )
-        return cur.rowcount
+        row = c.execute("SELECT * FROM event_seeds WHERE seed_id = ?", (seed_id,)).fetchone()
+        if not row:
+            return 0
+        seeds.set_status(c, dict(row), status, autonomy.Decision(
+            _SEED_VERDICTS[status], "operator", {"was": row["status"]}))
+        return 1
 
 
 def ack_seed_health(seed_id: int) -> bool:
@@ -289,7 +300,7 @@ def seed_counts() -> dict:
         rows = c.execute(
             "SELECT status, COUNT(*) AS n FROM event_seeds GROUP BY status"
         ).fetchall()
-    out = {"proposed": 0, "approved": 0, "rejected": 0}
+    out = {"proposed": 0, "approved": 0, "rejected": 0, "held": 0}
     for r in rows:
         out[r["status"]] = r["n"]
     return out

@@ -1027,6 +1027,7 @@ def v2_overview(request: Request, filter: str = "pending"):
     approval = _v2_approval_ctx(filt)
     seeds_approved = db_v2.event_seeds_by_status("approved")
     seeds_proposed = db_v2.event_seeds_by_status("proposed")
+    seeds_held = db_v2.event_seeds_by_status("held")
     seed_totals = db_v2.seed_counts()
     wq_counts = db_v2.workqueue_counts_by_action()
     state_counts = db_v2.event_counts_by_state()
@@ -1038,6 +1039,7 @@ def v2_overview(request: Request, filter: str = "pending"):
         "empty_state": approval["empty_state"],
         "seeds_approved": seeds_approved,
         "seeds_proposed": seeds_proposed,
+        "seeds_held": seeds_held,
         "seed_totals": seed_totals,
         "wq_counts": wq_counts,
         "wq_max": wq_max,
@@ -1115,6 +1117,14 @@ def v2_frag_seeds_approved(request: Request):
 def v2_frag_seeds_proposed(request: Request):
     return _render_v2_fragment("seeds_proposed", request, {
         "seeds": db_v2.event_seeds_by_status("proposed"),
+    })
+
+
+@app.get("/v2/fragments/seeds-held",
+         dependencies=[Depends(auth.require_session)])
+def v2_frag_seeds_held(request: Request):
+    return _render_v2_fragment("seeds_held", request, {
+        "seeds": db_v2.event_seeds_by_status("held"),
     })
 
 

@@ -36,7 +36,7 @@
    this always-visible lets the operator kick a fresh discover-seeds run
    without hunting for the button. #}
 <details class="v2-band" id="seeds" open>
-  <summary class="v2-band-summary"><h2 class="v2-h2">Seeds &amp; sources · {{ seed_totals.approved }} approved · {{ seed_totals.proposed }} proposed</h2></summary>
+  <summary class="v2-band-summary"><h2 class="v2-h2">Seeds &amp; sources · {{ seed_totals.approved }} approved · {{ seed_totals.proposed }} proposed{% if seed_totals.held %} · {{ seed_totals.held }} held{% endif %}</h2></summary>
   {% include "v2/_bands/4_seeds.html" %}
 </details>
 

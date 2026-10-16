@@ -32,6 +32,7 @@ from engine import event_state
 from engine import inspection
 from engine import lock as _lock
 from engine import moderation
+from engine import seeds as seed_ops
 from engine import workqueue
 
 
@@ -369,6 +370,10 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "SELECT status, COUNT(*) AS count FROM event_seeds GROUP BY status"
     ).fetchall()}
 
+    # Held on purpose (event-seed-discovery hold) — listed until released.
+    held = [{k: h[k] for k in ("seed_id", "name", "url", "hold_reason", "hold_note")}
+            for h in seed_ops.held(conn)]
+
     # Shipped in the window, one line per Series (event_groups), not per date.
     cutoff = (now - timedelta(hours=hours)).isoformat(timespec="seconds")
     shipped_rows = [dict(r) for r in conn.execute(
@@ -405,6 +410,11 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
             md_lines.append(f"- {r['title']} — {r['date_display']}")
     if not shipped:
         md_lines.append("- (none)")
+    if held:
+        md_lines += ["", "## Held seeds",
+                     "Not scraped until `event-seed-discovery release --seed-id N`:"]
+        md_lines += [f"- {h['name']} (#{h['seed_id']}) — {h['hold_reason']}"
+                     + (f": {h['hold_note']}" if h["hold_note"] else "") + f" — {h['url']}" for h in held]
 
     report_dir = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -423,6 +433,8 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         + f"shipped: {shipped_counts['events']} events ({shipped_counts['series']} Series, "
         f"{shipped_counts['singletons']} one-off)\n"
         f"seeds: {seeds}\n"
+        + ("held seeds: " + ", ".join(f"{h['name']} ({h['hold_reason']})" for h in held) + "\n"
+           if held else "")
     )
     if auto:
         tg += moderation.digest_telegram(auto)
@@ -434,6 +446,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "events_by_state": events_by_state,
         "approvals_pending": approvals_pending,
         "seeds": seeds,
+        "held_seeds": held,
         "shipped": shipped_counts,
         "workqueue": wq,
         **({"autonomy": auto} if auto else {}),

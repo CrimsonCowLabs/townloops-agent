@@ -1,0 +1,21 @@
+{% if seeds %}
+  <table class="v2-tbl">
+    <thead>
+      <tr><th>Name</th><th>Kind</th><th>URL</th><th>Held because</th><th>Note</th></tr>
+    </thead>
+    <tbody>
+    {% for s in seeds %}
+      <tr>
+        <td>{{ s.name }}</td>
+        <td><span class="v2-tag">{{ s.kind }}</span></td>
+        <td class="v2-url"><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.url|truncate(60) }}</a></td>
+        <td><span class="v2-tag v2-tag-warn">{{ s.hold_reason or 'held' }}</span></td>
+        <td class="muted small">{{ (s.hold_note or '')|truncate(120) }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  <div class="muted small">Not scraped until released (<code>event-seed-discovery release --seed-id N</code>).</div>
+{% else %}
+  <div class="v2-empty muted">No held seeds.</div>
+{% endif %}

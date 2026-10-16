@@ -31,6 +31,7 @@ from datetime import timedelta
 from typing import Optional
 
 from engine import autonomy
+from engine import seeds as seed_ops
 from engine.derive_helpers import (
     dict_rows as _rows, iso_utc_now, names_match, parse_extra_json, parse_instant,
     seed_name_of,
@@ -245,7 +246,7 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
         attention.append(f"possibly cancelled (not acted on): {r['title']} {r['date_local'] or ''}"
                          f" ({r['townloops_slug']}) — {r['cancel_note']}")
     for d in log:
-        if d["subject"] == "seed" and d["verdict"] == "relocate":
+        if d["subject"] == "seed" and d["verdict"] in seed_ops.URL_CHANGES:
             attention.append(f"seed {seed_name_of(d['target']) or d['target']} moved: "
                              f"{d['evidence'].get('from')} → {d['evidence'].get('to')}")
     stuck = conn.execute("SELECT COUNT(*) FROM events WHERE state LIKE 'stuck-%'").fetchone()[0]

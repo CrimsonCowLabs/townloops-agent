@@ -28,6 +28,11 @@ python skills/business/event-seed-discovery/discover.py probe --all       # re-p
 python skills/business/event-seed-discovery/discover.py probe --seed-id N
 python skills/business/event-seed-discovery/discover.py health            # seeds with a source-health alert
 python skills/business/event-seed-discovery/discover.py health --ack N    # accept seed N's new event count
+python skills/business/event-seed-discovery/discover.py move --seed-id N --url URL [--note TEXT]
+python skills/business/event-seed-discovery/discover.py hold --seed-id N --reason manual-only|awaiting-adapter [--note TEXT]
+python skills/business/event-seed-discovery/discover.py release --seed-id N
+python skills/business/event-seed-discovery/discover.py restore --seed-id N [--previous-url]
+python skills/business/event-seed-discovery/discover.py retire --seed-id N [--reason TEXT]
 ```
 
 `discover` runs LLM discovery, HEAD-verifies each URL, and inserts survivors
@@ -77,6 +82,33 @@ libraries, destination calendars) need filtering to the town before any adapter 
 event-find alerts the operator when an established seed suddenly lists nothing or sharply fewer
 events (engine/source_health.py; details in event-find SKILL.md). `health` lists the seeds with
 an alert; `health --ack N` accepts a seed's new level (also the dashboard's **Accept new level**).
+
+## Seed maintenance: move, hold, release
+
+How a seed is fixed — by the agent or the operator. **Never edit `event_seeds` with SQL**, and
+no ad-hoc DB backup is needed: every change below is reversible and recorded as a decision in
+`agent_activity`, so `autonomy why <seed id or name>` explains it (verdict, reason, evidence).
+
+- **`move --seed-id N --url URL [--note …]`** — correct a seed's URL. The new URL is read first
+  the way event-find will read it: an adapter seed (`set-adapter`) through its adapter at the new
+  URL (an `AdapterError` refuses), any other seed's page through Firecrawl — a failed fetch or a
+  challenge/error/near-empty page (engine/blocked_page) refuses, and nothing changes. On success
+  the old URL is kept as `previous_url`, the health baseline starts again, the status is kept;
+  decision `move` / `url-corrected` with `from`, `to`, what was `checked`, the note. A URL another
+  seed already reads is refused.
+- **`restore --seed-id N --previous-url`** — undo a `move` (or a review's calendar relocation):
+  the URLs swap back, the status is kept unless the seed was retired/rejected (then approved).
+  Decision `restore` with `from`/`to`. Without `--previous-url`, `restore` only brings back a
+  retired or rejected seed.
+- **`hold --seed-id N --reason manual-only|awaiting-adapter [--note …]`** — status `held`
+  (`hold_reason`; the note is kept in the hold decision). event-find never scrapes a held seed and the
+  autonomous `review` never trials, re-approves, re-judges, relocates or retires it. Use it for a
+  seed that only a person can read (`manual-only`) or that waits for a deterministic adapter
+  (`awaiting-adapter`) — not `rejected` with a note. Held seeds and their reasons are listed in
+  the nightly digest and the dashboard's Seeds band (`/seeds held` in chat).
+- **`release --seed-id N`** — back to service. Supervised: `approved` if it was approved when held,
+  else `proposed` for the operator — never straight to approved. Autonomous: `proposed`, so the
+  next `review` trials it before event-find reads it again. The decision records `held_from`/`to`.
 
 ## Prompt design
 
@@ -128,3 +160,4 @@ Inactive in supervised mode. In autonomous mode:
 - Retirement is a status change, never a delete: `restore --seed-id N`
   (`--previous-url` to undo a move) brings it back; `retire --seed-id N`
   retires one by hand.
+- **Held** seeds (`hold`) are skipped entirely until `release`.

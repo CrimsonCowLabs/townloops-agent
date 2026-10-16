@@ -9,7 +9,12 @@ trust refreshed; trust decides the rest — a trial must score
 `seed_trust.approve`, a seed below `seed_trust.syndicator` is demoted to
 syndicator and one below `seed_trust.retire` — or one dead for several runs
 whose calendar can't be found again on its own site — is retired
-(reversible: `restore`). A moved calendar replaces the seed URL."""
+(reversible: `restore`). A moved calendar replaces the seed URL.
+
+Maintenance (engine/seeds; every change recorded for `autonomy why`): `move`
+corrects a seed URL after verifying the new one, `hold` takes a seed out of
+service (`manual-only` / `awaiting-adapter`) — event-find and `review` leave
+it alone — and `release` puts it back."""
 
 from __future__ import annotations
 
@@ -30,6 +35,7 @@ import yaml
 
 from engine import autonomy, event_dedup, inspection, source_health
 from engine import seeds as seed_ops
+from engine.event_extract import firecrawl_listing as _listing_fetch   # move: event-find's read
 from engine.event_extract import firecrawl_markdown as _trial_fetch
 
 
@@ -336,8 +342,9 @@ def cmd_show(args) -> int:
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
     for r in conn.execute(
-        "SELECT seed_id, name, url, kind, status, source_role, last_scraped_at, "
-        "  feed_type, feed_url, adapter, adapter_config, health_status, health_note "
+        "SELECT seed_id, name, url, kind, status, hold_reason, status_note, previous_url, "
+        "  source_role, last_scraped_at, feed_type, feed_url, adapter, adapter_config, "
+        "  health_status, health_note "
         "FROM event_seeds ORDER BY status, kind, name"
     ):
         row = dict(r)
@@ -443,22 +450,61 @@ def cmd_retire(args) -> int:
     return 0
 
 
-def cmd_restore(args) -> int:
-    """Undo a retirement (or a rejection): the seed is approved again, and
-    with --previous-url its URL from before a calendar move comes back."""
-    conn = sqlite3.connect(_DB_PATH)
+def _seed(conn: sqlite3.Connection, seed_id: int) -> Optional[dict]:
     conn.row_factory = sqlite3.Row
-    row = conn.execute("SELECT * FROM event_seeds WHERE seed_id = ?", (args.seed_id,)).fetchone()
-    if not row or row["status"] not in ("retired", "rejected") and not args.previous_url:
-        print(json.dumps({"error": f"seed {args.seed_id} is not retired or rejected"}))
+    row = conn.execute("SELECT * FROM event_seeds WHERE seed_id = ?", (seed_id,)).fetchone()
+    return dict(row) if row else None
+
+
+def _maintain(seed_id: int, change) -> int:
+    """Run one seed maintenance change (engine/seeds); its ValueError is the
+    refusal printed back."""
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        seed = _seed(conn, seed_id)
+        if not seed:
+            print(json.dumps({"error": f"no seed {seed_id}"}))
+            return 1
+        out = change(conn, seed)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}))
         return 1
-    if args.previous_url and row["previous_url"]:
-        conn.execute("UPDATE event_seeds SET url = previous_url, previous_url = url "
-                     "WHERE seed_id = ?", (args.seed_id,))
-    seed_ops.set_status(conn, dict(row), "approved",
-                        autonomy.Decision("restore", "operator", {"was": row["status"]}))
-    print(json.dumps({"seed_id": args.seed_id, "status": "approved"}))
+    finally:
+        conn.close()
+    print(json.dumps({"seed_id": seed_id, **out}))
     return 0
+
+
+def cmd_restore(args) -> int:
+    """Undo a retirement (or a rejection): the seed is approved again; with
+    --previous-url the URL from before a move or calendar relocation comes
+    back (any other status kept)."""
+    return _maintain(args.seed_id, lambda conn, seed: {
+        "status": seed_ops.restore(conn, seed, previous_url=args.previous_url)})
+
+
+def cmd_move(args) -> int:
+    """Correct a seed's URL once the new one reads (undo: restore --previous-url)."""
+    def change(conn, seed):
+        d = seed_ops.move(conn, seed, args.url.strip(), fetch=_listing_fetch, note=args.note)
+        return {"url": d.evidence["to"], "previous_url": d.evidence["from"],
+                "checked": d.evidence["checked"]}
+    return _maintain(args.seed_id, change)
+
+
+def cmd_hold(args) -> int:
+    """Take a seed out of service until `release`."""
+    def change(conn, seed):
+        seed_ops.hold(conn, seed, args.reason, args.note)
+        return {"status": "held", "hold_reason": args.reason}
+    return _maintain(args.seed_id, change)
+
+
+def cmd_release(args) -> int:
+    """Put a held seed back — approved, or proposed for a trial in autonomous mode."""
+    mode = autonomy.settings(_load_town_profile())
+    return _maintain(args.seed_id, lambda conn, seed: {
+        "status": seed_ops.release(conn, seed, mode)})
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -496,11 +542,24 @@ def main(argv: Optional[list[str]] = None) -> int:
     rt.add_argument("--seed-id", type=int, required=True)
     rt.add_argument("--reason")
     rt.set_defaults(func=cmd_retire)
-    rs = sub.add_parser("restore", help="approve a retired/rejected seed again")
+    rs = sub.add_parser("restore", help="approve a retired/rejected seed again, or undo a move")
     rs.add_argument("--seed-id", type=int, required=True)
     rs.add_argument("--previous-url", action="store_true",
-                    help="also put back the URL from before a calendar move")
+                    help="put back the URL from before a move or calendar relocation")
     rs.set_defaults(func=cmd_restore)
+    mv = sub.add_parser("move", help="correct a seed URL (verified first; undo: restore --previous-url)")
+    mv.add_argument("--seed-id", type=int, required=True)
+    mv.add_argument("--url", required=True)
+    mv.add_argument("--note", help="why it moved — kept with the decision")
+    mv.set_defaults(func=cmd_move)
+    hd = sub.add_parser("hold", help="take a seed out of service until release")
+    hd.add_argument("--seed-id", type=int, required=True)
+    hd.add_argument("--reason", required=True, choices=seed_ops.HOLD_REASONS)
+    hd.add_argument("--note")
+    hd.set_defaults(func=cmd_hold)
+    rl = sub.add_parser("release", help="put a held seed back (autonomous: trialed first)")
+    rl.add_argument("--seed-id", type=int, required=True)
+    rl.set_defaults(func=cmd_release)
     # Default subcommand is `discover` when none given
     args = p.parse_args(argv)
     if not args.cmd:

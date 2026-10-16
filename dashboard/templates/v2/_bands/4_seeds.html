@@ -22,4 +22,15 @@
       {% include "v2/_fragments/seeds_proposed.html" %}
     </div>
   </div>
+
+  {% if seeds_held %}
+  <div class="v2-panel">
+    <div class="v2-panel-hd">
+      <h3 class="v2-h3">Held seeds ({{ seeds_held|length }})</h3>
+    </div>
+    <div hx-get="/v2/fragments/seeds-held" hx-trigger="every 60s" hx-swap="innerHTML">
+      {% include "v2/_fragments/seeds_held.html" %}
+    </div>
+  </div>
+  {% endif %}
 </div>

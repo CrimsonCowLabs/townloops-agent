@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 027).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 028).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -121,7 +121,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
     Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
     recorded on `event_seeds.feed_*` by `event-seed-discovery discover`/`probe`; no extra fetches),
-    `seeds.py` (seed writes — feed record, status change, adapter — and the autonomous `review` run: trial a proposed
+    `seeds.py` (seed writes — feed record, status change, adapter, and the maintenance verbs `move` (URL verified first —
+    an adapter seed through its adapter — `previous_url` kept) / `hold` (status `held` + `hold_reason`: event-find and
+    `review` skip it) / `release` (approved only if held from approved) / `restore`, each a recorded Decision; `URL_CHANGES` names the verdicts that change a URL — and the autonomous `review` run: trial a proposed
     seed, re-judge approved ones, look for a dead seed's moved calendar; network/LLM injected as `Tools`),
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard

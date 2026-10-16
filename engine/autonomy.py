@@ -157,15 +157,22 @@ def record(conn: sqlite3.Connection, subject: str, target: str, d: Decision) -> 
 
 
 def decisions(conn: sqlite3.Connection, *, target: Optional[str] = None,
-              subject: Optional[str] = None, since: Optional[str] = None,
+              subject: Optional[str] = None, verdict: Optional[str] = None,
+              since: Optional[str] = None, exact: bool = False,
               limit: int = 50) -> list[dict]:
     """Recorded decisions, newest first. `target` matches a prefix (an event
-    uid prefix, a seed id, a slug)."""
+    uid prefix, a seed id, a slug), or with `exact` only itself."""
     where, args = ["worker = ?"], [WORKER]
-    if target:
+    if target and exact:
+        where.append("target = ?")
+        args.append(str(target)[:200])
+    elif target:
         where.append("target LIKE ?")
         args.append(target.replace("%", "") + "%")
-    if subject:
+    if subject and verdict:
+        where.append("action = ?")
+        args.append(f"{subject}:{verdict}")
+    elif subject:
         where.append("action LIKE ?")
         args.append(subject + ":%")
     if since:
