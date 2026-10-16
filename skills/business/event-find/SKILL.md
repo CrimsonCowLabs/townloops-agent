@@ -7,7 +7,23 @@ description: Discover upcoming events from approved event seeds, validate source
 
 Daily pass that scrapes every `approved` event seed and uses the LLM (Codex CLI) to extract upcoming events. Events land at `state=metadata-extracted`, `approval_status=pending` so the operator can approve or decline them in the dashboard.
 
-The current implementation is a generic Firecrawl + LLM path. It is useful for simple pages but is not proof that every approved source is safely automatable. Known calendar platforms and large or recurring sources should use deterministic adapters when implemented.
+Each seed is read by its adapter (`event_seeds.adapter`, engine/seed_adapters.py). Unset is `generic`: Firecrawl markdown → LLM, useful for simple pages but not proof that every approved source is safely automatable — its prompt sees only the first 12,000 characters. Known calendar platforms and large or recurring sources should use a deterministic adapter.
+
+## Seed adapters
+
+| key | reads | config (`adapter_config`, JSON) |
+|---|---|---|
+| `generic` (unset) | Firecrawl markdown → one LLM extraction | — |
+| `tribe` | WordPress The Events Calendar REST: every page up to `total_pages` (re-read from each answer), from today; title, start/end (converted from `utc_*` to town-local), venue + address, description (HTML stripped), categories, tags, url; a row repeated across pages kept once (event id + start) | `url` (else the probed `feed_url` when `feed_type` is `tribe`, else `<site>/wp-json/tribe/events/v1/events`), `days_ahead`, `max_pages` (100) |
+
+Set one with `event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config '{"days_ahead": 120}']`
+(`--adapter generic` goes back). An adapter's events take the generic path below from step 3 unchanged — same
+`event_uid`, so a seed moved onto an adapter keeps its rows; nothing about approval or trust changes. The
+cancellation and judgement quote checks read the adapter's rows rendered as text. Anything short of the whole
+listing (a failed page, an answer without an events list, more pages than `max_pages`, an adapter bug) is a
+failed run, never a zero. An adapter fetches the feed directly, not through Firecrawl, so its host must be in the
+town's `allowed_hosts` (egress). Add an adapter to `seed_adapters.ADAPTERS` — never a URL or hostname
+conditional in find.py.
 
 ## Why one skill does find+extract in v1
 
@@ -19,7 +35,7 @@ The specification has separate `event-find` and `event-extract-metadata` stages.
 find.py                       # scrape every approved seed
 find.py --seed-id N           # scrape one seed by id
 find.py --limit N             # cap seeds this run
-find.py --dry-run             # scrape + extract, print without insert
+find.py --dry-run             # scrape + extract (or read adapters), print; writes no events, runs or seed stats
 ```
 
 The cron wrapper (`scripts/event_find.py`) detaches the run because a multi-seed
@@ -28,9 +44,9 @@ pass is longer than Hermes' 120s cron script timeout. Log:
 dashboard's live activity. A flock (`event-find`) keeps runs from overlapping — a
 second run while one is going exits 0 and records `skipped-overlap`.
 
-## Current generic per-seed loop
+## Per-seed loop
 
-1. Firecrawl-scrape the seed URL as markdown.
+1. Firecrawl-scrape the seed URL as markdown (an adapter seed: read the adapter instead, skipping 2).
 2. Ask the LLM for a JSON array of upcoming events for the configured town.
 3. Upsert each record with `event_uid = sha1(seed_name + normalized_title + start_iso)`.
 4. Set `state=metadata-extracted`, `approval_status=pending`, and `discovered_via=seed:<name>`.
@@ -80,10 +96,10 @@ Do not approve a manual source merely because it returns HTTP 200 or produces on
    the seed's recorded `feed_type`/`feed_url` (`event-seed-discovery show`).
 5. Validate pagination, timezone behavior, recurrence representation, stable source IDs, and town or branch affinity.
 6. Prefer deterministic adapters in this order: JSON/iCal, stable HTML cards, specialized recurrence or annual parser, then LLM fallback.
-7. Normalize adapter records into `engine.event_extract.upsert_event()` so event state, deduplication, pending approval, and workqueue behavior remain unchanged.
+7. Implement the adapter in `engine/seed_adapters.py`, returning records in the extraction's shape, so event state, deduplication, pending approval, and workqueue behavior remain unchanged.
 8. Re-run all reviewed seeds against the copied database and compare counts and deduplication with the generic baseline before changing production configuration.
 
-If adapters are implemented, select them through per-seed configuration such as an adapter key. Do not scatter hostname or URL conditionals through the extraction loop.
+Select adapters through the seed's adapter key (`set-adapter`). Do not scatter hostname or URL conditionals through the extraction loop.
 
 ## Failure and quality checks
 
@@ -97,7 +113,7 @@ If adapters are implemented, select them through per-seed configuration such as 
 
 ## Idempotency and cost
 
-Rerunning a seed deduplicates on `event_uid`; already approved events are not clobbered. The generic path costs one Firecrawl call and one LLM call per seed. Deterministic adapters can remove the LLM call but may require pagination and detail-page requests.
+Rerunning a seed deduplicates on `event_uid`; already approved events are not clobbered. The generic path costs one Firecrawl call and one LLM call per seed. An adapter costs no Firecrawl budget and no LLM call — one direct request per feed page.
 
 ## References
 

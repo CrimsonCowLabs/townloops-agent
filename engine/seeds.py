@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from typing import Callable, Optional
 from urllib.parse import urlparse
 
-from engine import autonomy, event_dedup, feed_probe
+from engine import autonomy, event_dedup, feed_probe, seed_adapters
 from engine.derive_helpers import iso_utc_now, seed_ref
 from engine.event_extract import build_extraction_prompt, parse_json_array, utc_times
 
@@ -45,6 +45,25 @@ def record_feed(conn: sqlite3.Connection, seed_url: str, html: str, final_url: s
         "WHERE url = ?",
         (found["type"], found["url"], json.dumps(detail), iso_utc_now(), seed_url))
     return found
+
+
+def set_adapter(conn: sqlite3.Connection, seed_id: int, adapter: str,
+                config: Optional[dict]) -> None:
+    """How event-find reads the seed (engine/seed_adapters): `generic`
+    clears the adapter and its config. ValueError for an unknown adapter or
+    seed. Commits."""
+    if adapter != seed_adapters.GENERIC and adapter not in seed_adapters.ADAPTERS:
+        raise ValueError(f"unknown adapter {adapter!r} "
+                         f"(known: {', '.join(sorted(seed_adapters.ADAPTERS))}, generic)")
+    if config is not None and not isinstance(config, dict):
+        raise ValueError("adapter config must be a JSON object")
+    generic = adapter == seed_adapters.GENERIC
+    cur = conn.execute("UPDATE event_seeds SET adapter = ?, adapter_config = ? WHERE seed_id = ?",
+                       (None if generic else adapter,
+                        None if generic or not config else json.dumps(config), seed_id))
+    if not cur.rowcount:
+        raise ValueError(f"no seed {seed_id}")
+    conn.commit()
 
 
 def set_status(conn: sqlite3.Connection, seed: dict, status: str, d: autonomy.Decision) -> None:

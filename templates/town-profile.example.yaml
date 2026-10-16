@@ -12,7 +12,8 @@ region: "PLACEHOLDER — state/province, e.g. \"California\""
 # "example.org", not "https://example.org/events", an IP address, or a whole
 # hosting platform like "github.io" (those are errors).
 # Firecrawl scrapes don't go through Squid, so seeds scraped that way don't
-# need listing. Add carefully — every entry is an implicit trust decision.
+# need listing; a seed read by a deterministic adapter (engine/seed_adapters,
+# e.g. a Tribe REST feed) is fetched directly and does. Add carefully — every entry is an implicit trust decision.
 allowed_hosts:
   - "example-chamber.org"
   - "visitexample.com"

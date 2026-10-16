@@ -337,7 +337,7 @@ def cmd_show(args) -> int:
     conn.row_factory = sqlite3.Row
     for r in conn.execute(
         "SELECT seed_id, name, url, kind, status, source_role, last_scraped_at, "
-        "  feed_type, feed_url, health_status, health_note "
+        "  feed_type, feed_url, adapter, adapter_config, health_status, health_note "
         "FROM event_seeds ORDER BY status, kind, name"
     ):
         row = dict(r)
@@ -360,6 +360,26 @@ def cmd_set_role(args) -> int:
         print(json.dumps({"error": f"no seed {args.seed_id}"}))
         return 1
     print(json.dumps({"seed_id": args.seed_id, "source_role": role}))
+    return 0
+
+
+def cmd_set_adapter(args) -> int:
+    """Read the seed with a deterministic adapter (engine/seed_adapters)
+    instead of Firecrawl → LLM, or `generic` to go back."""
+    try:
+        config = json.loads(args.config) if args.config else None
+    except ValueError as e:
+        print(json.dumps({"error": f"--config is not JSON: {e}"}))
+        return 1
+    conn = sqlite3.connect(_DB_PATH)
+    try:
+        seed_ops.set_adapter(conn, args.seed_id, args.adapter, config)
+    except ValueError as e:
+        print(json.dumps({"error": str(e)}))
+        return 1
+    finally:
+        conn.close()
+    print(json.dumps({"seed_id": args.seed_id, "adapter": args.adapter, "config": config}))
     return 0
 
 
@@ -459,6 +479,11 @@ def main(argv: Optional[list[str]] = None) -> int:
     r.add_argument("--seed-id", type=int, required=True)
     r.add_argument("--role", required=True, choices=("primary", "syndicator", "auto"))
     r.set_defaults(func=cmd_set_role)
+    a = sub.add_parser("set-adapter", help="read a seed with a deterministic adapter (or generic)")
+    a.add_argument("--seed-id", type=int, required=True)
+    a.add_argument("--adapter", required=True, help="e.g. tribe; generic = Firecrawl → LLM")
+    a.add_argument("--config", help="adapter settings as a JSON object")
+    a.set_defaults(func=cmd_set_adapter)
     h = sub.add_parser("health", help="list source-health alerts, or --ack one")
     h.add_argument("--ack", type=int, metavar="SEED_ID",
                    help="accept the seed's current event count as its new normal")

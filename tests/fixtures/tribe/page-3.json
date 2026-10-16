@@ -1,0 +1,39 @@
+{
+ "events": [
+  {
+   "id": 801,
+   "global_id": "shops.example?id=801",
+   "status": "publish",
+   "rest_url": "https://shops.example/wp-json/tribe/events/v1/events/801",
+   "title": "New Year Fireworks",
+   "description": "",
+   "excerpt": "",
+   "slug": "fireworks",
+   "all_day": false,
+   "start_date": "2027-12-31 21:00:00",
+   "end_date": "2027-12-31 21:30:00",
+   "utc_start_date": "2028-01-01 05:00:00",
+   "utc_end_date": "2028-01-01 05:30:00",
+   "timezone": "America/Los_Angeles",
+   "timezone_abbr": "PST",
+   "cost": "",
+   "website": "",
+   "categories": [],
+   "tags": [],
+   "venue": {
+    "id": 11,
+    "venue": "The Shops at Heavenly Village",
+    "address": "1001 Heavenly Village Way",
+    "city": "South Lake Tahoe",
+    "state": "CA",
+    "zip": "96150",
+    "url": "https://shops.example/venue/village/"
+   },
+   "organizer": [],
+   "url": "https://shops.example/event/fireworks/2027-12-31/"
+  }
+ ],
+ "rest_url": "https://shops.example/wp-json/tribe/events/v1/events?page=3",
+ "total": 7,
+ "total_pages": 3
+}

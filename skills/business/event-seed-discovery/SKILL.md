@@ -22,6 +22,7 @@ python skills/business/event-seed-discovery/discover.py discover --limit N
 python skills/business/event-seed-discovery/discover.py discover --dry-run
 python skills/business/event-seed-discovery/discover.py show
 python skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
+python skills/business/event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config JSON]  # or generic
 python skills/business/event-seed-discovery/discover.py probe [--limit N] # seeds never probed
 python skills/business/event-seed-discovery/discover.py probe --all       # re-probe every seed
 python skills/business/event-seed-discovery/discover.py probe --seed-id N
@@ -67,7 +68,8 @@ target). `show` prints them. Best first:
 | `wix-calendar-wrapper` | Wix `filesusr.com/html/` component | none — the Google Calendar src is hidden behind postMessage; don't extract dated events from the widget, find the calendar URL first |
 
 A recorded feed is evidence for the manual source-automation review (event-find SKILL.md), not
-a switch: event-find still scrapes the seed URL. Basin- or county-wide feeds (POINT orgs, county
+a switch: event-find still scrapes the seed URL until the seed is given an adapter (`set-adapter`;
+a `tribe` adapter reads the recorded `tribe` feed_url — engine/seed_adapters.py). Basin- or county-wide feeds (POINT orgs, county
 libraries, destination calendars) need filtering to the town before any adapter uses them.
 
 ## Source health

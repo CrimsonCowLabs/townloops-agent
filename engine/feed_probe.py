@@ -17,6 +17,10 @@ from urllib.parse import parse_qs, quote, urljoin, urlparse
 
 from engine.ingest_core import walk_jsonld
 
+# The Events Calendar's REST events route, under the site's WordPress REST
+# root (engine/seed_adapters' `tribe` adapter reads it).
+TRIBE_REST_PATH = "tribe/events/v1/events"
+
 _LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'([\w:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
 # Calendar-view markup, not the plugin's CSS/JS (enqueued on every page).
@@ -98,7 +102,7 @@ def _tribe(html: str, page_url: str) -> list[dict]:
                      for a in [_attrs(tag)]
                      if a.get("rel") == "https://api.w.org/" and a.get("href")),
                     urljoin(page_url, "/wp-json/"))
-    return [_feed("tribe", api_root.rstrip("/") + "/tribe/events/v1/events")]
+    return [_feed("tribe", api_root.rstrip("/") + "/" + TRIBE_REST_PATH)]
 
 
 def _eventcalendarapp(html: str, page_url: str) -> list[dict]:

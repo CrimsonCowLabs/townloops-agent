@@ -16,11 +16,12 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 import yaml
 
-from engine import autonomy, event_cancel, event_dedup, event_state, inspection, source_health
+from engine import (autonomy, event_cancel, event_dedup, event_state, inspection, seed_adapters,
+                    source_health)
 from engine import lock as _lock
 from engine.derive_helpers import parse_extra_json, seed_ref
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
@@ -177,6 +178,54 @@ def _judge(conn, rows: list[dict], seen: set[str], page, ctx, llm) -> dict:
     return _apply_judgement(conn, rows, autonomy.judge_items(items, page, ctx, llm))
 
 
+class _SeedListing(NamedTuple):
+    """One read of a seed: its events and the page text they came from, or
+    why the read failed (`error`).
+    `unparseable`: the LLM answered, but not with a JSON array."""
+    events: list = []
+    page: str = ""
+    error: Optional[str] = None
+    unparseable: bool = False
+
+
+def _failed_read(action: str, url: str, err: str) -> _SeedListing:
+    inspection.record(worker="event-find", action=action, target=url,
+                      detail=f"failed: {err}", ok=False, error=err)
+    return _SeedListing(error=err)
+
+
+def _read_seed(profile: dict, seed: dict) -> _SeedListing:
+    """The seed's listing, by its adapter (engine/seed_adapters) or the
+    generic Firecrawl markdown → LLM path."""
+    name, url = seed["name"], seed["url"]
+    adapter = seed_adapters.adapter_of(seed)
+    if adapter != seed_adapters.GENERIC:
+        inspection.record(worker="event-find", action="adapter", target=url,
+                          detail=f"reading seed {name} with the {adapter} adapter")
+        try:
+            got = seed_adapters.read(seed)
+        except Exception as e:  # noqa: BLE001 — any adapter failure is a failed run
+            err = f"{adapter}: {e}" if isinstance(e, seed_adapters.AdapterError) \
+                else f"{adapter}: {type(e).__name__}: {e}"
+            return _failed_read("adapter", url, err)
+        return _SeedListing(got.events, got.page)
+
+    inspection.record(worker="event-find", action="firecrawl", target=url,
+                      detail=f"scraping seed {name}")
+    ok, md, err = _firecrawl_markdown(url)
+    if not ok:
+        return _failed_read("firecrawl", url, err)
+    prompt = _build_extraction_prompt(profile, name, url, md)
+    inspection.record(worker="event-find", action="llm-call", target=name,
+                      detail=f"extracting events from {len(md)}-char markdown")
+    codex_ok, out, err = _codex_exec(prompt)
+    if not codex_ok:
+        return _SeedListing(error=f"codex: {err}")
+    events = _parse_json_array(out)
+    # An empty JSON array is a page listing nothing; anything else unparseable.
+    return _SeedListing(events, md, unparseable=not events and not _EMPTY_LIST_RE.search(out or ""))
+
+
 def cmd_find(args) -> int:
     # Closed on any exit: a crash mid-write must roll back here, not hold the
     # DB lock while main() records the failure for the dashboard.
@@ -235,46 +284,24 @@ def _find(conn: sqlite3.Connection, args) -> int:
         started = _iso_utc_now()
         seed_name = seed["name"]
 
-        inspection.record(
-            worker="event-find", action="firecrawl",
-            target=seed["url"],
-            detail=f"scraping seed {seed_name}",
-        )
-        ok, md, err = _firecrawl_markdown(seed["url"])
-        if not ok:
-            record_run(seed, started, False, error=err[:400])
+        listing = _read_seed(profile, seed)
+        if listing.error:
+            record_run(seed, started, False, error=listing.error[:400])
             conn.commit()
-            inspection.record(
-                worker="event-find", action="firecrawl",
-                target=seed["url"], detail=f"failed: {err}", ok=False, error=err,
-            )
-            print(json.dumps({"seed": seed_name, "error": err[:200]}))
+            print(json.dumps({"seed": seed_name, "error": listing.error[:200]}))
             continue
+        events, md = listing.events, listing.page
 
-        prompt = _build_extraction_prompt(profile, seed_name, seed["url"], md)
-        inspection.record(
-            worker="event-find", action="llm-call",
-            target=seed_name,
-            detail=f"extracting events from {len(md)}-char markdown",
-        )
-        codex_ok, out, err = _codex_exec(prompt)
-        if not codex_ok:
-            record_run(seed, started, False, error=err[:400])
-            conn.commit()
-            print(json.dumps({"seed": seed_name, "error": f"codex: {err[:200]}"}))
-            continue
-
-        events = _parse_json_array(out)
         if not events:
-            if _EMPTY_LIST_RE.search(out or ""):   # the page really lists nothing
+            if listing.unparseable:   # extraction failed: says nothing about the source's health
+                record_run(seed, started, True, error="codex returned no parseable JSON",
+                           judge=False)
+                note = "no events extracted"
+            else:   # the page really lists nothing
                 record_run(seed, started, True)
                 note = "no events listed"
                 if judging:
                     judge(_pending_rows(conn, "source = ?", (seed_ref(seed_name),)), (), md)
-            else:   # extraction failed: says nothing about the source's health
-                record_run(seed, started, True, error="codex returned no parseable JSON",
-                           judge=False)
-                note = "no events extracted"
             conn.commit()
             print(json.dumps({"seed": seed_name, "events_seen": 0, "note": note}))
             continue
@@ -284,6 +311,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
         skipped = 0
         seen_uids: list[str] = []
         listed_dates: list[str] = []
+        listed_cancelled: list[tuple[str, str, str]] = []
         for evt in events:
             if not isinstance(evt, dict):
                 skipped += 1
@@ -304,8 +332,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
             listed_dates.append(evt["date"])
             listed = event_cancel.record_listing(conn, uid, said, seed_name)
             if listed in ("flagged", "declined"):
-                inspection.record(worker="event-find", action=f"listed-cancelled-{listed}",
-                                  target=uid, detail=f"{seed_name}: {said}")
+                listed_cancelled.append((listed, uid, said))
             if action == "inserted":
                 inserted += 1
             elif action == "updated":
@@ -323,13 +350,18 @@ def _find(conn: sqlite3.Connection, args) -> int:
         if judging:
             judge(_pending_rows(conn, "source = ?", (seed_ref(seed_name),)), seen_uids, md)
         ended = _iso_utc_now()
-        conn.execute(
-            "UPDATE event_seeds SET last_scraped_at = ?, last_event_count = ?, "
-            "consecutive_empty_scrapes = CASE WHEN ? = 0 THEN consecutive_empty_scrapes + 1 ELSE 0 END "
-            "WHERE seed_id = ?",
-            (ended, len(events), len(events), seed["seed_id"]),
-        )
-        conn.commit()
+        if not args.dry_run:
+            conn.execute(
+                "UPDATE event_seeds SET last_scraped_at = ?, last_event_count = ?, "
+                "consecutive_empty_scrapes = CASE WHEN ? = 0 THEN consecutive_empty_scrapes + 1 "
+                "ELSE 0 END WHERE seed_id = ?",
+                (ended, len(events), len(events), seed["seed_id"]),
+            )
+            conn.commit()
+        # After the commit: the activity log is another connection to this DB.
+        for listed, uid, said in listed_cancelled:
+            inspection.record(worker="event-find", action=f"listed-cancelled-{listed}",
+                              target=uid, detail=f"{seed_name}: {said}")
 
         print(json.dumps({
             "seed": seed_name, "events_seen": len(events),

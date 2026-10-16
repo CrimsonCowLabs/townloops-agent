@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 026).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 027).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -121,11 +121,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
     Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
     recorded on `event_seeds.feed_*` by `event-seed-discovery discover`/`probe`; no extra fetches),
-    `seeds.py` (seed writes — feed record, status change — and the autonomous `review` run: trial a proposed
+    `seeds.py` (seed writes — feed record, status change, adapter — and the autonomous `review` run: trial a proposed
     seed, re-judge approved ones, look for a dead seed's moved calendar; network/LLM injected as `Tools`),
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
     alert, held until it recovers or the operator accepts the new level).
+    `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
+    its events take event-find's one path, a partial read is a failed run; `tribe` first — add to `ADAPTERS`),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
     only as quote-checked sentences that name an access feature, else null; skipped with no fetch
@@ -269,7 +271,7 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   extractions are never judged — only an explicit empty list is a zero — and a standing
   alert is held against the average it dropped from (`health_baseline`) so a lasting drop neither
   re-alerts nor clears itself. A recorded `feed_url` is evidence for the source-automation review,
-  not a switch — event-find still scrapes the seed URL.
+  not a switch — event-find still scrapes the seed URL unless the seed has an adapter (`set-adapter`).
 - **Autonomous mode is a per-town switch; supervised stays the default.** `operating_mode:
   autonomous` (town-profile.yaml) moves every local gate into `engine/autonomy.py` and makes the
   TownLoops admin moderation queue the only human gate: creates go through `GatedClient` and

@@ -1,0 +1,129 @@
+{
+ "events": [
+  {
+   "id": 501,
+   "global_id": "shops.example?id=501",
+   "status": "publish",
+   "rest_url": "https://shops.example/wp-json/tribe/events/v1/events/501",
+   "title": "Live Music: The Mountain Boys &#038; Friends",
+   "description": "<p>Bluegrass on the <strong>plaza stage</strong>.</p>\n<p>Free.</p>",
+   "excerpt": "",
+   "slug": "live-music",
+   "all_day": false,
+   "start_date": "2027-01-08 18:00:00",
+   "end_date": "2027-01-08 21:00:00",
+   "utc_start_date": "2027-01-09 02:00:00",
+   "utc_end_date": "2027-01-09 05:00:00",
+   "timezone": "America/Los_Angeles",
+   "timezone_abbr": "PST",
+   "cost": "",
+   "website": "",
+   "categories": [
+    {
+     "name": "Live Music",
+     "slug": "live-music"
+    }
+   ],
+   "tags": [],
+   "venue": {
+    "id": 11,
+    "venue": "The Shops at Heavenly Village",
+    "address": "1001 Heavenly Village Way",
+    "city": "South Lake Tahoe",
+    "state": "CA",
+    "zip": "96150",
+    "url": "https://shops.example/venue/village/"
+   },
+   "organizer": [],
+   "url": "https://shops.example/event/live-music/2027-01-08/"
+  },
+  {
+   "id": 601,
+   "global_id": "shops.example?id=601",
+   "status": "publish",
+   "rest_url": "https://shops.example/wp-json/tribe/events/v1/events/601",
+   "title": "Ice Skating Lessons",
+   "description": "<p>Learn to skate on the village rink.&nbsp;All ages welcome.</p>",
+   "excerpt": "",
+   "slug": "ice-skating-lessons",
+   "all_day": false,
+   "start_date": "2027-01-09 10:00:00",
+   "end_date": "2027-01-09 11:00:00",
+   "utc_start_date": "2027-01-09 18:00:00",
+   "utc_end_date": "2027-01-09 19:00:00",
+   "timezone": "America/Los_Angeles",
+   "timezone_abbr": "PST",
+   "cost": "",
+   "website": "",
+   "categories": [
+    {
+     "name": "Family",
+     "slug": "family"
+    }
+   ],
+   "tags": [
+    {
+     "name": "all-ages",
+     "slug": "all-ages"
+    }
+   ],
+   "venue": {
+    "id": 11,
+    "venue": "The Shops at Heavenly Village",
+    "address": "1001 Heavenly Village Way",
+    "city": "South Lake Tahoe",
+    "state": "CA",
+    "zip": "96150",
+    "url": "https://shops.example/venue/village/"
+   },
+   "organizer": [],
+   "url": "https://shops.example/event/ice-skating-lessons/2027-01-09/"
+  },
+  {
+   "id": 602,
+   "global_id": "shops.example?id=602",
+   "status": "publish",
+   "rest_url": "https://shops.example/wp-json/tribe/events/v1/events/602",
+   "title": "Ice Skating Lessons",
+   "description": "<p>Learn to skate on the village rink.&nbsp;All ages welcome.</p>",
+   "excerpt": "",
+   "slug": "ice-skating-lessons",
+   "all_day": false,
+   "start_date": "2027-01-16 10:00:00",
+   "end_date": "2027-01-16 11:00:00",
+   "utc_start_date": "2027-01-16 18:00:00",
+   "utc_end_date": "2027-01-16 19:00:00",
+   "timezone": "America/Los_Angeles",
+   "timezone_abbr": "PST",
+   "cost": "",
+   "website": "",
+   "categories": [
+    {
+     "name": "Family",
+     "slug": "family"
+    }
+   ],
+   "tags": [
+    {
+     "name": "all-ages",
+     "slug": "all-ages"
+    }
+   ],
+   "venue": {
+    "id": 11,
+    "venue": "The Shops at Heavenly Village",
+    "address": "1001 Heavenly Village Way",
+    "city": "South Lake Tahoe",
+    "state": "CA",
+    "zip": "96150",
+    "url": "https://shops.example/venue/village/"
+   },
+   "organizer": [],
+   "url": "https://shops.example/event/ice-skating-lessons/2027-01-16/"
+  }
+ ],
+ "rest_url": "https://shops.example/wp-json/tribe/events/v1/events?page=1",
+ "total": 7,
+ "total_pages": 3,
+ "next_rest_url": "https://shops.example/wp-json/tribe/events/v1/events?page=2"
+}
