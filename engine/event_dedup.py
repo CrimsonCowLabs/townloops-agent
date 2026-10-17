@@ -75,7 +75,8 @@ def link(conn: sqlite3.Connection, event_uid: str) -> Optional[str]:
         return None
     canonical = ev["canonical_event_uid"]
     if not canonical:
-        match = next((r for r in _same_day(conn, ev) if same_event(ev, r)), None)
+        replaced = _timed_predecessor(conn, ev)
+        match = replaced or next((r for r in _same_day(conn, ev) if same_event(ev, r)), None)
         if match is None:
             canonical = _unused_fingerprint(conn, ev)
         else:
@@ -84,6 +85,8 @@ def link(conn: sqlite3.Connection, event_uid: str) -> Optional[str]:
                          (canonical, match["event_uid"]))
         conn.execute("UPDATE events SET canonical_event_uid = ? WHERE event_uid = ?",
                      (canonical, event_uid))
+        if replaced:
+            _replace(conn, ev, replaced)
     _settle(conn, canonical)
     return canonical
 
@@ -191,8 +194,63 @@ def _settle(conn: sqlite3.Connection, canonical: str) -> None:
 
 
 def _decided(m: dict) -> bool:
+    """Decided, or a staged change of a live copy — the change stands
+    beside the live row it corrects, never as its duplicate."""
     return (m.get("approval_status") != "pending" or m.get("state") != "metadata-extracted"
-            or bool(m.get("townloops_slug")) or m.get("source_kind") == "live")
+            or bool(m.get("townloops_slug")) or m.get("source_kind") == "live"
+            or (parse_extra_json(m.get("extra_json")).get("reconcile") or {}).get("kind")
+            == "changed")
+
+
+def _timed_predecessor(conn: sqlite3.Connection, ev: dict) -> Optional[dict]:
+    """The row a date-only one replaces: the same seed's row for the same
+    title on the same day that carried a time of day. The source states no
+    time for it now — or never did (a time invented before extraction was
+    held to the page, #44). A time-to-time change isn't one: event-reconcile
+    stages that against live."""
+    if _start(ev) is not None:
+        return None
+    title = normalize_name(_title(ev))
+    rows = _rows(conn, "SELECT * FROM events WHERE source = ? AND date_day = ? AND event_uid != ? "
+                       "  AND status = 'active' ORDER BY townloops_slug IS NULL, first_seen_at",
+                 (ev["source"], ev["date_day"], ev["event_uid"]))
+    return next((r for r in rows if _start(r) is not None
+                 and normalize_name(_title(r)) == title), None)
+
+
+def _replace(conn: sqlite3.Connection, ev: dict, old: dict) -> None:
+    """`ev` (date-only) replaces `old` (timed), one real event. On TownLoops,
+    `ev` is staged as a change of the live row — the start moves to town-local
+    midnight through event-ship's change path (operator-approved; a pending
+    submission in autonomous mode), which then supersedes `old`. Not shipped
+    and undecided, `old` is declined as `ev`'s duplicate. One the operator
+    already approved stands, and `ev` settles as its duplicate as before."""
+    if old.get("townloops_slug"):
+        _stage_live_change(conn, ev, old)
+    else:
+        _mark_duplicate(conn, old, ev)
+
+
+def _stage_live_change(conn: sqlite3.Connection, ev: dict, old: dict) -> None:
+    """The event-reconcile change metadata (`extra_json.reconcile`, kind
+    'changed') event-ship acts on, for a source that no longer states a time."""
+    slug = old["townloops_slug"]
+    live_local = (old.get("date_local") or old.get("date") or "")[:16]
+    meta = {
+        "kind": "changed", "matched_by": "same-seed", "reason": "the source states no time",
+        "changes": {"start_at": {"live": old.get("date_utc"), "live_local": live_local,
+                                 "source": ev.get("date_utc"), "source_local": ev.get("date")}},
+        "live_slug": slug, "live_id": parse_extra_json(old.get("extra_json")).get("live_id"),
+        "live_start_at": old.get("date_utc"), "live_end_at": old.get("end_at_utc"),
+        "replaces": old["event_uid"],
+    }
+    extra = parse_extra_json(ev.get("extra_json"))
+    extra["reconcile"] = meta
+    note = (f"[reconcile] live event {slug} changed: date {live_local} → {ev.get('date')} "
+            "— the source states no time")
+    conn.execute("UPDATE events SET extra_json = ?, approval_note = ? WHERE event_uid = ?",
+                 (json.dumps(extra), note, ev["event_uid"]))
+    ev["extra_json"] = json.dumps(extra)
 
 
 def _best_decided(rows: list[dict]) -> dict:
@@ -263,9 +321,9 @@ def _venue(ev: dict) -> str:
 
 def _start(ev: dict) -> Optional[datetime]:
     """The event's start instant, only when its source gave a time of day."""
-    from engine.event_extract import to_utc  # event_extract imports this module
+    from engine.event_extract import has_clock_time, to_utc  # event_extract imports this module
     raw = ev.get("date") or ""
-    if len(raw) <= 10 or raw[11:16] in ("", "00:00"):
+    if not has_clock_time(raw):
         return None
     value = ev.get("date_utc") or to_utc(raw)
     try:

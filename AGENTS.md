@@ -139,7 +139,12 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     LLM-extracted, never a source-health zero, never a vanish miss; also the seed trial (`trial-not-found`/
     `-challenge`/`-empty-page`) and performer research's unreadable-page check — extend it, don't add another),
     `event_extract.py` (event-find/-reconcile/seed-trial extraction; `extracted_events` keeps only the times the page
-    states — none → date-only: town-local midnight, no end; a Tribe all-day row is date-only too),
+    states — none → date-only: town-local midnight, no end; a Tribe all-day row is date-only too. Stated = in the
+    text ("7pm"; "7:00" is 07:00, never 19:00) or an ISO `startDate`/`endDate`/`doorTime` — any other ISO timestamp
+    is metadata. `day_and_clock`/`has_clock_time` is the one "has a time" rule (date-only or local midnight = none) —
+    ship, reconcile, dedup, autonomy, provenance and `ingest_core._parse_dt` use it. A date-only re-read of a same-seed
+    timed row replaces it (`event_dedup`): live → staged as a change, its live end flagged in the digest (PATCH
+    can't null `end_at`; `live_patch.flag_unclearable_end`), never a duplicate or a vanished event),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
     its events take event-find's one path, a partial read is a failed run; `tribe` first — add an `Adapter` entry to
     `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`)),

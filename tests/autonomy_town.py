@@ -47,6 +47,19 @@ def page_text(*lines: str) -> str:
     return "\n\n".join(lines) + "\n\n" + ("Upcoming events in our community. " * 8)
 
 
+def as_listed(value) -> str:
+    """An extracted ISO date/time as a listing prints it — "2027-03-20 ·
+    8:00 PM": a page states a clock time in words, not as an ISO timestamp."""
+    try:
+        dt = datetime.fromisoformat(value)
+    except (TypeError, ValueError):
+        return str(value)
+    if "T" not in value:
+        return value
+    return f"{dt.date().isoformat()} · {dt.hour % 12 or 12}:{dt.minute:02d} " \
+           f"{'PM' if dt.hour >= 12 else 'AM'}"
+
+
 def load(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -113,7 +126,8 @@ class Town:
         """What a seed page shows and what extraction finds on it."""
         self.pages[url] = page_text(*lines, *(
             (f"[{e['title']}]({e['source_url']})" if e.get("source_url") else e["title"])
-            + f" — {e.get('date')}{' – ' + e['end_at'] if e.get('end_at') else ''} "
+            + f" — {as_listed(e.get('date'))}"
+            f"{' – ' + as_listed(e['end_at']) if e.get('end_at') else ''} "
             f"— {e.get('venue') or ''} {e.get('location') or ''}"
             for e in events))
         self.extractions[url] = events

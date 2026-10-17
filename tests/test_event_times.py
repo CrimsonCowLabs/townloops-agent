@@ -4,6 +4,7 @@ ship only ever sends UTC start/end times."""
 from __future__ import annotations
 
 import importlib.util
+import json
 import sqlite3
 from pathlib import Path
 
@@ -248,20 +249,46 @@ class TestPublishedTimes:
         ("7 to 9 pm on the plaza", "2026-09-07T19:00:00"),
         ("10:30-11:30am", "2026-09-07T10:30:00"),
         ("Showtime 19:00", "2026-09-07T19:00:00"),
-        ("Showtime 7:00", "2026-09-07T19:00:00"),
+        ("Showtime 7:00", "2026-09-07T07:00:00"),
+        ("7:00–9:00 pm", "2026-09-07T19:00:00"),
         ("Lunch at noon", "2026-09-07T12:00:00"),
-        ("Countdown at midnight", "2026-09-07T00:00:00"),
-        ("Opens 12 AM", "2026-09-07T00:00:00"),
         ("Opens 9a", "2026-09-07T09:00:00"),
         ('"startDate": "2026-09-07T19:00:00"', "2026-09-07T19:00:00"),
+        ('"startDate":"2026-09-07T19:00:00-07:00"', "2026-09-07T19:00:00"),
+        ('<meta itemprop="startDate" content="2026-09-07T19:00">', "2026-09-07T19:00:00"),
+        ("startDate: 2026-09-07T19:00:00", "2026-09-07T19:00:00"),
     ])
     def test_published_forms_count(self, page, date):
         assert self._one(page, date)["date"] == date
+
+    @pytest.mark.parametrize("page", ["Countdown at midnight", "Opens 12 AM"])
+    def test_a_stated_midnight_is_the_all_day_convention(self, page):
+        assert self._one(page, "2026-09-07T00:00:00")["date"] == "2026-09-07"
+
+    def test_a_json_ld_end_date_counts_as_the_stated_end(self):
+        page = '"startDate": "2026-09-07T19:00:00", "endDate": "2026-09-07T21:00:00"'
+        evt = self._one(page, "2026-09-07T19:00:00", "2026-09-07T21:00:00")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07T19:00:00", "2026-09-07T21:00:00")
+
+    @pytest.mark.parametrize("page", [
+        '"dateModified": "2026-09-07T00:07:00"',          # page metadata, not the event
+        '"datePublished": "2026-09-07T00:07:00-07:00"',
+        "Scraped 2026-09-07T00:07:12Z",                    # a scrape timestamp
+        "Last updated 2026-09-07 00:07",
+        '<time datetime="2026-09-07T00:07">Sept 7</time>',
+    ])
+    def test_a_metadata_timestamp_is_not_a_published_time(self, page):
+        evt = self._one(page, "2026-09-07T00:07:00", "2026-09-07T02:07:00")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07", None)
 
     @pytest.mark.parametrize("page, date", [
         ("Doors at 7pm", "2026-09-07T07:00:00"),         # wrong meridiem
         ("Doors at 7pm", "2026-09-07T19:30:00"),         # wrong minute
         ("Room 7, 2026 season", "2026-09-07T07:00:00"),  # a bare number
+        ("Showtime 7:00", "2026-09-07T19:00:00"),        # no meridiem: 7:00 is 07:00
+        ("Showtime 07:00", "2026-09-07T19:00:00"),
+        ("Showtime 19:00", "2026-09-07T07:00:00"),
+        ("Doors at 7pm", "2026-09-07T07:00:00"),         # 7pm is never 07:00
     ])
     def test_a_different_time_does_not_count(self, page, date):
         assert self._one(page, date)["date"] == "2026-09-07"
@@ -336,8 +363,9 @@ class TestShipsDateOnly:
 
     def test_a_date_change_to_a_date_only_start_takes_no_end_from_live(self, ship):
         # Live 00:07–02:07 moved to a date-only day: its two hours aren't kept.
+        # A start on town-local midnight is date-only (the all-day convention).
         assert ship._patched_end(None, "2026-09-07T07:07:00+00:00", "2026-09-07T09:07:00+00:00",
-                                 "2026-09-08T07:00:00+00:00", date_only=True) is None
+                                 "2026-09-08T07:00:00+00:00") is None
         assert ship._patched_end(None, "2026-09-07T07:07:00+00:00", "2026-09-07T09:07:00+00:00",
                                  "2026-09-08T17:00:00+00:00") == "2026-09-08T19:00:00+00:00"
 
@@ -363,3 +391,170 @@ class TestEventFindKeepsPublishedTimes:
         rows = fresh_db.execute("SELECT date, end_at, date_utc, end_at_utc FROM events").fetchall()
         assert [tuple(r) for r in rows] == [
             ("2026-09-07", None, "2026-09-07T07:00:00+00:00", None)]
+
+
+# --------------------------------------------------------------------------
+# One rule for "has a time" (engine/event_extract.day_and_clock)
+# --------------------------------------------------------------------------
+
+class TestDayAndClock:
+    @pytest.mark.parametrize("value, expected", [
+        ("2026-09-07", ("2026-09-07", None)),
+        ("2026-09-07T00:00:00", ("2026-09-07", None)),            # all-day convention
+        ("2026-09-07T19:30:00", ("2026-09-07", (19, 30))),
+        ("2026-09-07T00:07:00", ("2026-09-07", (0, 7))),
+        ("2026-09-07T07:00:00+00:00", ("2026-09-07", None)),      # live: local midnight
+        ("2026-09-07T07:07:00+00:00", ("2026-09-07", (0, 7))),
+        ("2026-09-08T02:00:00+00:00", ("2026-09-07", (19, 0))),   # read in the town tz
+        ("TBD", None), ("", None), (None, None),
+    ])
+    def test_values(self, value, expected):
+        from engine.event_extract import day_and_clock
+        assert day_and_clock(value) == expected
+
+    @pytest.mark.parametrize("date, timed", [
+        ("2026-09-07", False), ("2026-09-07T00:00:00", False),
+        ("2026-09-07T19:00:00", True), ("2026-09-07T00:07:00", True),
+    ])
+    def test_every_caller_agrees(self, date, timed):
+        from dateutil import tz
+        from engine import autonomy, event_dedup, reconcile
+        from engine.event_extract import has_clock_time, to_utc
+        assert has_clock_time(date) is timed
+        assert autonomy._has_time({"date": date}) is timed
+        assert (event_dedup._start({"date": date, "date_utc": to_utc(date)}) is not None) is timed
+        assert reconcile.parse_start(date, tz.gettz("America/Los_Angeles"))[1] is timed
+
+    def test_a_live_utc_start_on_local_midnight_has_no_time(self):
+        from dateutil import tz
+        from engine import reconcile
+        assert reconcile.parse_start("2026-09-07T07:00:00Z",
+                                     tz.gettz("America/Los_Angeles"))[1] is False
+
+
+# --------------------------------------------------------------------------
+# labor-day-cruise re-ingested today: the date-only re-read corrects live
+# --------------------------------------------------------------------------
+
+LIVE_SLUG = "labor-day-cruise-2027-09-06"
+REREAD = ('[{"title": "Labor Day Cruise", "date": "2027-09-06T00:07:00", '
+          '"end_at": "2027-09-06T02:07:00", "venue": "Zephyr Cove Resort"}]')
+
+
+class TestLaborDayReingest:
+    """Shipped at an invented 00:07–02:07; the listing re-read now gives a
+    date-only event. It is the same event, staged as a change of the live
+    row — never a duplicate of it, nor a vanished (possibly cancelled) one.
+    (Dated a year on so it is still upcoming.)"""
+
+    OLD = event_uid("Zephyr Cove", "Labor Day Cruise", "2027-09-06T00:07:00")
+    NEW = event_uid("Zephyr Cove", "Labor Day Cruise", "2027-09-06")
+
+    @pytest.fixture
+    def town(self, conn, tmp_state_dir, monkeypatch):
+        spec = importlib.util.spec_from_file_location(
+            "event_find_labor_day", Path(__file__).resolve().parent.parent
+            / "skills/business/event-find/find.py")
+        find = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(find)
+        db = tmp_state_dir / "townloops.db"
+        monkeypatch.setattr(find, "_DB_PATH", db)
+        monkeypatch.setattr("engine.inspection._DB_PATH", db)
+        monkeypatch.setattr(find, "_load_town_profile", lambda: {})
+        monkeypatch.setattr(find, "_firecrawl_listing", lambda url: (True, SAVE_THE_DATE, ""))
+        monkeypatch.setattr(find, "_build_extraction_prompt", lambda *a: "prompt")
+        monkeypatch.setattr(find, "_codex_exec", lambda p: (True, REREAD, ""))
+        conn.execute("INSERT INTO event_seeds (name, url, kind, status, first_seen_at, "
+                     "last_seen_at) VALUES ('Zephyr Cove', 'https://cruise.example/events', "
+                     "'venue', 'approved', '2026-10-01', '2026-10-01')")
+        # What shipped before #44: the invented time, and its row on TownLoops.
+        upsert_event(conn, "Zephyr Cove", {"title": "Labor Day Cruise",
+                                           "date": "2027-09-06T00:07:00",
+                                           "end_at": "2027-09-06T02:07:00",
+                                           "venue": "Zephyr Cove Resort"})
+        conn.execute("UPDATE events SET state = 'shipped', approval_status = 'approved', "
+                     "townloops_slug = ?, pushed_at = '2026-08-01T00:00:00+00:00'", (LIVE_SLUG,))
+        from tests.fake_townloops import FakeAPI
+        api = FakeAPI([{"slug": LIVE_SLUG, "title": "Labor Day Cruise",
+                        "start_at": "2027-09-06T07:07:00+00:00",
+                        "end_at": "2027-09-06T09:07:00+00:00",
+                        "description": "Save the Date.", "category_slugs": [], "tags": []}])
+        return find, api
+
+    def _row(self, conn, uid):
+        return dict(conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone())
+
+    def test_the_re_read_is_a_change_of_the_live_row(self, conn, town):
+        find, _ = town
+        for _ in range(6):   # past the possibly-cancelled miss threshold
+            assert find.main([]) == 0
+        new, old = self._row(conn, self.NEW), self._row(conn, self.OLD)
+        assert (new["date"], new["end_at"], new["end_at_utc"]) == ("2027-09-06", None, None)
+        assert new["status"] == "active" and new["approval_status"] == "pending"
+        assert new["canonical_event_uid"] == old["canonical_event_uid"]
+        meta = json.loads(new["extra_json"])["reconcile"]
+        assert meta["kind"] == "changed" and meta["live_slug"] == LIVE_SLUG
+        assert "start_at" in meta["changes"]
+        assert "states no time" in new["approval_note"]
+        assert old["cancel_status"] is None   # replaced, not vanished
+
+    def test_approved_it_corrects_live_and_flags_the_end_it_cannot_clear(
+            self, conn, town, ship, monkeypatch):
+        find, api = town
+        assert find.main([]) == 0
+        conn.execute("UPDATE events SET approval_status = 'approved', "
+                     "state = 'entities-enriched' WHERE event_uid = ?", (self.NEW,))
+        import engine.townloops_api as tl
+        monkeypatch.setattr(tl, "Client", lambda: api)
+        assert _run(ship, monkeypatch, self.NEW) == 0
+        live = api.events[LIVE_SLUG]
+        assert live["start_at"] == "2027-09-06T07:00:00+00:00"     # 00:00 PDT
+        # TownLoops PATCH can't null an end: it stays, and the operator is told.
+        assert live["end_at"] == "2027-09-06T09:07:00+00:00"
+        new, old = self._row(conn, self.NEW), self._row(conn, self.OLD)
+        assert new["townloops_slug"] == LIVE_SLUG and old["status"] == "superseded"
+        flagged = conn.execute("SELECT target FROM agent_activity "
+                               "WHERE action = 'live-end-unclearable' AND ok = 0").fetchall()
+        assert [r[0] for r in flagged] == [self.NEW]
+        from engine import orchestrator
+        monkeypatch.setattr(orchestrator, "_telegram_notify", lambda t: None)
+        out = orchestrator.summary(conn)
+        text = Path(out["report_path"]).read_text()
+        assert "## Live end time to clear" in text and LIVE_SLUG in text
+        assert out["unclearable_ends"][0]["end_at"] == "2027-09-06T09:07:00+00:00"
+
+    def test_the_weekly_reconcile_leaves_the_staged_change_alone(self, conn, town):
+        from dateutil import tz
+        from engine import reconcile as rc
+        find, _ = town
+        assert find.main([]) == 0
+        spec = importlib.util.spec_from_file_location(
+            "event_reconcile_labor_day", Path(__file__).resolve().parent.parent
+            / "skills/business/event-reconcile/reconcile.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        idx = rc.LiveIndex.build([{"slug": LIVE_SLUG, "title": "Labor Day Cruise",
+                                   "start_at": "2027-09-06T07:07:00+00:00"}], [],
+                                 tz.gettz("America/Los_Angeles"))
+        [c] = rc.classify_all([{"title": "Labor Day Cruise", "date": "2027-09-06"}], idx)
+        assert c.kind == "unchanged"   # no time stated is no time changed
+        assert not mod._annotate_already_live(conn, "Zephyr Cove", c)
+        assert "states no time" in self._row(conn, self.NEW)["approval_note"]
+
+    def test_a_pending_timed_row_is_replaced_by_the_date_only_one(self, conn, town):
+        find, _ = town
+        conn.execute("UPDATE events SET state = 'metadata-extracted', approval_status = 'pending', "
+                     "townloops_slug = NULL, pushed_at = NULL")
+        assert find.main([]) == 0
+        new, old = self._row(conn, self.NEW), self._row(conn, self.OLD)
+        assert new["status"] == "active" and new["approval_status"] == "pending"
+        assert old["status"] == "duplicate" and old["approval_status"] == "declined"
+        assert "reconcile" not in json.loads(new["extra_json"] or "{}")
+
+    def test_a_same_seed_timed_relisting_still_goes_to_review(self, conn, town):
+        # Only a withdrawn time is a change of the row; a new time stays a new
+        # row for reconcile (test_event_dedup's same-seed rule).
+        upsert_event(conn, "Zephyr Cove", {"title": "Labor Day Cruise",
+                                           "date": "2027-09-06T10:00:00"})
+        row = self._row(conn, event_uid("Zephyr Cove", "Labor Day Cruise", "2027-09-06T10:00:00"))
+        assert row["status"] == "active" and "reconcile" not in (row["extra_json"] or "")

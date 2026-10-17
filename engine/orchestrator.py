@@ -29,7 +29,7 @@ from engine import db as _db
 from engine.derive_helpers import load_town_profile, parse_extra_json
 from engine import event_detail, event_groups, event_provenance
 from engine import event_state
-from engine import inspection
+from engine import inspection, live_patch
 from engine import lock as _lock
 from engine import moderation
 from engine import seeds as seed_ops
@@ -424,6 +424,14 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
                      "Its source_url is another listing's page — fix it and re-approve, or decline:"]
         md_lines += [f"- {h['title']} — {h['date']} ({h['state']}): " + "; ".join(h["disagreed"])
                      for h in provenance_held]
+    # A start corrected to date-only on a live row that keeps its end (#44).
+    ends = live_patch.unclearable_ends(conn, cutoff)
+    if ends:
+        md_lines += ["", "## Live end time to clear",
+                     "The source states no time, so the start moved to midnight, but the API "
+                     "can't clear an end — remove it in TownLoops admin:"]
+        md_lines += [f"- {e['title']} — {e['date']} (`{e['live_slug']}`): end {e['end_at']}"
+                     for e in ends]
     if proposals:
         md_lines += ["", "## Adapter proposals",
                      "A deterministic adapter read these seeds' feeds in a dry run — run the "
@@ -454,6 +462,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         + ("adapter proposals: " + ", ".join(f"{p['name']} ({p['adapter']})" for p in proposals)
            + "\n" if proposals else "")
         + (f"held for source mismatch: {len(provenance_held)}\n" if provenance_held else "")
+        + (f"live end times to clear: {len(ends)}\n" if ends else "")
     )
     if auto:
         tg += moderation.digest_telegram(auto)
@@ -468,6 +477,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "held_seeds": held,
         "adapter_proposals": proposals,
         "provenance_held": provenance_held,
+        "unclearable_ends": ends,
         "shipped": shipped_counts,
         "workqueue": wq,
         **({"autonomy": auto} if auto else {}),

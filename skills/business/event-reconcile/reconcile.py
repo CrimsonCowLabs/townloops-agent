@@ -204,12 +204,15 @@ def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str
 
 def _annotate_already_live(conn, seed_name: str, c: rc.Classification) -> bool:
     """If event-find already queued this (unchanged, live) event, flag it so
-    the operator doesn't approve a duplicate. Returns True if a row was flagged."""
+    the operator doesn't approve a duplicate. Returns True if a row was flagged.
+    A row event-find staged as a change of the live row (a source that no
+    longer states a time — engine/event_dedup) keeps its note."""
     ev = c.extracted
     uid = event_uid(seed_name, ev.get("title") or "", ev.get("date") or "")
     cur = conn.execute(
         "UPDATE events SET approval_note = ? "
-        "WHERE event_uid = ? AND approval_status = 'pending'",
+        "WHERE event_uid = ? AND approval_status = 'pending' "
+        "  AND COALESCE(json_extract(extra_json, '$.reconcile.kind'), '') != 'changed'",
         (f"[reconcile] already live as {c.live.get('slug')} — likely duplicate", uid),
     )
     return cur.rowcount > 0

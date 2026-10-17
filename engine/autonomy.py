@@ -421,8 +421,8 @@ def _mentions(text: str, names: Iterable[str]) -> Optional[str]:
 
 
 def _has_time(item: dict) -> bool:
-    raw = item.get("date") or ""
-    return (len(raw) > 10 and raw[11:16] not in ("", "00:00")) or bool(item.get("end_at_utc"))
+    from engine.event_extract import has_clock_time
+    return has_clock_time(item.get("date")) or bool(item.get("end_at_utc"))
 
 
 def _deterministic(item: dict, ctx: JudgeContext) -> tuple[Optional[Decision], dict]:

@@ -207,6 +207,29 @@ class TestParseDt:
         out = _parse_dt(d)
         assert out.tzinfo is not None
 
+    @pytest.mark.parametrize("value", [
+        "2026-09-07", "2026-09-07 +07", "September 7, 2026", "Sept 7 2026 (Room 12)",
+    ])
+    def test_a_date_only_input_is_date_only(self, value):
+        """A stray number is never read as an hour ("+07" → 07:00, "Room 12" → noon), nor
+        an offset kept with no time to offset."""
+        from engine.ingest_core import _parse_dt, DEFAULT_TZ
+        dt = _parse_dt(value)
+        assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2026, 9, 7, 0, 0)
+        assert dt.utcoffset() == datetime(2026, 9, 7, tzinfo=DEFAULT_TZ).utcoffset()
+
+    @pytest.mark.parametrize("value, hm", [
+        ("July 6, 2026 @ 7:30 p.m.", (19, 30)),
+        ("Sat Sept 7 2026 7pm", (19, 0)),
+        ("2026-09-07T19:00:00", (19, 0)),
+        ("2026-09-07 20:00:00", (20, 0)),
+        ("Mon, 07 Sep 2026 19:00:00 GMT", (19, 0)),
+    ])
+    def test_a_stated_time_is_kept(self, value, hm):
+        from engine.ingest_core import _parse_dt
+        dt = _parse_dt(value)
+        assert (dt.hour, dt.minute) == hm
+
 
 # =====================================================================
 # Identity + content hashing
