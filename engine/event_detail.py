@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from engine import autonomy, event_cancel
+from engine import autonomy, event_cancel, event_provenance
 from engine.derive_helpers import iso_utc_now, seed_name_of
 from engine.discovery import canonicalize_url
 from engine.event_extract import codex_exec, firecrawl_markdown
@@ -97,7 +97,7 @@ _MD_EMPHASIS = re.compile(r"[*_`]+")
 
 @dataclass
 class DetailResult:
-    status: str                  # read | no-detail-page | already-read | retry | failed | cancelled
+    status: str                  # read | no-detail-page | already-read | retry | failed | cancelled | held
     fields: dict = field(default_factory=dict)
     error: str = ""
 
@@ -233,6 +233,9 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     url = event.get("source_url")
     canon = _canon(url)
     seeds = seed_urls(conn, event)
+    check, refused = event_provenance.gate(conn, event)
+    if refused:
+        return _hold(conn, event, [refused], url)
     if not canon or canon in seeds:
         _record(conn, event, "no-detail-page", url, {})
         return DetailResult("no-detail-page")
@@ -243,6 +246,10 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         ok, markdown, err = fetch(url)
     except TimeoutError as e:  # the Firecrawl token bucket stayed empty
         ok, markdown, err = False, "", str(e)
+    disagreed = event_provenance.detail_disagreements(conn, event, markdown) \
+        if ok and check else []
+    if disagreed:
+        return _hold(conn, event, disagreed, url)
     said = autonomy.cancellation_evidence(markdown, event.get("title") or event.get("name")) \
         if ok else None
     if said and said.verdict == "submit":
@@ -266,6 +273,13 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     _record(conn, event, "read", url, fields)
     cache_page(event["event_uid"], markdown)
     return DetailResult("read", fields=fields)
+
+
+def _hold(conn, event: dict, disagreed: list[str], url: Optional[str]) -> DetailResult:
+    """The page isn't this event's (engine/event_provenance): held, not read."""
+    event_provenance.hold(conn, event, disagreed, url)
+    _record(conn, event, "held", url, {})
+    return DetailResult("held", error="; ".join(disagreed))
 
 
 def _cache_dir():

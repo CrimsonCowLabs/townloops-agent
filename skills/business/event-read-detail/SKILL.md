@@ -38,6 +38,14 @@ call: the event is declined with the page's sentence as the note
 (`detail-cancelled`) and never ships. Supervised: the event is flagged
 `possibly-cancelled` for the operator instead, and the read goes on.
 
+The page must be this event's (`engine/event_provenance.py`, #45): it names the
+event and, unless it is a Series page other occurrences share, gives its date.
+A page that disagrees — or a `source_url` event-find refused as another card's
+listing link — ends the read before the Codex call (`detail-held`): supervised,
+the event goes back to the approval queue with a `provenance: …` note naming
+what disagreed (re-approving accepts it); autonomous, it is declined with a
+`provenance-mismatch` decision. The nightly digest lists both.
+
 ## Budget
 
 One Firecrawl scrape + one Codex call per approved event. Skipped with no fetch

@@ -61,8 +61,8 @@ def conn(fresh_db):
     return fresh_db
 
 
-def stage(conn, source_url=DETAIL_URL, title="Jazz Night") -> dict:
-    ev = {"title": title, "date": "2026-10-09T20:00:00", "source_url": source_url}
+def stage(conn, source_url=DETAIL_URL, title="Jazz Night", date="2026-10-09T20:00:00") -> dict:
+    ev = {"title": title, "date": date, "source_url": source_url}
     upsert_event(conn, "Tahoe Arts", ev)
     uid = event_uid("Tahoe Arts", title, ev["date"])
     return dict(conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone())

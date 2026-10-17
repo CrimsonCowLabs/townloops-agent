@@ -24,7 +24,7 @@ from typing import Optional
 import yaml
 from dateutil import tz as _tz
 
-from engine import entity_classify, entity_enrich, inspection, series_sync
+from engine import entity_classify, entity_enrich, event_provenance, inspection, series_sync
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import (
@@ -239,7 +239,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
             print(json.dumps({"seed": name, "error": err[:200]}))
             continue
 
-        events = [e for e in parse_json_array(out)
+        events = [e for e in event_provenance.check_card_urls(parse_json_array(out), md, url)
                   if isinstance(e, dict) and e.get("title") and e.get("date")]
         stats["extracted"] += len(events)
         per = {"seed": name, "extracted": len(events), "new": 0, "changed": 0, "unchanged": 0}
@@ -264,6 +264,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
                                   "reason": c.reason}, ensure_ascii=False))
                 continue
             uid, _ = _stage(conn, name, c, run_id)
+            event_provenance.record_extraction(conn, uid, c.extracted)
             stats["staged_uids"].append(uid)
         if not args.dry_run:
             conn.execute(
