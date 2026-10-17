@@ -106,6 +106,16 @@ class TestTribe:
         market = next(e for e in listing.events if e["title"] == "Winter Market")
         assert market["venue"] is None and market["location"] is None
 
+    def test_an_all_day_row_is_date_only(self):
+        # Tribe gives an all-day event 00:00–23:59:59; neither is a published time.
+        pages = tribe_pages()
+        row = {**pages[1]["events"][0], "all_day": True,
+               "start_date": "2027-01-08 00:00:00", "end_date": "2027-01-08 23:59:59",
+               "utc_start_date": "2027-01-08 08:00:00", "utc_end_date": "2027-01-09 07:59:59"}
+        feed = FakeFeed({1: {**pages[1], "events": [row], "total_pages": 1}})
+        [evt] = seed_adapters.read(tribe_seed(), get_json=feed).events
+        assert (evt["date"], evt["end_at"]) == ("2027-01-08", None)
+
     def test_the_page_text_carries_each_rows_own_words(self):
         # what cancellation and judgement quote-check against
         listing = seed_adapters.read(tribe_seed(), get_json=FakeFeed())

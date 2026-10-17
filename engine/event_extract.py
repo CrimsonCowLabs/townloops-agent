@@ -60,12 +60,94 @@ def to_utc(value) -> str | None:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
+_DATE_ONLY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def is_date_only(value) -> bool:
+    """A start with a day and no clock time ("2026-09-07") — the source
+    published no time, so it sits on town-local midnight with no end."""
+    return isinstance(value, str) and bool(_DATE_ONLY_RE.fullmatch(value.strip()))
+
+
 def utc_times(start, end) -> tuple[str | None, str | None]:
-    """(start, end) as UTC; an end that isn't after the start is dropped."""
+    """(start, end) as UTC; an end that isn't after the start is dropped, and
+    a date-only start has none."""
     start_utc, end_utc = to_utc(start), to_utc(end)
-    if start_utc and end_utc and end_utc <= start_utc:
+    if (start_utc and end_utc and end_utc <= start_utc) or is_date_only(start):
         end_utc = None
     return start_utc, end_utc
+
+
+# A clock time as a page states it: "7pm", "7:30 p.m.", "9a", "19:00", an ISO
+# "…T19:00". A bare number counts only as the start of a range whose end has a
+# meridiem ("7–9pm"); a dotted one only with a meridiem — "09.07.2026" is a date.
+_CLOCK_RE = re.compile(
+    r"(?:(?<=\dT)|(?<![\w:.]))(\d{1,2})(?:([:.])(\d{2}))?(?!\d)"
+    r"(?:\s*(?:([ap])\.?\s?m\b\.?|([ap])\b))?", re.IGNORECASE)
+_RANGE_JOIN_RE = re.compile(r"\s*(?:-|–|—|to|until|till)\s*", re.IGNORECASE)
+_WORD_TIMES = {"noon": (12, 0), "midnight": (0, 0)}
+
+
+def page_times(page: str) -> set[tuple[int, int]]:
+    """Every (hour, minute) on the page that is stated as a clock time. A
+    "7:00" with no meridiem may be either half of the day."""
+    text = page or ""
+    found = {hm for word, hm in _WORD_TIMES.items()
+             if re.search(rf"\b{word}\b", text, re.IGNORECASE)}
+    matches = list(_CLOCK_RE.finditer(text))
+    for i, m in enumerate(matches):
+        hour, sep, minute = int(m.group(1)), m.group(2), int(m.group(3) or 0)
+        meridiem = (m.group(4) or m.group(5) or "").lower()
+        nxt = matches[i + 1] if i + 1 < len(matches) else None
+        if not meridiem and nxt and (nxt.group(4) or nxt.group(5)) \
+                and _RANGE_JOIN_RE.fullmatch(text[m.end():nxt.start()]):
+            meridiem = (nxt.group(4) or nxt.group(5)).lower()
+        if minute > 59:
+            continue
+        if meridiem:
+            if 1 <= hour <= 12:
+                found.add((hour % 12 + (12 if meridiem == "p" else 0), minute))
+        elif sep == ":" and hour <= 23:
+            found.add((hour, minute))
+            if 1 <= hour < 12:
+                found.add((hour + 12, minute))
+    return found
+
+
+def _day_and_clock(value):
+    """(the ISO day, (hour, minute) or None when it has no time) of an
+    extracted ISO date/time; None when it isn't ISO."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        dt = _isoparse(value.strip())
+    except (ValueError, OverflowError):
+        return None
+    day = dt.date().isoformat()
+    return day, None if is_date_only(value) else (dt.hour, dt.minute)
+
+
+def published_times(evt: dict, page: str) -> dict:
+    """The extraction with only the times its page states. A start time not on
+    the page leaves the day alone (date-only); an end time not on it, or any
+    end of a date-only start, is dropped. A model fills a time it can't find
+    ("Save the Date" → 00:07–02:07); a published time is the only one shipped."""
+    start = _day_and_clock(evt.get("date"))
+    if start is None:
+        return evt   # not ISO: upsert gives it no UTC start, so it never ships
+    stated = page_times(page)
+    date = evt["date"] if start[1] in stated else start[0]
+    end_at = evt.get("end_at")
+    end = _day_and_clock(end_at)
+    if is_date_only(date) or end is None or end[1] not in stated:
+        end_at = None
+    return {**evt, "date": date, "end_at": end_at}
+
+
+def extracted_events(stdout: str, page: str) -> list:
+    """An extraction's JSON array, its times held to what `page` states."""
+    return [published_times(e, page) if isinstance(e, dict) else e
+            for e in parse_json_array(stdout)]
 
 
 def _firecrawl_scrape(url: str, timeout_s: int) -> tuple[bool, str, str, dict]:
@@ -146,8 +228,8 @@ Below is the scraped markdown of "{seed_name}" ({seed_url}). Extract every upcom
 
 Return ONLY a JSON array — no prose, no markdown, no code fence. Each object must have these keys (use null for missing fields, never omit):
   "title":       event name (concise)
-  "date":        start date/time in ISO 8601 as local wall-clock time in {town_tz_name()}, with no UTC offset (e.g. "2026-08-15T19:00:00")
-  "end_at":      end date/time in the same form, or null
+  "date":        start date/time in ISO 8601 as local wall-clock time in {town_tz_name()}, with no UTC offset (e.g. "2026-08-15T19:00:00"); the date alone (e.g. "2026-08-15") when the page states no start time — never guess a time
+  "end_at":      end date/time in the same form when the page states an end time, else null
   "venue":       venue name if stated (e.g. "Kings Beach Community Center"), else null
   "location":    street address / city if stated, else null
   "description": short description (first 400 chars max)

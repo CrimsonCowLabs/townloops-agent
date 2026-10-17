@@ -191,3 +191,175 @@ class TestShipSendsUtc:
         assert _run(ship, monkeypatch, event_uid("Seed", "Jazz Night", "2026-10-09T20:00:00")) == 0
         [(_, payload)] = FakeClient.calls
         assert "end_at" not in payload
+
+
+# --------------------------------------------------------------------------
+# Published times only (#44): a time the source doesn't state is never shipped
+# --------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures" / "times"
+SAVE_THE_DATE = (FIXTURES / "save_the_date.md").read_text()
+TIMED = (FIXTURES / "timed.md").read_text()
+
+# What an extraction answered for the live `labor-day-cruise-2026-09-07`: a
+# clock time and an exact two-hour end the page never stated.
+INVENTED = ('[{"title": "Labor Day Cruise", "date": "2026-09-07T00:07:00", '
+            '"end_at": "2026-09-07T02:07:00", "venue": "Zephyr Cove Resort"}]')
+
+
+class TestPublishedTimes:
+    def _one(self, page, date, end=None):
+        from engine.event_extract import published_times
+        return published_times({"title": "Cruise", "date": date, "end_at": end}, page)
+
+    def test_a_time_the_page_does_not_state_becomes_date_only(self):
+        evt = self._one(SAVE_THE_DATE, "2026-09-07T00:07:00", "2026-09-07T02:07:00")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07", None)
+
+    def test_invented_midnight_is_date_only_too(self):
+        evt = self._one(SAVE_THE_DATE, "2026-09-07T00:00:00")
+        assert evt["date"] == "2026-09-07"
+
+    @pytest.mark.parametrize("date", ["2026-09-07T09:07:00", "2026-09-07T07:00:00",
+                                      "2026-09-07T04:49:00", "2026-09-07T20:26:00"])
+    def test_digits_that_are_not_a_clock_time_do_not_count(self, date):
+        # "09.07.2026", the phone number and the street number are on the page.
+        assert self._one(SAVE_THE_DATE, date)["date"] == "2026-09-07"
+
+    def test_a_stated_start_and_end_are_kept(self):
+        evt = self._one(TIMED, "2026-09-07T10:00:00", "2026-09-07T12:00:00")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07T10:00:00", "2026-09-07T12:00:00")
+
+    def test_an_unstated_end_is_dropped_but_the_start_kept(self):
+        evt = self._one(TIMED, "2026-09-07T10:00:00", "2026-09-07T14:00:00")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07T10:00:00", None)
+
+    def test_a_date_only_start_has_no_end(self):
+        evt = self._one(TIMED, "2026-09-07", "2026-09-07T12:00:00")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07", None)
+        evt = self._one("Sept 5–7, 2026", "2026-09-05", "2026-09-07")
+        assert (evt["date"], evt["end_at"]) == ("2026-09-05", None)
+
+    @pytest.mark.parametrize("page, date", [
+        ("Doors at 7pm", "2026-09-07T19:00:00"),
+        ("Doors at 7 p.m.", "2026-09-07T19:00:00"),
+        ("Starts 7:30PM sharp", "2026-09-07T19:30:00"),
+        ("7–9pm on the plaza", "2026-09-07T19:00:00"),
+        ("7 to 9 pm on the plaza", "2026-09-07T19:00:00"),
+        ("10:30-11:30am", "2026-09-07T10:30:00"),
+        ("Showtime 19:00", "2026-09-07T19:00:00"),
+        ("Showtime 7:00", "2026-09-07T19:00:00"),
+        ("Lunch at noon", "2026-09-07T12:00:00"),
+        ("Countdown at midnight", "2026-09-07T00:00:00"),
+        ("Opens 12 AM", "2026-09-07T00:00:00"),
+        ("Opens 9a", "2026-09-07T09:00:00"),
+        ('"startDate": "2026-09-07T19:00:00"', "2026-09-07T19:00:00"),
+    ])
+    def test_published_forms_count(self, page, date):
+        assert self._one(page, date)["date"] == date
+
+    @pytest.mark.parametrize("page, date", [
+        ("Doors at 7pm", "2026-09-07T07:00:00"),         # wrong meridiem
+        ("Doors at 7pm", "2026-09-07T19:30:00"),         # wrong minute
+        ("Room 7, 2026 season", "2026-09-07T07:00:00"),  # a bare number
+    ])
+    def test_a_different_time_does_not_count(self, page, date):
+        assert self._one(page, date)["date"] == "2026-09-07"
+
+    def test_non_iso_dates_are_left_for_upsert_to_reject(self):
+        assert self._one(SAVE_THE_DATE, "TBD")["date"] == "TBD"
+
+    def test_extracted_events_applies_the_rule(self):
+        from engine.event_extract import extracted_events
+        [evt] = extracted_events(INVENTED, SAVE_THE_DATE)
+        assert (evt["date"], evt["end_at"]) == ("2026-09-07", None)
+
+    def test_prompt_asks_for_a_date_alone_when_no_time_is_stated(self):
+        prompt = build_extraction_prompt({"name": "Tahoe"}, "Seed", "https://x.example", "md")
+        assert '"2026-08-15"' in prompt and "never guess" in prompt.lower()
+
+
+class TestDateOnlyUtc:
+    def test_date_only_start_is_town_local_midnight_with_no_end(self):
+        from engine.event_extract import utc_times
+        assert utc_times("2026-09-07", "2026-09-07T02:07:00") == (
+            "2026-09-07T07:00:00+00:00", None)
+
+    def test_date_only_start_in_another_town(self, new_york):
+        from engine.event_extract import utc_times
+        assert utc_times("2026-09-07", None) == ("2026-09-07T04:00:00+00:00", None)
+
+
+class TestShipsDateOnly:
+    """The fixtures through extraction → upsert → event-ship's payload."""
+
+    def _ship(self, conn, ship, monkeypatch, page, llm_out):
+        from engine.event_extract import extracted_events
+        [evt] = extracted_events(llm_out, page)
+        upsert_event(conn, "Zephyr Cove", evt)
+        assert _run(ship, monkeypatch, event_uid("Zephyr Cove", evt["title"], evt["date"])) == 0
+        [(_, payload)] = FakeClient.calls
+        return payload
+
+    def test_save_the_date_ships_at_local_midnight_with_no_end(self, conn, ship, monkeypatch):
+        payload = self._ship(conn, ship, monkeypatch, SAVE_THE_DATE, INVENTED)
+        assert payload["start_at"] == "2026-09-07T07:00:00+00:00"   # 00:00 PDT
+        assert "end_at" not in payload
+
+    def test_a_stated_time_ships_unchanged(self, conn, ship, monkeypatch):
+        payload = self._ship(conn, ship, monkeypatch, TIMED, (
+            '[{"title": "Labor Day Cruise", "date": "2026-09-07T10:00:00", '
+            '"end_at": "2026-09-07T12:00:00"}]'))
+        assert payload["start_at"] == "2026-09-07T17:00:00+00:00"
+        assert payload["end_at"] == "2026-09-07T19:00:00+00:00"
+
+    def test_a_row_extracted_before_the_rule_is_not_the_one_re_found(
+            self, conn, ship, monkeypatch):
+        """labor-day-cruise-2026-09-07 re-ingested today: the old row with the
+        invented time is left behind; the date-only row is the one shipped."""
+        upsert_event(conn, "Zephyr Cove", {"title": "Labor Day Cruise",
+                                           "date": "2026-09-07T00:07:00",
+                                           "end_at": "2026-09-07T02:07:00"})
+        payload = self._ship(conn, ship, monkeypatch, SAVE_THE_DATE, INVENTED)
+        assert payload["start_at"] == "2026-09-07T07:00:00+00:00"
+        assert "end_at" not in payload
+
+
+    def test_a_date_only_row_with_a_stale_utc_end_ships_without_it(self, conn, ship, monkeypatch):
+        upsert_event(conn, "Zephyr Cove", {"title": "Labor Day Cruise", "date": "2026-09-07"})
+        conn.execute("UPDATE events SET end_at_utc = '2026-09-07T09:07:00+00:00'")
+        assert _run(ship, monkeypatch, event_uid("Zephyr Cove", "Labor Day Cruise",
+                                                 "2026-09-07")) == 0
+        [(_, payload)] = FakeClient.calls
+        assert payload["start_at"] == "2026-09-07T07:00:00+00:00"
+        assert "end_at" not in payload
+
+    def test_a_date_change_to_a_date_only_start_takes_no_end_from_live(self, ship):
+        # Live 00:07–02:07 moved to a date-only day: its two hours aren't kept.
+        assert ship._patched_end(None, "2026-09-07T07:07:00+00:00", "2026-09-07T09:07:00+00:00",
+                                 "2026-09-08T07:00:00+00:00", date_only=True) is None
+        assert ship._patched_end(None, "2026-09-07T07:07:00+00:00", "2026-09-07T09:07:00+00:00",
+                                 "2026-09-08T17:00:00+00:00") == "2026-09-08T19:00:00+00:00"
+
+
+class TestEventFindKeepsPublishedTimes:
+    def test_find_stores_a_no_time_listing_date_only(self, fresh_db, tmp_state_dir, monkeypatch):
+        spec = importlib.util.spec_from_file_location(
+            "event_find_times", Path(__file__).resolve().parent.parent
+            / "skills/business/event-find/find.py")
+        find = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(find)
+        monkeypatch.setattr(find, "_DB_PATH", tmp_state_dir / "townloops.db")
+        monkeypatch.setattr("engine.inspection._DB_PATH", tmp_state_dir / "townloops.db")
+        fresh_db.execute("INSERT INTO event_seeds (name, url, kind, status, first_seen_at, "
+                         "last_seen_at) VALUES ('Zephyr Cove', 'https://cruise.example/events', "
+                         "'venue', 'approved', '2026-10-01', '2026-10-01')")
+        fresh_db.commit()
+        monkeypatch.setattr(find, "_load_town_profile", lambda: {})
+        monkeypatch.setattr(find, "_firecrawl_listing", lambda url: (True, SAVE_THE_DATE, ""))
+        monkeypatch.setattr(find, "_build_extraction_prompt", lambda *a: "prompt")
+        monkeypatch.setattr(find, "_codex_exec", lambda p: (True, INVENTED, ""))
+        assert find.main([]) == 0
+        rows = fresh_db.execute("SELECT date, end_at, date_utc, end_at_utc FROM events").fetchall()
+        assert [tuple(r) for r in rows] == [
+            ("2026-09-07", None, "2026-09-07T07:00:00+00:00", None)]

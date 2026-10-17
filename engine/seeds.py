@@ -37,7 +37,7 @@ from urllib.parse import urlparse
 
 from engine import autonomy, blocked_page, event_dedup, feed_probe, seed_adapters
 from engine.derive_helpers import is_http_url, iso_utc_now, seed_ref
-from engine.event_extract import build_extraction_prompt, parse_json_array, utc_times
+from engine.event_extract import build_extraction_prompt, extracted_events, utc_times
 
 
 @dataclass(frozen=True)
@@ -429,7 +429,7 @@ def trial(conn: sqlite3.Connection, profile: dict, mode: autonomy.Settings, tool
     ok, out, err = tools.llm(build_extraction_prompt(profile, name, url, md))
     if not ok:
         return autonomy.Decision("defer", "ai-unavailable", {"url": url})
-    return _judge_listing(conn, profile, mode, tools, parse_json_array(out), md, url)
+    return _judge_listing(conn, profile, mode, tools, extracted_events(out, md), md, url)
 
 
 def _judge_listing(conn: sqlite3.Connection, profile: dict, mode: autonomy.Settings,

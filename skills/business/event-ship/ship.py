@@ -42,7 +42,7 @@ from engine.derive_helpers import (
 from engine.entity_ship import (
     AwaitingResearch, ship_entity as _ship_entity, slug_for as _slug_for,
 )
-from engine.event_extract import town_tz_name, utc_times
+from engine.event_extract import is_date_only, town_tz_name, utc_times
 from engine.workqueue import RC_DEFERRED
 
 
@@ -387,7 +387,8 @@ def _change_values(key: str, event: dict, payload: dict, current: dict) -> dict[
     if key == "start_at":
         return {"start_at": event["date_utc"],
                 "end_at": _patched_end(event.get("end_at_utc"), current.get("start_at"),
-                                       current.get("end_at"), event["date_utc"])}
+                                       current.get("end_at"), event["date_utc"],
+                                       is_date_only(event.get("date")))}
     if key == "venue":
         if payload.get("venue_id"):
             return {"venue_id": payload["venue_id"]}
@@ -513,10 +514,13 @@ def _repair_dropped_fields(client, conn, event: dict, slug: str, payload: dict,
 
 def _ensure_utc_times(conn, event: dict) -> bool:
     """Fill the UTC columns of a row queued before extraction set them,
-    converting its local times in the town timezone. False when the start
-    has no UTC form — the event must not ship."""
+    converting its local times in the town timezone; a date-only start
+    loses any end. False when the start has no UTC form — the event must
+    not ship."""
     if event.get("date_utc"):
         date_utc, end_at_utc = event["date_utc"], event.get("end_at_utc")
+        if is_date_only(event.get("date")):
+            end_at_utc = None
     else:
         date_utc, end_at_utc = utc_times(event.get("date"), event.get("end_at"))
     if not date_utc:
@@ -546,13 +550,14 @@ def _to_dt(value: Optional[str]):
 
 
 def _patched_end(source_end: Optional[str], live_start: Optional[str],
-                 live_end: Optional[str], new_start: str) -> Optional[str]:
+                 live_end: Optional[str], new_start: str,
+                 date_only: bool = False) -> Optional[str]:
     """End time to send with a date change: the source's own end if it is
     after the new start, else the live end shifted by the same amount as the
     start (keeps the duration). None when neither is usable — never an end
-    that falls before the start."""
+    that falls before the start, nor one for a date-only start."""
     start = _to_dt(new_start)
-    if start is None:
+    if start is None or date_only:
         return None
     end = _to_dt(source_end)
     if end and end > start:
@@ -628,7 +633,8 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     if "start_at" in changes:
         overrides["start_at"] = event["date_utc"]
         overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),
-                                           current.get("end_at"), event["date_utc"])
+                                           current.get("end_at"), event["date_utc"],
+                                           is_date_only(event.get("date")))
     if "venue" in changes:
         venue_id = _resolve_venue_id(client, conn, event, venue_slug)
         if not venue_id:

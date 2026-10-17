@@ -153,10 +153,14 @@ def _tribe_event(row: dict) -> dict:
     venue = row.get("venue") if isinstance(row.get("venue"), dict) else {}
     zip_part = " ".join(x for x in (venue.get("state"), venue.get("zip")) if x)
     location = ", ".join(x for x in (venue.get("address"), venue.get("city"), zip_part) if x)
+    start = _local(row.get("utc_start_date"), row.get("start_date"))
+    end = _local(row.get("utc_end_date"), row.get("end_date"))
+    if row.get("all_day") is True and start:   # 00:00–23:59:59 is no published time
+        start, end = start[:10], None
     return {
         "title": _text(row.get("title")),
-        "date": _local(row.get("utc_start_date"), row.get("start_date")),
-        "end_at": _local(row.get("utc_end_date"), row.get("end_date")),
+        "date": start,
+        "end_at": end,
         "venue": _text(venue.get("venue")),
         "location": _html.unescape(location) or None,
         "description": _text(row.get("description")),

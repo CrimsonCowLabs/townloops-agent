@@ -112,7 +112,8 @@ class Town:
     def listing(self, url: str, events: list[dict], *lines: str) -> None:
         """What a seed page shows and what extraction finds on it."""
         self.pages[url] = page_text(*lines, *(
-            f"{e['title']} — {e.get('date')} — {e.get('venue') or ''} {e.get('location') or ''}"
+            f"{e['title']} — {e.get('date')}{' – ' + e['end_at'] if e.get('end_at') else ''} "
+            f"— {e.get('venue') or ''} {e.get('location') or ''}"
             for e in events))
         self.extractions[url] = events
 

@@ -138,6 +138,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     (`event_extract.firecrawl_listing`, `seed_adapters._get_json`) → a failed run with that reason, never
     LLM-extracted, never a source-health zero, never a vanish miss; also the seed trial (`trial-not-found`/
     `-challenge`/`-empty-page`) and performer research's unreadable-page check — extend it, don't add another),
+    `event_extract.py` (event-find/-reconcile/seed-trial extraction; `extracted_events` keeps only the times the page
+    states — none → date-only: town-local midnight, no end; a Tribe all-day row is date-only too),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
     its events take event-find's one path, a partial read is a failed run; `tribe` first — add an `Adapter` entry to
     `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`)),

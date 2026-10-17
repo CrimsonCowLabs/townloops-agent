@@ -33,8 +33,8 @@ from engine.derive_helpers import (
 )
 from engine.entity_enrich import Budget
 from engine.event_extract import (
-    build_extraction_prompt, codex_exec, event_uid, firecrawl_markdown,
-    parse_json_array, town_tz_name, upsert_event,
+    build_extraction_prompt, codex_exec, event_uid, extracted_events, firecrawl_markdown,
+    town_tz_name, upsert_event,
 )
 
 
@@ -239,7 +239,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
             print(json.dumps({"seed": name, "error": err[:200]}))
             continue
 
-        events = [e for e in parse_json_array(out)
+        events = [e for e in extracted_events(out, md)
                   if isinstance(e, dict) and e.get("title") and e.get("date")]
         stats["extracted"] += len(events)
         per = {"seed": name, "extracted": len(events), "new": 0, "changed": 0, "unchanged": 0}

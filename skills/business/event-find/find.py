@@ -29,6 +29,7 @@ from engine.event_extract import (  # noqa: F401 — re-exported for callers/tes
     codex_exec as _codex_exec,
     content_hash as _content_hash,
     event_uid as _event_uid,
+    extracted_events as _extracted_events,
     firecrawl_listing as _firecrawl_listing,
     normalize_title as _normalize_title,
     parse_json_array as _parse_json_array,
@@ -221,7 +222,7 @@ def _read_seed(profile: dict, seed: dict) -> _SeedListing:
     codex_ok, out, err = _codex_exec(prompt)
     if not codex_ok:
         return _SeedListing(error=f"codex: {err}")
-    events = _parse_json_array(out)
+    events = _extracted_events(out, md)
     # An empty JSON array is a page listing nothing; anything else unparseable.
     return _SeedListing(events, md, unparseable=not events and not _EMPTY_LIST_RE.search(out or ""))
 
