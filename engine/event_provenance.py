@@ -44,7 +44,7 @@ from urllib.parse import urljoin
 from engine import autonomy, blocked_page, event_state
 from engine.derive_helpers import iso_utc_now, parse_extra_json
 from engine.discovery import canonicalize_url
-from engine.event_extract import parse_json_array, published_times
+from engine.event_extract import day_and_clock, parse_json_array, published_times
 from engine.page_extract import PAGE_URL, normalize, plain_text
 
 
@@ -541,8 +541,8 @@ def detail_disagreements(conn: sqlite3.Connection, event: dict, page: str) -> li
         heads = _headings(page)
         out.append(f'detail page does not name "{title}"'
                    + (f' (it reads "{heads[0].text}")' if heads else ""))
-    day = (event.get("date_local") or event.get("date") or "")[:10]
-    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", day) and not _shared_page(conn, event):
+    day = (day_and_clock(event.get("date_local") or event.get("date")) or ("",))[0]
+    if day and not _shared_page(conn, event):
         stated = page_dates("\n".join(ln for ln in section.splitlines() if not _STAMP.search(ln)))
         if stated and (int(day[5:7]), int(day[8:10])) not in stated:
             shown = ", ".join(f"{_MONTHS[m - 1].title()} {d}" for m, d in sorted(stated)[:5])

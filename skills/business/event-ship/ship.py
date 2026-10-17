@@ -42,7 +42,7 @@ from engine.derive_helpers import (
 from engine.entity_ship import (
     AwaitingResearch, ship_entity as _ship_entity, slug_for as _slug_for,
 )
-from engine.event_extract import is_date_only, town_tz_name, utc_times
+from engine.event_extract import has_clock_time, town_tz_name, utc_times
 from engine.workqueue import RC_DEFERRED
 
 
@@ -372,6 +372,8 @@ def _submit_change(client, conn, event: dict, meta: dict,
         result = {"slug": payload["slug"]}
     slug = (result or {}).get("slug") or payload["slug"]
     _remember_change_submission(conn, uid, slug, live_slug, submit)
+    if "start_at" in submitted_keys:   # the merge may keep the published end
+        _note_unclearable_end(conn, event, live_slug, current.get("end_at"))
     autonomy.record(conn, "change", uid, autonomy.Decision(
         "submit", "published-value-changed",
         {"changes": submitted_keys, "fields": sorted(submit), "target_slug": live_slug,
@@ -387,8 +389,7 @@ def _change_values(key: str, event: dict, payload: dict, current: dict) -> dict[
     if key == "start_at":
         return {"start_at": event["date_utc"],
                 "end_at": _patched_end(event.get("end_at_utc"), current.get("start_at"),
-                                       current.get("end_at"), event["date_utc"],
-                                       is_date_only(event.get("date")))}
+                                       current.get("end_at"), event["date_utc"])}
     if key == "venue":
         if payload.get("venue_id"):
             return {"venue_id": payload["venue_id"]}
@@ -519,7 +520,7 @@ def _ensure_utc_times(conn, event: dict) -> bool:
     not ship."""
     if event.get("date_utc"):
         date_utc, end_at_utc = event["date_utc"], event.get("end_at_utc")
-        if is_date_only(event.get("date")):
+        if not has_clock_time(event.get("date")):
             end_at_utc = None
     else:
         date_utc, end_at_utc = utc_times(event.get("date"), event.get("end_at"))
@@ -550,14 +551,14 @@ def _to_dt(value: Optional[str]):
 
 
 def _patched_end(source_end: Optional[str], live_start: Optional[str],
-                 live_end: Optional[str], new_start: str,
-                 date_only: bool = False) -> Optional[str]:
+                 live_end: Optional[str], new_start: str) -> Optional[str]:
     """End time to send with a date change: the source's own end if it is
     after the new start, else the live end shifted by the same amount as the
     start (keeps the duration). None when neither is usable — never an end
-    that falls before the start, nor one for a date-only start."""
+    that falls before the start, nor one for a start with no time of day
+    (town-local midnight, the date-only convention)."""
     start = _to_dt(new_start)
-    if start is None or date_only:
+    if start is None or not has_clock_time(new_start):
         return None
     end = _to_dt(source_end)
     if end and end > start:
@@ -633,8 +634,7 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     if "start_at" in changes:
         overrides["start_at"] = event["date_utc"]
         overrides["end_at"] = _patched_end(event.get("end_at_utc"), current.get("start_at"),
-                                           current.get("end_at"), event["date_utc"],
-                                           is_date_only(event.get("date")))
+                                           current.get("end_at"), event["date_utc"])
     if "venue" in changes:
         venue_id = _resolve_venue_id(client, conn, event, venue_slug)
         if not venue_id:
@@ -651,7 +651,17 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     if result.mismatches:
         _flag_for_review(conn, event["event_uid"], live_slug, result.mismatches)
         return None
+    if "start_at" in changes:
+        _note_unclearable_end(conn, event, live_slug, result.body.get("end_at"))
     return live_slug
+
+
+def _note_unclearable_end(conn, event: dict, live_slug: str, live_end: Optional[str]) -> None:
+    """A change to a date-only start leaves the live row's end in place —
+    PATCH can't null `end_at` — so the operator is told to clear it."""
+    from engine.live_patch import flag_unclearable_end
+    if live_end and not has_clock_time(event["date_utc"]):
+        flag_unclearable_end(conn, event["event_uid"], live_slug, live_end, _WORKER)
 
 
 def _reconcile_fill_overrides(event: dict, current: dict) -> dict[str, Any]:

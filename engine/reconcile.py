@@ -36,6 +36,7 @@ from dateutil import parser as _dtparser
 
 from engine.derive_helpers import names_match, normalize_name
 from engine.discovery import canonicalize_url
+from engine.event_extract import day_and_clock, has_clock_time, page_times
 
 
 TITLE_MATCH_RATIO = 0.88
@@ -78,8 +79,9 @@ def parse_start(value: Any, tz: tzinfo) -> tuple[Optional[datetime], bool]:
     """Parse an ISO-ish start. Returns (aware datetime, has_time).
 
     Naive values are interpreted in the town timezone — that is what the
-    extraction prompt asks the LLM to emit. Date-only and exact-midnight
-    values are flagged has_time=False so only the day is compared."""
+    extraction prompt asks the LLM to emit. A value with no time of day
+    (`event_extract.day_and_clock`: date-only, or town-local midnight) is
+    flagged has_time=False so only the day is compared."""
     if not value or not isinstance(value, str):
         return None, False
     try:
@@ -89,11 +91,12 @@ def parse_start(value: Any, tz: tzinfo) -> tuple[Optional[datetime], bool]:
             dt = _dtparser.parse(value.strip())
         except (ValueError, OverflowError):
             return None, False
-    has_time = "T" in value or ":" in value
+    if day_and_clock(value):
+        has_time = has_clock_time(value)
+    else:   # not ISO: a time only where the text states one
+        has_time = has_clock_time(dt) and (dt.hour, dt.minute) in page_times(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=tz)
-    if dt.hour == 0 and dt.minute == 0:
-        has_time = False
     return dt, has_time
 
 

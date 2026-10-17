@@ -60,41 +60,80 @@ def to_utc(value) -> str | None:
     return dt.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
-_DATE_ONLY_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# A value with a time-of-day part ("…T19:00", "… 19:00"); without one it
+# is date-only, whatever offset trails it.
+_TIME_PART_RE = re.compile(r"[T ]\d")
 
 
-def is_date_only(value) -> bool:
-    """A start with a day and no clock time ("2026-09-07") — the source
-    published no time, so it sits on town-local midnight with no end."""
-    return isinstance(value, str) and bool(_DATE_ONLY_RE.fullmatch(value.strip()))
+def day_and_clock(value):
+    """(ISO day, (hour, minute)) of an ISO date/time, read in the town's
+    timezone when it carries an offset. The clock is None when the value
+    states no time of day: a date-only value ("2026-09-07"), or town-local
+    midnight — the all-day convention a date-only event sits on live. None
+    when it isn't ISO. The one rule for "has a time": extraction, upsert,
+    ship, reconcile, dedup and the autonomy judge all read it here."""
+    if isinstance(value, datetime):
+        dt, timed = value, True
+    elif isinstance(value, str) and value.strip():
+        try:
+            dt = _isoparse(value.strip())
+        except (ValueError, OverflowError):
+            return None
+        timed = bool(_TIME_PART_RE.search(value.strip()))
+    else:
+        return None
+    if not timed:
+        return dt.date().isoformat(), None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_tz.gettz(town_tz_name()))
+    clock = (dt.hour, dt.minute)
+    return dt.date().isoformat(), None if clock == (0, 0) else clock
+
+
+def has_clock_time(value) -> bool:
+    """Whether an ISO date/time states a time of day (`day_and_clock`)."""
+    parts = day_and_clock(value)
+    return bool(parts and parts[1])
 
 
 def utc_times(start, end) -> tuple[str | None, str | None]:
     """(start, end) as UTC; an end that isn't after the start is dropped, and
-    a date-only start has none."""
+    a start with no time of day has none."""
     start_utc, end_utc = to_utc(start), to_utc(end)
-    if (start_utc and end_utc and end_utc <= start_utc) or is_date_only(start):
+    if (start_utc and end_utc and end_utc <= start_utc) or not has_clock_time(start):
         end_utc = None
     return start_utc, end_utc
 
 
-# A clock time as a page states it: "7pm", "7:30 p.m.", "9a", "19:00", an ISO
-# "…T19:00". A bare number counts only as the start of a range whose end has a
-# meridiem ("7–9pm"); a dotted one only with a meridiem — "09.07.2026" is a date.
+# A clock time as a page's text states it: "7pm", "7:30 p.m.", "9a", "19:00".
+# A bare number counts only as the start of a range whose end has a meridiem
+# ("7–9pm"); a dotted one only with a meridiem — "09.07.2026" is a date. With
+# no meridiem a clock is read as written: "7:00" is 07:00, never 19:00. An ISO
+# timestamp ("…T00:07", "2026-09-07 00:07") is page metadata — a scrape or
+# modified time — unless it is an event's own `startDate`/`endDate`/`doorTime`.
 _CLOCK_RE = re.compile(
-    r"(?:(?<=\dT)|(?<![\w:.]))(\d{1,2})(?:([:.])(\d{2}))?(?!\d)"
+    r"(?<![\w:.])(\d{1,2})(?:([:.])(\d{2}))?(?!\d)"
     r"(?:\s*(?:([ap])\.?\s?m\b\.?|([ap])\b))?", re.IGNORECASE)
+_AFTER_ISO_DAY_RE = re.compile(r"\d{4}-\d{2}-\d{2} $")
+_EVENT_ISO_RE = re.compile(
+    r"\b(?:startDate|endDate|doorTime)\b[\"']?\s*(?::|=|content\s*=)\s*[\"']?"
+    r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)")
 _RANGE_JOIN_RE = re.compile(r"\s*(?:-|–|—|to|until|till)\s*", re.IGNORECASE)
 _WORD_TIMES = {"noon": (12, 0), "midnight": (0, 0)}
 
 
 def page_times(page: str) -> set[tuple[int, int]]:
-    """Every (hour, minute) on the page that is stated as a clock time. A
-    "7:00" with no meridiem may be either half of the day."""
+    """Every (hour, minute) the page states as an event's clock time, in the
+    town's timezone."""
     text = page or ""
     found = {hm for word, hm in _WORD_TIMES.items()
              if re.search(rf"\b{word}\b", text, re.IGNORECASE)}
-    matches = list(_CLOCK_RE.finditer(text))
+    for m in _EVENT_ISO_RE.finditer(text):
+        parts = day_and_clock(m.group(1))
+        if parts and parts[1]:
+            found.add(parts[1])
+    matches = [m for m in _CLOCK_RE.finditer(text)
+               if not _AFTER_ISO_DAY_RE.search(text, max(0, m.start() - 11), m.start())]
     for i, m in enumerate(matches):
         hour, sep, minute = int(m.group(1)), m.group(2), int(m.group(3) or 0)
         meridiem = (m.group(4) or m.group(5) or "").lower()
@@ -109,22 +148,7 @@ def page_times(page: str) -> set[tuple[int, int]]:
                 found.add((hour % 12 + (12 if meridiem == "p" else 0), minute))
         elif sep == ":" and hour <= 23:
             found.add((hour, minute))
-            if 1 <= hour < 12:
-                found.add((hour + 12, minute))
     return found
-
-
-def _day_and_clock(value):
-    """(the ISO day, (hour, minute) or None when it has no time) of an
-    extracted ISO date/time; None when it isn't ISO."""
-    if not isinstance(value, str) or not value.strip():
-        return None
-    try:
-        dt = _isoparse(value.strip())
-    except (ValueError, OverflowError):
-        return None
-    day = dt.date().isoformat()
-    return day, None if is_date_only(value) else (dt.hour, dt.minute)
 
 
 def published_times(evt: dict, page: str) -> dict:
@@ -134,14 +158,14 @@ def published_times(evt: dict, page: str) -> dict:
     ("Save the Date" → 00:07–02:07); a published time is the only one shipped.
     Extraction reads each event against its own listing card
     (engine/event_provenance.listing_events), so `page` is that card."""
-    start = _day_and_clock(evt.get("date"))
+    start = day_and_clock(evt.get("date"))
     if start is None:
         return evt   # not ISO: upsert gives it no UTC start, so it never ships
     stated = page_times(page)
     date = evt["date"] if start[1] in stated else start[0]
     end_at = evt.get("end_at")
-    end = _day_and_clock(end_at)
-    if is_date_only(date) or end is None or end[1] not in stated:
+    end = day_and_clock(end_at)
+    if not has_clock_time(date) or end is None or end[1] not in stated:
         end_at = None
     return {**evt, "date": date, "end_at": end_at}
 

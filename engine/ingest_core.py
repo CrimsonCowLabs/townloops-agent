@@ -81,13 +81,15 @@ def _iso(d: datetime) -> str:
 def _parse_dt(value, tz_=None) -> datetime | None:
     """Best-effort datetime parser. Attaches `tz_` (or DEFAULT_TZ) as tzinfo
     on naive parses. Returns None if the string is unparseable even with
-    dateutil's fuzzy=True."""
+    dateutil's fuzzy=True. Never invents a time: a string that states none
+    (dateutil reads a stray "+07" or "Room 12" as an hour) is its day's midnight,
+    the date-only convention, with no offset."""
     if value is None or value == "":
         return None
     if isinstance(value, datetime):
         d = value
     else:
-        s = str(value)
+        s = str(value).strip()
         try:
             d = dateparser.parse(s)
         except (ValueError, TypeError, OverflowError):
@@ -98,9 +100,22 @@ def _parse_dt(value, tz_=None) -> datetime | None:
                 d = dateparser.parse(s, fuzzy=True)
             except (ValueError, TypeError, OverflowError):
                 return None
+        if not _states_time(s, d):
+            d = datetime(d.year, d.month, d.day)
     if d.tzinfo is None:
         d = d.replace(tzinfo=tz_ or DEFAULT_TZ)
     return d
+
+
+def _states_time(text: str, parsed: datetime) -> bool:
+    """Whether `text` states the time of day dateutil `parsed` from it: an
+    ISO date/time with a time part, else a clock time the text itself states
+    (engine/event_extract.page_times — "7:30 p.m.", "19:00", "noon")."""
+    from engine.event_extract import day_and_clock, page_times  # imports this module (cycle)
+    iso = day_and_clock(text)
+    if iso is not None:
+        return bool(re.search(r"[T ]\d", text))
+    return (parsed.hour, parsed.minute) in page_times(text)
 
 
 # =====================================================================

@@ -225,8 +225,10 @@ class TestEventFindWiring:
         monkeypatch.setattr(mod, "_DB_PATH", tmp_state_dir / "townloops.db")
         monkeypatch.setattr(mod, "_load_town_profile", lambda: {"cancellation_miss_threshold": 2})
         # The page states each listed event and its time.
-        monkeypatch.setattr(mod, "_firecrawl_listing",
-                            lambda url: (url in pages, json.dumps(pages.get(url)), "down"))
+        from tests.autonomy_town import as_listed
+        monkeypatch.setattr(mod, "_firecrawl_listing", lambda url: (
+            url in pages, "\n".join(f"{e['title']} — {as_listed(e['date'])}"
+                                    for e in pages.get(url) or []), "down"))
         monkeypatch.setattr(mod, "_build_extraction_prompt", lambda p, name, url, md: url)
         monkeypatch.setattr(mod, "_codex_exec", lambda url: (True, json.dumps(pages[url]), ""))
         args = argparse.Namespace(seed_id=None, limit=None, dry_run=False)

@@ -16,6 +16,7 @@ sent is what landed.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -106,6 +107,38 @@ def apply_event_patch(client, slug: str, overrides: dict,
     client.update("events", slug, body)
     after = client.get("events", slug) or {}
     return PatchResult(body=body, mismatches=verify_event(after, body))
+
+
+# A live event whose start became date-only (town-local midnight) but which
+# keeps an end: PATCH can't null `end_at`, so the operator clears it in
+# TownLoops admin. Recorded on the local row, listed in the nightly digest.
+END_FLAG = "live_end_unclearable"
+
+
+def flag_unclearable_end(conn, event_uid: str, live_slug: str, end_at: str,
+                         worker: str) -> None:
+    """Record that live `live_slug` keeps `end_at` after its start went
+    date-only — on the event's `extra_json` and as a failed activity row."""
+    from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
+    row = conn.execute("SELECT extra_json FROM events WHERE event_uid = ?",
+                       (event_uid,)).fetchone()
+    extra = parse_extra_json(row[0] if row else None)
+    extra[END_FLAG] = {"live_slug": live_slug, "end_at": end_at, "at": iso_utc_now()}
+    conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
+                 (json.dumps(extra), event_uid))
+    record_activity(conn, worker, "live-end-unclearable", event_uid, ok=False,
+                    error=f"live event {live_slug} is date-only now but keeps end {end_at}: "
+                          "the API can't clear an end — clear it in TownLoops admin")
+
+
+def unclearable_ends(conn, since: str) -> list[dict]:
+    """Events flagged by `flag_unclearable_end` since `since`."""
+    rows = conn.execute(
+        "SELECT event_uid, COALESCE(title, name), COALESCE(date_local, date), "
+        f"  json_extract(extra_json, '$.{END_FLAG}') FROM events "
+        f"WHERE json_extract(extra_json, '$.{END_FLAG}.at') >= ? "
+        "ORDER BY date_utc, event_uid", (since,)).fetchall()
+    return [{"event_uid": r[0], "title": r[1], "date": r[2], **json.loads(r[3])} for r in rows]
 
 
 def _has_offset(value: Any) -> bool:
