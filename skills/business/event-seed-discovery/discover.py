@@ -372,22 +372,21 @@ def cmd_set_role(args) -> int:
 
 def cmd_set_adapter(args) -> int:
     """Read the seed with a deterministic adapter (engine/seed_adapters)
-    instead of Firecrawl → LLM, or `generic` to go back."""
+    instead of Firecrawl → LLM — saved only after a dry run returns events —
+    or `generic` to go back."""
     try:
         config = json.loads(args.config) if args.config else None
     except ValueError as e:
         print(json.dumps({"error": f"--config is not JSON: {e}"}))
         return 1
-    conn = sqlite3.connect(_DB_PATH)
-    try:
-        seed_ops.set_adapter(conn, args.seed_id, args.adapter, config)
-    except ValueError as e:
-        print(json.dumps({"error": str(e)}))
-        return 1
-    finally:
-        conn.close()
-    print(json.dumps({"seed_id": args.seed_id, "adapter": args.adapter, "config": config}))
-    return 0
+    mode = autonomy.settings(_load_town_profile())
+
+    def change(conn, seed):
+        c = seed_ops.set_adapter(conn, seed, args.adapter, config, mode)
+        return {"adapter": c.adapter, "config": config, "trial_events": c.trial_events,
+                "status": c.status, "changed": c.changed,
+                **({} if c.changed else {"note": "already generic — nothing to change"})}
+    return _maintain(args.seed_id, change)
 
 
 def cmd_health(args) -> int:
@@ -419,16 +418,19 @@ def _site_search(query: str) -> list[dict]:
 
 
 def cmd_review(args) -> int:
+    """Autonomous: the whole review. Supervised: only the adapter step, which
+    proposes (trials, approvals and retirements are the operator's)."""
     profile = _load_town_profile()
     mode = autonomy.settings(profile)
-    if not mode.autonomous:
-        print(json.dumps(autonomy.inactive_message("event-seed-discovery review")))
-        return 0
     conn = sqlite3.connect(_DB_PATH)
     conn.row_factory = sqlite3.Row
-    tools = seed_ops.Tools(fetch=_trial_fetch, scrape=_scrape_page, search=_site_search,
-                           llm=_codex_exec)
-    out = seed_ops.review(conn, profile, mode, tools, trials=args.trials, moves=args.moves)
+    if mode.autonomous:
+        tools = seed_ops.Tools(fetch=_trial_fetch, scrape=_scrape_page, search=_site_search,
+                               llm=_codex_exec)
+        out = seed_ops.review(conn, profile, mode, tools, trials=args.trials, moves=args.moves,
+                              adapters=args.adapters)
+    else:
+        out = {"mode": mode.mode, **seed_ops.assign_adapters(conn, mode, limit=args.adapters)}
     conn.close()
     inspection.record(worker="event-seed-discovery", action="skill-invoke", target="review",
                       detail=json.dumps(out), ok=True)
@@ -525,7 +527,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     r.add_argument("--seed-id", type=int, required=True)
     r.add_argument("--role", required=True, choices=("primary", "syndicator", "auto"))
     r.set_defaults(func=cmd_set_role)
-    a = sub.add_parser("set-adapter", help="read a seed with a deterministic adapter (or generic)")
+    a = sub.add_parser("set-adapter", help="read a seed with a deterministic adapter, "
+                                           "after a dry run (or generic)")
     a.add_argument("--seed-id", type=int, required=True)
     a.add_argument("--adapter", required=True, help="e.g. tribe; generic = Firecrawl → LLM")
     a.add_argument("--config", help="adapter settings as a JSON object")
@@ -534,9 +537,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     h.add_argument("--ack", type=int, metavar="SEED_ID",
                    help="accept the seed's current event count as its new normal")
     h.set_defaults(func=cmd_health)
-    rv = sub.add_parser("review", help="autonomous: trial proposed seeds, classify, retire")
+    rv = sub.add_parser("review", help="autonomous: assign adapters, trial proposed seeds, "
+                                       "classify, retire (supervised: propose adapters only)")
     rv.add_argument("--trials", type=int, default=2, help="proposed seeds dry-run this run")
     rv.add_argument("--moves", type=int, default=2, help="dead seeds searched for a moved calendar")
+    rv.add_argument("--adapters", type=int, default=2,
+                    help="seeds whose probed feed an adapter reads, dry-run this run")
     rv.set_defaults(func=cmd_review)
     rt = sub.add_parser("retire", help="retire a seed (reversible)")
     rt.add_argument("--seed-id", type=int, required=True)

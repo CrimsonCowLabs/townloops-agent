@@ -4,7 +4,11 @@
 the Firecrawl markdown → LLM path (event-find's own); any other key is one of
 `ADAPTERS`, configured by `event_seeds.adapter_config` (a JSON object). No
 URL or hostname conditionals: a seed is moved onto an adapter by setting its
-key (`event-seed-discovery set-adapter`).
+key (`event-seed-discovery set-adapter`, or the autonomous `review` when an
+adapter reads the seed's probed `feed_type`). Each `ADAPTERS` entry is an
+`Adapter`: its reader, the settings its config may hold (`check_config`
+refuses any other key or a bad value before anything is stored) and the
+feed types it reads (`for_feed`).
 
 `read(seed)` returns a `Listing`: events normalized to what the extraction
 prompt returns (title, local-wall-clock `date`/`end_at`, venue, location,
@@ -22,13 +26,14 @@ import json
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urljoin
 
 import requests
 from dateutil import tz as _tz
 
 from engine import blocked_page
+from engine.derive_helpers import is_http_url
 from engine.event_extract import town_tz_name
 from engine.research import UA
 from engine.feed_probe import TRIBE_REST_PATH
@@ -58,7 +63,7 @@ def read(seed: dict, get_json: Optional[GetJson] = None) -> Listing:
     adapter = ADAPTERS.get(key)
     if adapter is None:
         raise AdapterError(f"unknown adapter {key!r}")
-    events = adapter(seed, _config(seed), get_json or _get_json)
+    events = adapter.read(seed, _config(seed), get_json or _get_json)
     return Listing(events, "\n\n".join(_page_entry(e) for e in events))
 
 
@@ -202,6 +207,59 @@ def tribe(seed: dict, config: dict, get_json: GetJson) -> list[dict]:
     return events
 
 
-ADAPTERS: dict[str, Callable[[dict, dict, GetJson], list[dict]]] = {
-    "tribe": tribe,
+# ---------------------------------------------------------------------------
+# The registry: one entry per adapter
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Param:
+    help: str
+    check: Callable[[Any], Optional[str]]    # value → what's wrong with it, None if fine
+
+
+def _http_url(v) -> Optional[str]:
+    return None if is_http_url(v) else "must be an http(s) URL"
+
+
+def _positive_int(v) -> Optional[str]:
+    ok = isinstance(v, int) and not isinstance(v, bool) and v > 0
+    return None if ok else "must be a whole number above 0"
+
+
+@dataclass(frozen=True)
+class Adapter:
+    """`read(seed, config, get_json)` → the whole listing's events;
+    `params`, the settings its config may hold; `feed_types`, the probed
+    `event_seeds.feed_type`s (engine/feed_probe) it reads as they are."""
+    read: Callable[[dict, dict, GetJson], list[dict]]
+    params: dict[str, Param]
+    feed_types: tuple[str, ...] = ()
+
+
+ADAPTERS: dict[str, Adapter] = {
+    "tribe": Adapter(tribe, {
+        "url": Param("the events endpoint (default: the probed feed, else /wp-json/…)", _http_url),
+        "max_pages": Param(f"refuse a feed longer than this (default {TRIBE_MAX_PAGES})",
+                           _positive_int),
+        "days_ahead": Param("read events through this many days from today", _positive_int),
+    }, feed_types=("tribe",)),
 }
+
+
+def for_feed(feed_type: Optional[str]) -> Optional[str]:
+    """The adapter that reads a seed's probed feed, None when none does."""
+    return next((k for k, a in ADAPTERS.items() if feed_type and feed_type in a.feed_types),
+                None)
+
+
+def check_config(adapter: str, config: dict) -> None:
+    """ValueError naming the first setting `adapter` doesn't declare, or
+    whose value its check refuses."""
+    params = ADAPTERS[adapter].params
+    for key, value in config.items():
+        if key not in params:
+            raise ValueError(f"{adapter} has no setting {key!r} "
+                             f"(settings: {', '.join(sorted(params)) or 'none'})")
+        why = params[key].check(value)
+        if why:
+            raise ValueError(f"{adapter} setting {key!r} {why} (got {value!r})")

@@ -37,7 +37,7 @@ Legacy `event-ingest` (structured `sources.yaml` feeds) is not scheduled or call
 | 03:30 daily | Entity live sync (resync, fill live blanks, verify) | no |
 | 04:15 daily | TownLoops API snapshot + breaking-change check | no |
 | 04:30 daily | Feed probe on never-probed seeds | no |
-| 04:45 daily | Seed review — autonomous only: trial proposed seeds, classify, retire/relocate | yes |
+| 04:45 daily | Seed review — autonomous: assign feed-matched adapters, trial proposed seeds, classify, retire/relocate; supervised: only propose adapters | yes |
 | hourly :05 | Moderation feedback — autonomous only: read back TownLoops outcomes | no |
 | 03:00 Wednesday | Organisation harvest — autonomous only: sweep, verify, approve | no |
 | 21:00 daily | Nightly digest (events by state, workqueue depth, seeds) | no |
@@ -124,6 +124,7 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - Never fabricate entities. Everything I POST comes from a source URL I can cite in the row's `source_url`.
 - If TownLoops or Listmonk auth fails at startup, refuse to take any write action until the operator fixes credentials.
 - Never edit seeds with SQL — fix them with `event-seed-discovery` `move` / `hold` / `release` / `restore` / `retire` (recorded; see its SKILL.md).
+- A seed whose feed a registered adapter reads goes onto it with `event-seed-discovery set-adapter` (saved only after a dry run returns events, which also releases an `awaiting-adapter` hold) — see event-seed-discovery SKILL.md.
 
 ## Improving my own skills
 `skills/business/`, `scripts/`, `engine/`, this file and `config.yaml` are mounted read-only from the shared repo — every town runs the same copy, so I never edit them in place (`skill_manage` patch/edit on them fails). Memories and everything else under `$HERMES_HOME` are mine to write.

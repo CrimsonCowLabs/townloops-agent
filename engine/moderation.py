@@ -249,6 +249,10 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
         if d["subject"] == "seed" and d["verdict"] in seed_ops.URL_CHANGES:
             attention.append(f"seed {seed_name_of(d['target']) or d['target']} moved: "
                              f"{d['evidence'].get('from')} → {d['evidence'].get('to')}")
+        elif d["subject"] == seed_ops.ADAPTER_SUBJECT and d["verdict"] == seed_ops.ASSIGN:
+            attention.append(f"seed {seed_name_of(d['target']) or d['target']} now read by the "
+                             f"{d['evidence'].get('adapter')} adapter "
+                             f"({d['evidence'].get('trial_events')} events in its trial)")
     stuck = conn.execute("SELECT COUNT(*) FROM events WHERE state LIKE 'stuck-%'").fetchone()[0]
     if stuck:
         attention.append(f"{stuck} event(s) stuck, waiting out a retry backoff")

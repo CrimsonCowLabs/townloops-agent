@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Iterable, Optional
+from urllib.parse import urlparse
 
 
 _DB_PATH = Path(os.environ.get(
@@ -41,6 +42,12 @@ _DB_PATH = Path(os.environ.get(
         "state", "townloops.db",
     ),
 ))
+
+
+def is_http_url(value) -> bool:
+    """An absolute http(s) URL with a host."""
+    p = urlparse(value) if isinstance(value, str) else None
+    return bool(p and p.scheme in ("http", "https") and p.netloc)
 
 
 def iso_utc_now() -> str:

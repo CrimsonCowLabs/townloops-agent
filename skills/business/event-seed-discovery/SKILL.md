@@ -22,7 +22,8 @@ python skills/business/event-seed-discovery/discover.py discover --limit N
 python skills/business/event-seed-discovery/discover.py discover --dry-run
 python skills/business/event-seed-discovery/discover.py show
 python skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
-python skills/business/event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config JSON]  # or generic
+python skills/business/event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config JSON]  # dry-run first; or generic
+python skills/business/event-seed-discovery/discover.py review [--trials N] [--moves N] [--adapters N]
 python skills/business/event-seed-discovery/discover.py probe [--limit N] # seeds never probed
 python skills/business/event-seed-discovery/discover.py probe --all       # re-probe every seed
 python skills/business/event-seed-discovery/discover.py probe --seed-id N
@@ -72,10 +73,44 @@ target). `show` prints them. Best first:
 | `html-calendar` | structured event-list markup | the page |
 | `wix-calendar-wrapper` | Wix `filesusr.com/html/` component | none — the Google Calendar src is hidden behind postMessage; don't extract dated events from the widget, find the calendar URL first |
 
-A recorded feed is evidence for the manual source-automation review (event-find SKILL.md), not
-a switch: event-find still scrapes the seed URL until the seed is given an adapter (`set-adapter`;
-a `tribe` adapter reads the recorded `tribe` feed_url — engine/seed_adapters.py). Basin- or county-wide feeds (POINT orgs, county
-libraries, destination calendars) need filtering to the town before any adapter uses them.
+A recorded feed is evidence, not a switch: event-find still scrapes the seed URL until the seed is
+given an adapter (below; a `tribe` adapter reads the recorded `tribe` feed_url —
+engine/seed_adapters.py). Basin- or county-wide feeds (POINT orgs, county libraries, destination
+calendars) need filtering to the town before any adapter uses them.
+
+## Adapters: set-adapter
+
+Set an adapter when a seed's events come from a feed a registered adapter reads — its probed
+`feed_type` is in an adapter's `feed_types` (today `tribe` → `tribe`), or you've found the
+endpoint yourself (source-automation review, event-find SKILL.md) — and especially for a seed held
+`awaiting-adapter`. Adapters only exist in the repo (`seed_adapters.ADAPTERS`); a source no adapter
+reads yet stays generic or held `awaiting-adapter`, with a skill proposal for the adapter.
+
+- **`set-adapter --seed-id N --adapter KEY [--config JSON]`** — only a registered key; `--config`
+  is a JSON object of the settings that adapter declares (its `params` — `tribe`: `url` http(s),
+  `max_pages` and `days_ahead` whole numbers above 0); any other key or a bad value is refused by
+  name. A rejected or retired seed is refused (`restore` it first). Then a dry run reads the seed
+  through the adapter as event-find would: an `AdapterError`, or no usable events (a title and a
+  date — what event-find keeps), refuses, saying why, and the seed is unchanged. On success the
+  adapter is saved — decision `seed-adapter` `assign` / `trial-passed` with the usable
+  `trial_events`, `from`, `adapter`, `config` (`autonomy why <seed>`) — and printed with
+  `trial_events` and `status`. A seed held **`awaiting-adapter` is released** by that good trial,
+  in the same transaction (`release`: autonomous → `proposed`, so `review` trials it through the
+  adapter; supervised → back to approved if it was). A `manual-only` hold stays held.
+- **`set-adapter --seed-id N --adapter generic`** — back to Firecrawl → LLM, no trial; decision
+  `revert` / `back-to-generic`. `review` never assigns that seed an adapter again — only an explicit
+  `set-adapter` does. On a seed that's already generic it changes and records nothing
+  (`"changed": false`).
+- **`review`'s adapter step** (first, ≤`--adapters` seeds a run, default 2): a generic seed —
+  proposed, approved, or held `awaiting-adapter` (the one held seed review touches, and only through
+  this audited assignment + release) — whose `feed_type` maps to an adapter is dry-run with no
+  config and judged by `autonomy.judge_adapter`. Autonomous: passed → assigned (reason `feed-match`,
+  with `feed_type`/`feed_url`). Supervised: passed → decision `await-operator` / `supervised`,
+  listed with its `set-adapter` command under **Adapter proposals** in the nightly digest until the
+  operator acts — the agent runs the command on the operator's say-so; once the town is autonomous,
+  review assigns it itself. Failed → `keep-generic` / `adapter-trial-failed`, tried again after
+  `ADAPTER_RETRY_DAYS` (7) or a new probe; empty → `adapter-trial-empty`, tried again only after a
+  new probe (`probe --seed-id N`).
 
 ## Source health
 
@@ -102,9 +137,11 @@ no ad-hoc DB backup is needed: every change below is reversible and recorded as 
   retired or rejected seed.
 - **`hold --seed-id N --reason manual-only|awaiting-adapter [--note …]`** — status `held`
   (`hold_reason`; the note is kept in the hold decision). event-find never scrapes a held seed and the
-  autonomous `review` never trials, re-approves, re-judges, relocates or retires it. Use it for a
+  autonomous `review` never trials, re-approves, re-judges, relocates or retires it (its adapter
+  step may assign an `awaiting-adapter` seed its adapter, which releases it — see Adapters). Use it for a
   seed that only a person can read (`manual-only`) or that waits for a deterministic adapter
-  (`awaiting-adapter`) — not `rejected` with a note. Held seeds and their reasons are listed in
+  (`awaiting-adapter` — a passing `set-adapter` trial releases it, and review's adapter step may
+  assign one) — not `rejected` with a note. Held seeds and their reasons are listed in
   the nightly digest and the dashboard's Seeds band (`/seeds held` in chat).
 - **`release --seed-id N`** — back to service. Supervised: `approved` if it was approved when held,
   else `proposed` for the operator — never straight to approved. Autonomous: `proposed`, so the
@@ -130,10 +167,14 @@ This is intentional: a bad seed can create substantial review noise.
 
 ## Autonomous mode: `review` (daily cron `event-seed-review`)
 
-Inactive in supervised mode. In autonomous mode:
+In supervised mode only the adapter step runs, and only proposes (see Adapters). In autonomous mode:
 
+- **Adapters** first: a seed whose probed feed a registered adapter reads is dry-run on it and
+  assigned when the trial returns events (see Adapters) — a held `awaiting-adapter` seed is
+  released into this run's proposed trials.
 - **Proposed seeds** (feeds first, `--trials` per run, default 2) are dry-run:
-  scrape, extract, and judge the listed events as event-find would. The
+  scrape, extract, and judge the listed events as event-find would (an
+  adapter seed through its adapter). The
   trial's score — the smoothed share of listed events that are real upcoming
   in-town events, `(passed + 1) / (judged + 2)`, stored as its starting
   `trust_score` — must reach `seed_trust.approve` (default 0.2) with at least
@@ -160,4 +201,5 @@ Inactive in supervised mode. In autonomous mode:
 - Retirement is a status change, never a delete: `restore --seed-id N`
   (`--previous-url` to undo a move) brings it back; `retire --seed-id N`
   retires one by hand.
-- **Held** seeds (`hold`) are skipped entirely until `release`.
+- **Held** seeds (`hold`) are skipped entirely until `release` — except an
+  `awaiting-adapter` one the adapter step assigns, which releases it.

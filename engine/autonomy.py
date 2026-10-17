@@ -142,8 +142,8 @@ class Decision:
     evidence: dict = field(default_factory=dict)
 
 
-def await_operator(why: str = "supervised mode") -> Decision:
-    return Decision(AWAIT, "supervised", {"note": why})
+def await_operator(why: str = "supervised mode", evidence: Optional[dict] = None) -> Decision:
+    return Decision(AWAIT, "supervised", {"note": why, **(evidence or {})})
 
 
 def record(conn: sqlite3.Connection, subject: str, target: str, d: Decision) -> None:
@@ -894,6 +894,22 @@ def judge_trial(items: list[dict], decisions_: list[Optional[Decision]],
         return Decision("defer", "ai-unavailable", evidence)
     evidence["reasons"] = sorted({d.reason for d in decisions_ if d and d.verdict != "approve"})
     return Decision("reject", "trial-low-yield" if passed else "trial-no-usable-events", evidence)
+
+
+def judge_adapter(trial: dict, s: Settings) -> Decision:
+    """Review's call on a generic seed whose probed feed an adapter reads,
+    from that adapter's dry run (`trial`: the evidence engine/seeds'
+    `adapter_trial` gathered — `error` when the read failed, else the usable
+    `trial_events`). Failed or empty keeps the seed generic; passed assigns
+    the adapter — in supervised mode the operator does (`set-adapter`)."""
+    if trial.get("error"):
+        return Decision("keep-generic", "adapter-trial-failed", trial)
+    if not trial.get("trial_events"):
+        return Decision("keep-generic", "adapter-trial-empty", trial)
+    if not s.autonomous:
+        return await_operator("adapter passed a dry run — set-adapter on the operator's say-so",
+                              trial)
+    return Decision("assign", "feed-match", trial)
 
 
 # --------------------------------------------------------------------------

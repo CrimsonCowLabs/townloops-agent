@@ -17,12 +17,15 @@ Each seed is read by its adapter (`event_seeds.adapter`, engine/seed_adapters.py
 | `tribe` | WordPress The Events Calendar REST: every page up to `total_pages` (re-read from each answer), from today; title, start/end (converted from `utc_*` to town-local), venue + address, description (HTML stripped), categories, tags, url; a row repeated across pages kept once (event id + start) | `url` (else the probed `feed_url` when `feed_type` is `tribe`, else `<site>/wp-json/tribe/events/v1/events`), `days_ahead`, `max_pages` (100) |
 
 Set one with `event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config '{"days_ahead": 120}']`
-(`--adapter generic` goes back). An adapter's events take the generic path below from step 3 unchanged — same
+(`--adapter generic` goes back) — saved only after a dry run through the adapter returns usable events; config
+keys are the adapter's declared `params`. The autonomous seed `review` assigns one itself when an adapter's
+`feed_types` include the seed's probed `feed_type`; supervised `review` proposes it (event-seed-discovery SKILL.md).
+An adapter's events take the generic path below from step 3 unchanged — same
 `event_uid`, so a seed moved onto an adapter keeps its rows; nothing about approval or trust changes. The
 cancellation and judgement quote checks read the adapter's rows rendered as text. Anything short of the whole
 listing (a failed page, an answer without an events list, more pages than `max_pages`, an adapter bug) is a
 failed run, never a zero. An adapter fetches the feed directly, not through Firecrawl, so its host must be in the
-town's `allowed_hosts` (egress). Add an adapter to `seed_adapters.ADAPTERS` — never a URL or hostname
+town's `allowed_hosts` (egress). Add an adapter as an `Adapter` entry in `seed_adapters.ADAPTERS` (reader, `params`, `feed_types`) — never a URL or hostname
 conditional in find.py.
 
 ## Why one skill does find+extract in v1

@@ -121,10 +121,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
     Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
     recorded on `event_seeds.feed_*` by `event-seed-discovery discover`/`probe`; no extra fetches),
-    `seeds.py` (seed writes — feed record, status change, adapter, and the maintenance verbs `move` (URL verified first —
+    `seeds.py` (seed writes — feed record, status change, adapter (`set_adapter`: declared config + a dry run that
+    must return usable events before it saves; `generic` reverts; subject `seed-adapter` Decisions; releases an
+    `awaiting-adapter` hold in the same transaction), and the maintenance verbs `move` (URL verified first —
     an adapter seed through its adapter — `previous_url` kept) / `hold` (status `held` + `hold_reason`: event-find and
     `review` skip it) / `release` (approved only if held from approved) / `restore`, each a recorded Decision; `URL_CHANGES` names the verdicts that change a URL — and the autonomous `review` run: trial a proposed
-    seed, re-judge approved ones, look for a dead seed's moved calendar; network/LLM injected as `Tools`),
+    seed, re-judge approved ones, look for a dead seed's moved calendar — first `assign_adapters`: a probed `feed_type`
+    an adapter reads is dry-run, `autonomy.judge_adapter` assigns (autonomous) or proposes it in the nightly digest
+    (supervised — the only step review runs there); network/LLM injected as `Tools`),
     `source_health.py` (every event-find run → `source_runs`; an established seed dropping to zero
     or sharply below its trailing average gets `event_seeds.health_status` + one Telegram/dashboard
     alert, held until it recovers or the operator accepts the new level).
@@ -135,7 +139,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     LLM-extracted, never a source-health zero, never a vanish miss; also the seed trial (`trial-not-found`/
     `-challenge`/`-empty-page`) and performer research's unreadable-page check — extend it, don't add another),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
-    its events take event-find's one path, a partial read is a failed run; `tribe` first — add to `ADAPTERS`),
+    its events take event-find's one path, a partial read is a failed run; `tribe` first — add an `Adapter` entry to
+    `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`)),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
     only as quote-checked sentences that name an access feature, else null; skipped with no fetch
@@ -158,7 +163,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `autonomy.py` (the autonomy policy — the one place an operator's call is made by the agent:
     `settings()` reads `operating_mode` + the `autonomy:` block fresh each call; event judgement
     `judge_items` — deterministic checks, then one page-quote-checked LLM call per seed run;
-    seed trial/trust/role/retire; candidate, stuck-event, cancellation and Series-streak decisions;
+    seed trial/trust/role/retire/adapter; candidate, stuck-event, cancellation and Series-streak decisions;
     every `Decision(verdict, reason, evidence)` logged to `agent_activity` worker `autonomy`;
     supervised mode returns `await-operator`. `GatedClient` wraps creates: submission gate
     (pause / circuit / pending cap → `SubmissionsHeld`) and the fail-closed `pending` check;

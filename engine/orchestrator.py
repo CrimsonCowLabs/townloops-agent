@@ -373,6 +373,8 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
     # Held on purpose (event-seed-discovery hold) — listed until released.
     held = [{k: h[k] for k in ("seed_id", "name", "url", "hold_reason", "hold_note")}
             for h in seed_ops.held(conn)]
+    # Supervised review's adapter proposals — listed until set-adapter (or a revert).
+    proposals = seed_ops.adapter_proposals(conn)
 
     # Shipped in the window, one line per Series (event_groups), not per date.
     cutoff = (now - timedelta(hours=hours)).isoformat(timespec="seconds")
@@ -415,6 +417,13 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
                      "Not scraped until `event-seed-discovery release --seed-id N`:"]
         md_lines += [f"- {h['name']} (#{h['seed_id']}) — {h['hold_reason']}"
                      + (f": {h['hold_note']}" if h["hold_note"] else "") + f" — {h['url']}" for h in held]
+    if proposals:
+        md_lines += ["", "## Adapter proposals",
+                     "A deterministic adapter read these seeds' feeds in a dry run — run the "
+                     "command to switch one over:"]
+        md_lines += [f"- {p['name']} (#{p['seed_id']}) — {p['feed_type']} feed, "
+                     f"{p['trial_events']} events in a dry run — `{p['command']}`"
+                     for p in proposals]
 
     report_dir = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -435,6 +444,8 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         f"seeds: {seeds}\n"
         + ("held seeds: " + ", ".join(f"{h['name']} ({h['hold_reason']})" for h in held) + "\n"
            if held else "")
+        + ("adapter proposals: " + ", ".join(f"{p['name']} ({p['adapter']})" for p in proposals)
+           + "\n" if proposals else "")
     )
     if auto:
         tg += moderation.digest_telegram(auto)
@@ -447,6 +458,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "approvals_pending": approvals_pending,
         "seeds": seeds,
         "held_seeds": held,
+        "adapter_proposals": proposals,
         "shipped": shipped_counts,
         "workqueue": wq,
         **({"autonomy": auto} if auto else {}),

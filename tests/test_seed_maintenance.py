@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import sqlite3
+from dataclasses import replace
 
 import pytest
 
@@ -105,7 +106,8 @@ class TestMove:
         def tribe(seed, config, get_json):
             read.append(seed["url"])
             return [concert()]
-        town.mp.setitem(seed_adapters.ADAPTERS, "tribe", tribe)
+        town.mp.setitem(seed_adapters.ADAPTERS, "tribe",
+                        replace(seed_adapters.ADAPTERS["tribe"], read=tribe))
         rc, out = seeds_cli(town, "move", "--seed-id", str(sid), "--url", MOVED)
         assert rc == 0, out
         assert read == [MOVED]
@@ -113,7 +115,8 @@ class TestMove:
 
         def broken(seed, config, get_json):
             raise seed_adapters.AdapterError("tribe feed http 404")
-        town.mp.setitem(seed_adapters.ADAPTERS, "tribe", broken)
+        town.mp.setitem(seed_adapters.ADAPTERS, "tribe",
+                        replace(seed_adapters.ADAPTERS["tribe"], read=broken))
         rc, out = seeds_cli(town, "move", "--seed-id", str(sid), "--url", ARENA)
         assert rc == 1 and "tribe feed http 404" in out["error"]
         assert town.seed_row("Arena")["url"] == MOVED
