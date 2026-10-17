@@ -417,13 +417,21 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
                      "Not scraped until `event-seed-discovery release --seed-id N`:"]
         md_lines += [f"- {h['name']} (#{h['seed_id']}) — {h['hold_reason']}"
                      + (f": {h['hold_note']}" if h["hold_note"] else "") + f" — {h['url']}" for h in held]
-    # Held at read-detail: the detail page (or the listing card) isn't this event's.
-    provenance_held = event_provenance.held(conn, cutoff)
+    # Held for review, every night until the operator resolves them: its
+    # listing card or detail page doesn't vouch for the event (#45).
+    provenance_held = event_provenance.held_for_review(conn)
     if provenance_held:
         md_lines += ["", "## Held — source mismatch",
-                     "Its source_url is another listing's page — fix it and re-approve, or decline:"]
-        md_lines += [f"- {h['title']} — {h['date']} ({h['state']}): " + "; ".join(h["disagreed"])
-                     for h in provenance_held]
+                     "Not shipped until you approve it (accepted as is — fix a wrong source_url "
+                     "first) or decline it: the dashboard, or `autonomy accept|decline <uid>`:"]
+        md_lines += [f"- {h['title']} — {h['date']} (`{h['event_uid']}`): "
+                     + "; ".join(h["disagreed"]) for h in provenance_held]
+    provenance_live = event_provenance.live_mismatches(conn)
+    if provenance_live:
+        md_lines += ["", "## Live — source mismatch",
+                     "Shipped with another listing card's source_url — check it in TownLoops admin:"]
+        md_lines += [f"- {h['title']} — {h['date']} ({h['townloops_slug']}): {h['reason']}"
+                     for h in provenance_live]
     if proposals:
         md_lines += ["", "## Adapter proposals",
                      "A deterministic adapter read these seeds' feeds in a dry run — run the "
@@ -454,6 +462,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         + ("adapter proposals: " + ", ".join(f"{p['name']} ({p['adapter']})" for p in proposals)
            + "\n" if proposals else "")
         + (f"held for source mismatch: {len(provenance_held)}\n" if provenance_held else "")
+        + (f"live with a source mismatch: {len(provenance_live)}\n" if provenance_live else "")
     )
     if auto:
         tg += moderation.digest_telegram(auto)
@@ -468,6 +477,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "held_seeds": held,
         "adapter_proposals": proposals,
         "provenance_held": provenance_held,
+        "provenance_live": provenance_live,
         "shipped": shipped_counts,
         "workqueue": wq,
         **({"autonomy": auto} if auto else {}),

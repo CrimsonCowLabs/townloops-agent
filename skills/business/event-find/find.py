@@ -29,7 +29,6 @@ from engine.event_extract import (  # noqa: F401 — re-exported for callers/tes
     codex_exec as _codex_exec,
     content_hash as _content_hash,
     event_uid as _event_uid,
-    extracted_events as _extracted_events,
     firecrawl_listing as _firecrawl_listing,
     normalize_title as _normalize_title,
     parse_json_array as _parse_json_array,
@@ -93,7 +92,8 @@ def _pending_rows(conn: sqlite3.Connection, where: str, args: tuple) -> list[dic
     cur.row_factory = sqlite3.Row
     return [dict(r) for r in cur.execute(
         "SELECT * FROM events WHERE state = 'metadata-extracted' AND approval_status = 'pending' "
-        f"AND status = 'active' AND {where} ORDER BY date_utc, event_uid", args).fetchall()]
+        f"AND status = 'active' AND {event_provenance.NOT_HELD_SQL} AND {where} "
+        "ORDER BY date_utc, event_uid", args).fetchall()]
 
 
 def _series_checks(conn: sqlite3.Connection, s: autonomy.Settings):
@@ -222,8 +222,8 @@ def _read_seed(profile: dict, seed: dict) -> _SeedListing:
     codex_ok, out, err = _codex_exec(prompt)
     if not codex_ok:
         return _SeedListing(error=f"codex: {err}")
-    # A source_url is a link in the event's own card, never a neighbour's.
-    events = event_provenance.check_card_urls(_extracted_events(out, md), md, url)
+    # Each event read against its own card: its times, its link.
+    events = event_provenance.listing_events(out, md, url)
     # An empty JSON array is a page listing nothing; anything else unparseable.
     return _SeedListing(events, md, unparseable=not events and not _EMPTY_LIST_RE.search(out or ""))
 

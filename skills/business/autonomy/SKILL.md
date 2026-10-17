@@ -22,6 +22,8 @@ python autonomy/autonomy.py why "Jazz Night"       # an event by title words or 
 python autonomy/autonomy.py why 12                 # a seed by id (or by name)
 python autonomy/autonomy.py why hermes-slt-1a2b    # a TownLoops slug we submitted
 python autonomy/autonomy.py resume                 # close the circuit (operator only)
+python autonomy/autonomy.py accept 3f2a9c           # ship an event held for a source mismatch as is
+python autonomy/autonomy.py decline 3f2a9c          # or decline it (operator only, held events only)
 ```
 
 ## Reason codes
@@ -43,6 +45,9 @@ python autonomy/autonomy.py resume                 # close the circuit (operator
 - Submissions: `moderator-published`, `moderator-rejected`, `moderator-merged`,
   `moderator-gone`. Changes: `published-value-changed` (a date/venue change
   submitted for merge). Cancellations: `page-states-cancelled`.
+- Provenance: `provenance-mismatch` (hold) — the listing card or detail page
+  doesn't vouch for the event (#45). It waits for the operator (`accept` /
+  `decline`, listed in every nightly digest); the agent never decides it.
 - Circuit: `published-without-review` (the API key can publish — switch to an
   `api_ingest` key), `rejection-rate`.
 

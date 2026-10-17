@@ -270,8 +270,8 @@ class TestPublishedTimes:
         assert self._one(SAVE_THE_DATE, "TBD")["date"] == "TBD"
 
     def test_extracted_events_applies_the_rule(self):
-        from engine.event_extract import extracted_events
-        [evt] = extracted_events(INVENTED, SAVE_THE_DATE)
+        from engine.event_provenance import listing_events
+        [evt] = listing_events(INVENTED, SAVE_THE_DATE, "https://zephyrcove.example/events")
         assert (evt["date"], evt["end_at"]) == ("2026-09-07", None)
 
     def test_prompt_asks_for_a_date_alone_when_no_time_is_stated(self):
@@ -294,8 +294,8 @@ class TestShipsDateOnly:
     """The fixtures through extraction → upsert → event-ship's payload."""
 
     def _ship(self, conn, ship, monkeypatch, page, llm_out):
-        from engine.event_extract import extracted_events
-        [evt] = extracted_events(llm_out, page)
+        from engine.event_provenance import listing_events
+        [evt] = listing_events(llm_out, page, "https://zephyrcove.example/events")
         upsert_event(conn, "Zephyr Cove", evt)
         assert _run(ship, monkeypatch, event_uid("Zephyr Cove", evt["title"], evt["date"])) == 0
         [(_, payload)] = FakeClient.calls

@@ -37,10 +37,11 @@ from urllib.parse import urlsplit
 
 from engine import autonomy, event_cancel, event_provenance
 from engine.derive_helpers import iso_utc_now, seed_name_of
-from engine.discovery import canonicalize_url
 from engine.event_extract import codex_exec, firecrawl_markdown
+from engine.event_provenance import canon_url as _canon
 from engine.event_tickets import price_kind
-from engine.page_extract import find_quote, join_quotes, normalize, parse_object
+from engine.page_extract import (MD_EMPHASIS, PAGE_URL, find_quote, join_quotes, normalize,
+                                 parse_object)
 
 
 # EventPayload / EventPatch limit.
@@ -92,7 +93,6 @@ _ACCESS_TERMS = re.compile(
     re.IGNORECASE,
 )
 _ADA = re.compile(r"\bADA\b")
-_MD_EMPHASIS = re.compile(r"[*_`]+")
 
 
 @dataclass
@@ -123,7 +123,7 @@ def ticket_price(quote, page: str) -> Optional[str]:
     if not isinstance(quote, str):
         return None
     norm_page = normalize(page)
-    found = find_quote(_MD_EMPHASIS.sub("", quote), norm_page, min_chars=1)
+    found = find_quote(MD_EMPHASIS.sub("", quote), norm_page, min_chars=1)
     if not found or len(found.text) > PRICE_MAX:
         return None
     kind = price_kind(found.text)
@@ -138,7 +138,6 @@ def ticket_price(quote, page: str) -> Optional[str]:
 
 _SENTENCE_END = re.compile(r"[!?;]|\.(?!\d)")
 _HOMEPAGE_PATH = re.compile(r"/?(?:(?:home|index|default)(?:\.\w+)?/?)?", re.IGNORECASE)
-_PAGE_URL = re.compile(r"https?://[^\s)\]>\"'<]+")
 
 
 def ticket_url(url, page: str, exclude: set[str]) -> Optional[str]:
@@ -147,22 +146,13 @@ def ticket_url(url, page: str, exclude: set[str]) -> Optional[str]:
     canon = _canon(url)
     if not canon or canon in exclude or _HOMEPAGE_PATH.fullmatch(urlsplit(canon).path):
         return None
-    on_page = {_canon(u.rstrip(".,;:")) for u in _PAGE_URL.findall(page)}
+    on_page = {_canon(u.rstrip(".,;:")) for u in PAGE_URL.findall(page)}
     return url.strip() if canon in on_page else None
 
 
 # --------------------------------------------------------------------------
 # The read
 # --------------------------------------------------------------------------
-
-def _canon(url) -> Optional[str]:
-    if not isinstance(url, str) or not url.startswith(("http://", "https://")):
-        return None
-    try:
-        return canonicalize_url(url)
-    except ValueError:
-        return None
-
 
 def is_listing(conn: sqlite3.Connection, event: dict) -> bool:
     """The event's source_url is its seed's listing of many events, not a
@@ -233,9 +223,9 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     url = event.get("source_url")
     canon = _canon(url)
     seeds = seed_urls(conn, event)
-    check, refused = event_provenance.gate(conn, event)
-    if refused:
-        return _hold(conn, event, [refused], url)
+    judge_page, hold_now = event_provenance.check_before_detail_read(conn, event)
+    if hold_now:
+        return _hold(conn, event, hold_now, url)
     if not canon or canon in seeds:
         _record(conn, event, "no-detail-page", url, {})
         return DetailResult("no-detail-page")
@@ -247,7 +237,7 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     except TimeoutError as e:  # the Firecrawl token bucket stayed empty
         ok, markdown, err = False, "", str(e)
     disagreed = event_provenance.detail_disagreements(conn, event, markdown) \
-        if ok and check else []
+        if ok and judge_page else []
     if disagreed:
         return _hold(conn, event, disagreed, url)
     said = autonomy.cancellation_evidence(markdown, event.get("title") or event.get("name")) \
@@ -276,8 +266,9 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
 
 
 def _hold(conn, event: dict, disagreed: list[str], url: Optional[str]) -> DetailResult:
-    """The page isn't this event's (engine/event_provenance): held, not read."""
-    event_provenance.hold(conn, event, disagreed, url)
+    """The page isn't this event's (engine/event_provenance): held for
+    review, not read."""
+    event_provenance.hold_for_review(conn, event, disagreed, url)
     _record(conn, event, "held", url, {})
     return DetailResult("held", error="; ".join(disagreed))
 

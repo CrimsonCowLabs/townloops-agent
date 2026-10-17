@@ -941,6 +941,24 @@ def judge_adapter(trial: dict, s: Settings) -> Decision:
 
 
 # --------------------------------------------------------------------------
+# Provenance (#45)
+# --------------------------------------------------------------------------
+
+def judge_provenance(evidence: dict, s: Settings) -> Decision:
+    """An event its source can't vouch for (engine/event_provenance's
+    `evidence["disagreed"]`: what its listing card or detail page
+    contradicts) is held for review — never shipped, never dropped. It waits
+    pending for the operator in both modes: the autonomous judge skips it and
+    the nightly digest lists it until the operator approves (accepts) or
+    declines it. Nothing disagreed: ship."""
+    if not evidence.get("disagreed"):
+        return Decision("ship", "provenance-agrees", evidence)
+    if not s.autonomous:
+        return await_operator("source mismatch", evidence)
+    return Decision("hold", "provenance-mismatch", evidence)
+
+
+# --------------------------------------------------------------------------
 
 def _town() -> str:
     import os

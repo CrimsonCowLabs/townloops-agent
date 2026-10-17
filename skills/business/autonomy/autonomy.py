@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """autonomy — the operator's window on an autonomous town (read-only, except
-`resume`). Logic: engine/autonomy.py.
+`resume`, `accept` and `decline`). Logic: engine/autonomy.py.
 
 Subcommands:
   status                      mode, knobs, circuit, pending submissions, last 24h
@@ -9,6 +9,10 @@ Subcommands:
                               (uid prefix) or a TownLoops slug, newest first
   resume                      close the circuit after fixing its cause, so
                               submissions start again (the operator's call)
+  accept <uid> [--note T]     approve an event held for a source mismatch
+                              (engine/event_provenance) as it is
+  decline <uid> [--note T]    decline one — both only for a held event (uid or
+                              a unique prefix); the nightly digest lists them
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from engine import autonomy, moderation
+from engine import autonomy, event_provenance, event_state, moderation
 from engine.derive_helpers import dict_rows, open_db, seed_ref
 
 
@@ -82,6 +86,24 @@ def _resume(args) -> int:
     return 0
 
 
+def _resolve(args) -> int:
+    """The operator's call on an event held for review: accept or decline."""
+    conn = open_db()
+    uids = [h["event_uid"] for h in event_provenance.held_for_review(conn)
+            if h["event_uid"].startswith(args.uid)]
+    if len(uids) != 1:
+        print(json.dumps({"error": f"{len(uids)} held events match {args.uid!r}",
+                          "held": uids[:10]}))
+        return 1
+    if args.cmd == "accept":
+        done = event_state.approve(conn, uids[0], args.note or "[operator] accepted as is")
+    else:
+        done = event_state.decline(conn, uids[0], args.note or "[operator] source mismatch")
+    conn.commit()
+    print(json.dumps({args.cmd: uids[0], "done": done}))
+    return 0 if done else 1
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(prog="autonomy")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -90,8 +112,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     why.add_argument("id", nargs="+")
     why.add_argument("--limit", type=int, default=20)
     sub.add_parser("resume")
+    for verb in ("accept", "decline"):
+        p = sub.add_parser(verb)
+        p.add_argument("uid")
+        p.add_argument("--note")
     args = ap.parse_args(argv)
-    return {"status": _status, "why": _why, "resume": _resume}[args.cmd](args)
+    return {"status": _status, "why": _why, "resume": _resume,
+            "accept": _resolve, "decline": _resolve}[args.cmd](args)
 
 
 if __name__ == "__main__":

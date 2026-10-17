@@ -131,7 +131,9 @@ def published_times(evt: dict, page: str) -> dict:
     """The extraction with only the times its page states. A start time not on
     the page leaves the day alone (date-only); an end time not on it, or any
     end of a date-only start, is dropped. A model fills a time it can't find
-    ("Save the Date" → 00:07–02:07); a published time is the only one shipped."""
+    ("Save the Date" → 00:07–02:07); a published time is the only one shipped.
+    Extraction reads each event against its own listing card
+    (engine/event_provenance.listing_events), so `page` is that card."""
     start = _day_and_clock(evt.get("date"))
     if start is None:
         return evt   # not ISO: upsert gives it no UTC start, so it never ships
@@ -142,12 +144,6 @@ def published_times(evt: dict, page: str) -> dict:
     if is_date_only(date) or end is None or end[1] not in stated:
         end_at = None
     return {**evt, "date": date, "end_at": end_at}
-
-
-def extracted_events(stdout: str, page: str) -> list:
-    """An extraction's JSON array, its times held to what `page` states."""
-    return [published_times(e, page) if isinstance(e, dict) else e
-            for e in parse_json_array(stdout)]
 
 
 def _firecrawl_scrape(url: str, timeout_s: int) -> tuple[bool, str, str, dict]:

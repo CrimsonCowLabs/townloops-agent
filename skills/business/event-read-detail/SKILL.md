@@ -38,13 +38,15 @@ call: the event is declined with the page's sentence as the note
 (`detail-cancelled`) and never ships. Supervised: the event is flagged
 `possibly-cancelled` for the operator instead, and the read goes on.
 
-The page must be this event's (`engine/event_provenance.py`, #45): it names the
-event and, unless it is a Series page other occurrences share, gives its date.
-A page that disagrees — or a `source_url` event-find refused as another card's
-listing link — ends the read before the Codex call (`detail-held`): supervised,
-the event goes back to the approval queue with a `provenance: …` note naming
-what disagreed (re-approving accepts it); autonomous, it is declined with a
-`provenance-mismatch` decision. The nightly digest lists both.
+The page must be this event's (`engine/event_provenance.py`, #45): a heading
+names the event and, unless it is a Series page other occurrences share, the
+event's section gives its date (posted/updated lines and "other events" lists
+don't count). A page that disagrees ends the read before the Codex call
+(`held`): the event is held for review in both modes — back in the approval
+queue with a `provenance: …` note naming what disagreed, skipped by the
+autonomous judge (autonomous records a `provenance-mismatch` hold decision),
+listed in every nightly digest until the operator approves it (accepted, never
+re-checked) or declines it. Only an approval made after the hold accepts it.
 
 ## Budget
 

@@ -24,7 +24,8 @@ from typing import Optional
 import yaml
 from dateutil import tz as _tz
 
-from engine import entity_classify, entity_enrich, event_provenance, inspection, series_sync
+from engine import (entity_classify, entity_enrich, event_provenance, event_state, inspection,
+                    series_sync)
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import (
@@ -33,7 +34,7 @@ from engine.derive_helpers import (
 )
 from engine.entity_enrich import Budget
 from engine.event_extract import (
-    build_extraction_prompt, codex_exec, event_uid, extracted_events, firecrawl_markdown,
+    build_extraction_prompt, codex_exec, event_uid, firecrawl_markdown,
     town_tz_name, upsert_event,
 )
 
@@ -137,18 +138,9 @@ def _reopen_for_review(conn, uid: str, venue_changed: bool) -> bool:
     goes back to the operator queue; on approval it re-runs the pipeline and
     event-ship PATCHes the live row. A venue change drops the old venue so it
     is derived afresh. Declined rows stay declined. Returns True if reopened."""
-    cur = conn.execute(
-        "UPDATE events SET state = 'metadata-extracted', approval_status = 'pending', "
-        "  state_updated_at = ?, "
-        "  derived_venue_uid = CASE WHEN ? THEN NULL ELSE derived_venue_uid END "
-        "WHERE event_uid = ? AND (state = 'shipped' OR state LIKE 'stuck-%')",
-        (iso_utc_now(), 1 if venue_changed else 0, uid),
-    )
-    if not cur.rowcount:
+    if not event_state.reopen_for_review(conn, uid, ("shipped",), include_stuck=True,
+                                         clear_venue=venue_changed):
         return False
-    # Old queue rows keep their attempt counts (a stuck row is at the max),
-    # which would stop re-enqueued actions from ever being claimed.
-    conn.execute("DELETE FROM event_workqueue WHERE event_uid = ?", (uid,))
     if venue_changed:
         conn.execute("DELETE FROM linked_events WHERE event_uid = ? AND entity_kind = 'venue'", (uid,))
     return True
@@ -239,7 +231,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
             print(json.dumps({"seed": name, "error": err[:200]}))
             continue
 
-        events = [e for e in event_provenance.check_card_urls(extracted_events(out, md), md, url)
+        events = [e for e in event_provenance.listing_events(out, md, url)
                   if isinstance(e, dict) and e.get("title") and e.get("date")]
         stats["extracted"] += len(events)
         per = {"seed": name, "extracted": len(events), "new": 0, "changed": 0, "unchanged": 0}

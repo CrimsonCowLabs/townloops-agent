@@ -150,6 +150,32 @@ def decline(conn: sqlite3.Connection, event_uid: str, note: str | None = None,
     return cur.rowcount > 0
 
 
+def reopen_for_review(conn: sqlite3.Connection, event_uid: str, from_states: tuple[str, ...],
+                      note: str | None = None, *, include_stuck: bool = False,
+                      clear_venue: bool = False) -> bool:
+    """Send an event that is still in one of `from_states` (or, with
+    `include_stuck`, any `stuck-` state) back to the operator's approval
+    queue: pending at `metadata-extracted`. The approval it had is gone
+    (`approval_at` NULL) — only a new one counts. `note` replaces the
+    approval note; `clear_venue` drops the derived venue. Its queue rows are
+    resolved with their attempt counts reset, so the actions a new approval
+    enqueues can be claimed. False when it had moved on (another worker or
+    the operator decided first)."""
+    now = iso_utc_now()
+    marks = ", ".join("?" * len(from_states)) or "NULL"
+    cur = conn.execute(
+        "UPDATE events SET state = 'metadata-extracted', approval_status = 'pending', "
+        "  approval_at = NULL, approval_note = COALESCE(?, approval_note), state_updated_at = ?, "
+        "  derived_venue_uid = CASE WHEN ? THEN NULL ELSE derived_venue_uid END "
+        f"WHERE event_uid = ? AND (state IN ({marks}) OR (? AND state LIKE 'stuck-%'))",
+        (note, now, 1 if clear_venue else 0, event_uid, *from_states, 1 if include_stuck else 0))
+    if not cur.rowcount:
+        return False
+    conn.execute("UPDATE event_workqueue SET attempts = 0, "
+                 "  resolved_at = COALESCE(resolved_at, ?) WHERE event_uid = ?", (now, event_uid))
+    return True
+
+
 def event_awaiting_operator(conn: sqlite3.Connection) -> Iterable[dict]:
     conn.row_factory = sqlite3.Row
     rows = conn.execute(

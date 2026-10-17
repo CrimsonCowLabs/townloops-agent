@@ -33,8 +33,11 @@ class FieldSpec:
     max_chars: int
 
 
-_MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")
-_MD_EMPHASIS = re.compile(r"[*_`]+")
+# Markdown as pages come from Firecrawl — shared with event_detail and
+# event_provenance, which read the same pages.
+MD_LINK = re.compile(r"!?\[([^\]]*)\]\([^)]*\)")      # a link or image → its text
+MD_EMPHASIS = re.compile(r"[*_`]+")
+PAGE_URL = re.compile(r"https?://[^\s)\]>\"'<]+")        # a bare URL in page text
 _MD_BLOCKS = re.compile(r"[#>|]+")
 _DASHES = str.maketrans({"—": "-", "–": "-", "‘": "'", "’": "'",
                          "“": '"', "”": '"', " ": " "})
@@ -43,10 +46,15 @@ _DASHES = str.maketrans({"—": "-", "–": "-", "‘": "'", "’": "'",
 def normalize(text: str) -> str:
     """Page and quote text as compared: markdown links → their text, emphasis
     and heading marks gone, dashes/quotes unified, whitespace collapsed."""
-    text = _MD_LINK.sub(r"\1", text.translate(_DASHES))
-    text = _MD_BLOCKS.sub(" ", _MD_EMPHASIS.sub("", text))
+    text = MD_LINK.sub(r"\1", text.translate(_DASHES))
+    text = _MD_BLOCKS.sub(" ", MD_EMPHASIS.sub("", text))
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
     return re.sub(r"\s+", " ", text).strip().lower()
+
+
+def plain_text(text: str) -> str:
+    """Markdown as read: links and images → their text, emphasis gone."""
+    return MD_EMPHASIS.sub("", MD_LINK.sub(r"\1", text or "")).strip()
 
 
 class Found(NamedTuple):

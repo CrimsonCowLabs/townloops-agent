@@ -138,7 +138,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     (`event_extract.firecrawl_listing`, `seed_adapters._get_json`) → a failed run with that reason, never
     LLM-extracted, never a source-health zero, never a vanish miss; also the seed trial (`trial-not-found`/
     `-challenge`/`-empty-page`) and performer research's unreadable-page check — extend it, don't add another),
-    `event_extract.py` (event-find/-reconcile/seed-trial extraction; `extracted_events` keeps only the times the page
+    `event_extract.py` (event-find/-reconcile/seed-trial extraction; `published_times` keeps only the times the page
     states — none → date-only: town-local midnight, no end; a Tribe all-day row is date-only too),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
     its events take event-find's one path, a partial read is a failed run; `tribe` first — add an `Adapter` entry to
@@ -151,11 +151,19 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     must state a cost) and ticket/RSVP link `rsvp_url` (on the page, never a homepage); `event_tickets.py`
     turns them into the `free` tag or one `Tickets: …`/`RSVP: …` line atop the shipped description —
     built at ship time, so the local description and content hash never change),
-    `event_provenance.py` (#45: an event's `source_url` is the page its fields came from — generic extraction
-    keeps a link only if it is in the event's own listing card (another card's → refused, `extra_json.provenance`),
-    and read-detail holds an event whose detail page doesn't name it or give its date, or whose link was refused:
-    supervised → back to approval with a `provenance: …` note (re-approval accepts), autonomous → declined
-    `provenance-mismatch`; listed in the nightly digest),
+    `event_provenance.py` (#45: an event's `source_url` is the page its fields came from. `listing_events` is the
+    one extraction entry point (event-find, event-reconcile, seed trial): LLM JSON → each event read against its own
+    listing card (split at extracted titles and at the card's own heading/list-item/table-row structure) — only
+    that card's times (`published_times`), a link only if it is the card's own (first after the title, or a linked
+    image just above it). Provenance is *established* when the title is on the listing and, if the link had to
+    go, the card gives the date — a card with no detail link ships on the listing; an unplaced title or a
+    dropped link plus a date its card doesn't give is held. Adapter rows are established by the adapter; read-detail
+    still checks any detail URL: a heading must name the event and its section (minus posted/updated lines and
+    "other events" lists) give its date. Held = pending + `extra_json.provenance.status` `held-for-review` in both
+    modes (`event_state.reopen_for_review`; verdict `autonomy.judge_provenance`): the autonomous judge skips it,
+    every nightly digest lists it until the operator approves (accepted — only an approval after the hold counts)
+    or declines it (dashboard, or `autonomy accept|decline <uid>`). A refused link a shipped row carries →
+    `live-mismatch`, digest-listed, live untouched),
     `series.py` (TownLoops Series, ADR 0007 — the agent never writes one, the client refuses: `series_key`
     = TownLoops' title normalization, pinned to python-slugify; the `state/series.json` snapshot; `decide_title`
     — the title event-ship creates an occurrence under so it auto-links into the right Series (Series title only
