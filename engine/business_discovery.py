@@ -35,6 +35,11 @@ TownLoops moderator's rejection (`reject_reason` 'townloops…',
 engine/moderation). Never writes to
 TownLoops — promoting a candidate is engine/business_promote.py, after the
 operator approves.
+
+A stored verdict is the verifier's whole return value (its `fetched_at` is
+when it ran); the CMO import marks a copied one `imported_from`.
+Autonomous approval trusts only a recent verdict of this verifier — any
+other is re-verified first (`reverifier`, engine/autonomy.judge_candidate).
 """
 
 from __future__ import annotations
@@ -44,7 +49,7 @@ import json
 import sqlite3
 from dataclasses import dataclass
 from difflib import SequenceMatcher
-from typing import Iterable, Optional
+from typing import Callable, Iterable, Optional
 from urllib.parse import urlparse
 
 from engine import discovery, listing_hosts
@@ -310,10 +315,11 @@ def approved_queue(conn: sqlite3.Connection, town_slug: str, limit: int,
 
 
 def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
-                   index: LiveIndex) -> Optional[str]:
-    """Store the verifier's verdict on one `new` candidate and return its new
-    status — or None when it is no longer `new` (the operator decided while
-    the verify ran; their call stands). A nameless (directory) candidate
+                   index: LiveIndex, *, from_status: str = "new") -> Optional[str]:
+    """Store the verifier's verdict on one `new` candidate (a re-verified
+    one: `from_status='verified'`) and return its new status — or None when
+    it has moved on (the operator decided while the verify ran; their call
+    stands). The verdict replaces the stored one whole. A nameless (directory) candidate
     takes its name from the page title, and the live and operator-decline
     checks run again with it, since live may have grown since the sweep."""
     name = candidate.get("display_name") or discovery.name_from_title(verdict.get("title"))
@@ -333,12 +339,18 @@ def record_verdict(conn: sqlite3.Connection, candidate: dict, verdict: dict,
         """UPDATE discovery_candidates
            SET status = ?, live_slug = ?, reject_reason = ?, display_name = ?,
                verify_json = ?, last_seen_at = ?
-           WHERE candidate_uid = ? AND status = 'new'""",
+           WHERE candidate_uid = ? AND status = ?""",
         (status, live_slug, reason, name, json.dumps(verdict, ensure_ascii=False),
-         iso_utc_now(), candidate["candidate_uid"]),
+         iso_utc_now(), candidate["candidate_uid"], from_status),
     )
     conn.commit()
     return status if cur.rowcount else None
+
+
+def get_candidate(conn: sqlite3.Connection, uid: str) -> Optional[dict]:
+    rows = _candidates(conn, "SELECT * FROM discovery_candidates WHERE candidate_uid = ?",
+                       (uid,))
+    return rows[0] if rows else None
 
 
 def list_candidates(conn: sqlite3.Connection, town_slug: str,
@@ -454,26 +466,28 @@ def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
             "live_venues": len(index.venues.rows) if index.venues else 0, "errors": errors}
 
 
+def _verify(cand: dict, profile: dict, town_slug: str, kind: str) -> dict:
+    return discovery.verify_candidate(
+        cand["canonical_url"], town_name=profile.get("name") or town_slug,
+        region=profile.get("region") or "",
+        aliases=list(profile.get("name_aliases") or []),
+        **({} if kind == KIND else {"kind": kind}),
+        name=cand.get("display_name"),
+        directory_hosts=seed_directory_hosts(profile),
+    )
+
+
 def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
                *, limit: int = 20, kind: str = KIND) -> dict:
     """Verify up to `limit` `new` candidates. A verifier crash (Firecrawl
     down) leaves the candidate `new` for the next run rather than rejecting it."""
     index = LiveIndex.from_api(client, kind)
-    town_name = profile.get("name") or town_slug
-    directory_hosts = seed_directory_hosts(profile)
     out = {"processed": 0, "verified": 0, "rejected": 0, "already_live": 0,
            "deferred": 0, "errors": []}
     for cand in pending_verify(conn, town_slug, limit, kind):
         out["processed"] += 1
         try:
-            verdict = discovery.verify_candidate(
-                cand["canonical_url"], town_name=town_name,
-                region=profile.get("region") or "",
-                aliases=list(profile.get("name_aliases") or []),
-                **({} if kind == KIND else {"kind": kind}),
-                name=cand.get("display_name"),
-                directory_hosts=directory_hosts,
-            )
+            verdict = _verify(cand, profile, town_slug, kind)
         except Exception as e:
             out["deferred"] += 1
             out["errors"].append(f"{cand['canonical_url']}: {type(e).__name__}: {e}")
@@ -482,3 +496,23 @@ def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
         if status:
             out[status.replace("-", "_")] += 1
     return out
+
+
+def reverifier(client, profile: dict, town_slug: str,
+               kind: str = KIND) -> Callable[[sqlite3.Connection, dict], Optional[str]]:
+    """Re-verify one `verified` candidate whose verdict can't be trusted as
+    it stands (engine/autonomy.REVERIFY) with the current verifier, and
+    store the fresh verdict → its new status (verified / rejected /
+    already-live), None when it moved on meanwhile. An imported research
+    draft (`verify.draft`) carries over. A verifier crash raises and leaves
+    the candidate as it was. The live list is read on first use."""
+    index: list[LiveIndex] = []
+
+    def run(conn: sqlite3.Connection, cand: dict) -> Optional[str]:
+        verdict = _verify(cand, profile, town_slug, kind)
+        if draft := (cand.get("verify") or {}).get("draft"):
+            verdict = {**verdict, "draft": draft}
+        if not index:
+            index.append(LiveIndex.from_api(client, kind))
+        return record_verdict(conn, cand, verdict, index[0], from_status="verified")
+    return run

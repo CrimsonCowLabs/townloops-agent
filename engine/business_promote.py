@@ -46,6 +46,9 @@ from engine.entity_sync import refresh_content_hash
 # enrich(conn, entity_uid) → entity_enrich status ('enriched', 'not-found',
 # 'deferred', 'skipped').
 Enrich = Callable[[sqlite3.Connection, str], str]
+# reverify(conn, candidate) → its status after a fresh verify
+# (business_discovery.reverifier).
+Reverify = Callable[[sqlite3.Connection, dict], Optional[str]]
 
 ProposalKind = Literal["promote", "decline"]
 _PROPOSAL_KINDS = {"promote": "promote_businesses", "decline": "decline_businesses"}
@@ -143,14 +146,28 @@ def entity_kind(kind: str) -> str:
 
 
 def auto_approve(conn: sqlite3.Connection, town_slug: str, kind: str = bd.KIND,
-                 limit: int = 50) -> dict:
+                 limit: int = 50, *, reverify: Optional[Reverify] = None,
+                 reverify_limit: int = 10) -> dict:
     """Autonomous: the agent's own approval of verified candidates
-    (engine/autonomy.judge_candidate), recorded as decisions."""
+    (engine/autonomy.judge_candidate), recorded as decisions. A candidate
+    held for a foreign or stale verdict (autonomy.REVERIFY) is re-verified
+    through `reverify` — at most `reverify_limit` a run, the rest wait —
+    and judged on the fresh verdict; that hold is recorded too. A verifier
+    crash leaves it as it was for the next run."""
     from engine import autonomy
     s = autonomy.settings()
-    out = {"approved": 0, "held": 0}
+    out = {"approved": 0, "held": 0, "reverified": 0, "errors": []}
     for cand in bd.list_candidates(conn, town_slug, status="verified", limit=limit, kind=kind):
         d = autonomy.judge_candidate(cand, s)
+        if d.reason in autonomy.REVERIFY and reverify and out["reverified"] < reverify_limit:
+            out["reverified"] += 1
+            autonomy.record(conn, "candidate", cand["candidate_uid"], d)
+            try:
+                reverify(conn, cand)
+            except Exception as e:  # noqa: BLE001 — the next run retries
+                out["errors"].append(f"{cand['canonical_url']}: {type(e).__name__}: {e}")
+            cand = bd.get_candidate(conn, cand["candidate_uid"]) or cand
+            d = autonomy.judge_candidate(cand, s)
         if d.verdict == "submit" and approve(conn, [cand["candidate_uid"]])["approved"]:
             autonomy.record(conn, "candidate", cand["candidate_uid"], d)
             out["approved"] += 1

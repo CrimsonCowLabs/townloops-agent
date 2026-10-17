@@ -19,7 +19,9 @@ Subcommands:
                                    check → local business → enrich → ship
   harvest [--limit N]              autonomous mode only: sweep + verify every kind the
                                    town profile configures, and approve the verified
-                                   ones itself (engine/autonomy.judge_candidate)
+                                   ones itself (engine/autonomy.judge_candidate) —
+                                   an imported or stale verdict re-verified first
+                                   (≤ --limit a kind)
 
 sweep/verify/list/propose-* never write to TownLoops. `promote` writes only
 what the operator approved (status `approved`) — there is no flag to
@@ -96,11 +98,13 @@ def _harvest(args) -> int:
             swept = bd.run_sweep(conn, client, profile, slug, per_source=args.per_source,
                                  kind=kind)
             verified = bd.run_verify(conn, client, profile, slug, limit=args.limit, kind=kind)
-            approved = bp.auto_approve(conn, slug, kind)
+            approved = bp.auto_approve(
+                conn, slug, kind, reverify=bd.reverifier(client, profile, slug, kind),
+                reverify_limit=args.limit)
             out[kind] = {"swept": {k: v for k, v in swept.items() if k != "errors"},
                          "verified": {k: v for k, v in verified.items() if k != "errors"},
-                         "approved": approved}
-            out["errors"] += swept["errors"] + verified["errors"]
+                         "approved": {k: v for k, v in approved.items() if k != "errors"}}
+            out["errors"] += swept["errors"] + verified["errors"] + approved["errors"]
         return out
     return _locked_run("harvested", run)
 

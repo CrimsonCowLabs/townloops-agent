@@ -131,4 +131,7 @@ discovery:
 #                              # established: new occurrences skip the AI judgement (0 = off)
 #   stuck_retries: 2           # backoff retries (1h, 2h) before a stuck event ships
 #                              # with what it has, or is dropped
+#   verdict_max_age_days: 30   # harvest approves a discovered organisation only on a
+#                              # verify verdict this recent; an older one (or one the CMO
+#                              # import copied in) is re-verified first
 # zip_codes: ["96150"]         # optional: a listed ZIP outside these is out of town

@@ -12,6 +12,7 @@ import contextlib
 import io
 import json
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -67,6 +68,28 @@ def harvest(town, monkeypatch):
     monkeypatch.setattr("engine.research.firecrawl_fetch", lambda url: (None, None))
     monkeypatch.setenv("TOWNLOOPS_ENRICH_MAX_LOOKUPS", "4")
     return results, sites
+
+
+def _stored(town, url, name, *, fetched_days_ago, imported=False, signal="web-search",
+            draft=None):
+    """A `verified` candidate already in the store, as an earlier sweep (or
+    the CMO import) left it."""
+    from engine import business_discovery as bd
+    at = (datetime.now(timezone.utc) - timedelta(days=fetched_days_ago)).isoformat()
+    verify = {"verified": True, "reasons": [], "fetched_at": at,
+              **({"imported_from": "cmo-import"} if imported else {}),
+              **({"draft": draft} if draft else {})}
+    town.conn.execute(
+        "INSERT INTO discovery_candidates (candidate_uid, town_slug, kind, canonical_url, "
+        "display_name, source_signal, status, verify_json, first_seen_at, last_seen_at) "
+        "VALUES (?, 'slt', 'business', ?, ?, ?, 'verified', ?, ?, ?)",
+        (bd.candidate_uid("slt", url), url, name, signal, json.dumps(verify), at, at))
+    town.conn.commit()
+
+
+def _status(town, url):
+    return town.conn.execute("SELECT status FROM discovery_candidates WHERE canonical_url = ?",
+                             (url,)).fetchone()[0]
 
 
 def posts(town, resource):
@@ -165,6 +188,50 @@ class TestOrganisations:
         row = town.conn.execute("SELECT status, promote_attempts, promote_error "
                                 "FROM discovery_candidates").fetchone()
         assert (row["status"], row["promote_attempts"], row["promote_error"]) == ("approved", 0, None)
+
+    def test_a_cmo_import_is_reverified_before_it_is_approved(self, town, harvest):
+        # Issue #19: the CMO's verdict was never the current verifier's.
+        results, sites = harvest
+        _stored(town, "https://listicle.example", "Best of Tahoe",
+                imported=True, signal="cmo-import:sweep", fetched_days_ago=1)
+        _stored(town, "https://newcafe.example", "New Cafe",
+                imported=True, signal="cmo-import:sweep", fetched_days_ago=1,
+                draft={"phone": "530-555-0100"})
+        sites["https://newcafe.example"] = "New Cafe in South Lake Tahoe. See our menu and hours."
+        discovery(town, "harvest")
+        discovery(town, "promote", "--limit", "5")
+        assert [p["name"] for p in posts(town, "businesses")] == ["New Cafe"]
+        assert _status(town, "https://listicle.example") == "rejected"
+        held = {d["reason"] for d in town.decisions("candidate") if d["verdict"] == "hold"}
+        assert held == {"foreign-verdict"}
+        # The fresh verdict keeps the imported research draft for promote.
+        verify = json.loads(town.conn.execute(
+            "SELECT verify_json FROM discovery_candidates WHERE canonical_url = ?",
+            ("https://newcafe.example",)).fetchone()[0])
+        assert "imported_from" not in verify and verify["draft"] == {"phone": "530-555-0100"}
+
+    def test_a_stale_verdict_is_reverified_and_judged_on_the_fresh_result(
+            self, town, harvest):
+        results, sites = harvest
+        _stored(town, "https://closedcafe.example", "Closed Cafe", fetched_days_ago=90)
+        discovery(town, "harvest")                    # its site is gone now
+        assert _status(town, "https://closedcafe.example") == "rejected"
+        assert {d["reason"] for d in town.decisions("candidate")} == {"stale-verdict"}
+
+        town.set_profile(town.profile, verdict_max_age_days=120)
+        _stored(town, "https://oldcafe.example", "Old Cafe", fetched_days_ago=90)
+        discovery(town, "harvest")                    # within the town's own age: trusted
+        assert _status(town, "https://oldcafe.example") == "approved"
+
+    def test_a_fresh_verdict_is_approved_without_another_verify(self, town, harvest, monkeypatch):
+        results, sites = harvest
+        _stored(town, "https://newcafe.example", "New Cafe", fetched_days_ago=2)
+        scraped = []
+        monkeypatch.setattr("engine.discovery.firecrawl_scrape",
+                            lambda url, raise_on_error=False: scraped.append(url) or {})
+        discovery(town, "harvest")
+        assert scraped == [] and _status(town, "https://newcafe.example") == "approved"
+        assert {d["reason"] for d in town.decisions("candidate")} == {"verified-on-own-site"}
 
     def test_harvest_is_inactive_in_supervised_mode(self, town, harvest):
         town.set_profile({**town.profile, "operating_mode": "supervised"})
@@ -362,3 +429,37 @@ class TestRestoredSeeds:
                              (f"s{i}",))
         seed = dict(zip(("name", "status_changed_at"), ("A", "2099-01-01")))
         assert autonomy.judge_seed(fresh_db, seed, s).verdict == "keep"
+
+
+class TestCandidateVerdicts:
+    """judge_candidate trusts only a recent verdict of the current verifier."""
+
+    def _cand(self, days_ago, **verify):
+        at = (datetime.now(timezone.utc) - timedelta(days=days_ago)).isoformat()
+        return {"status": "verified", "canonical_url": "https://x.example", "kind": "business",
+                "verify": {"verified": True, "fetched_at": at, **verify}}
+
+    def test_an_imported_verdict_is_held_as_foreign(self):
+        from engine import autonomy
+        s = autonomy.Settings(mode="autonomous")
+        d = autonomy.judge_candidate(self._cand(1, imported_from="cmo-import"), s)
+        assert (d.verdict, d.reason) == ("hold", "foreign-verdict")
+
+    def test_a_verdict_past_the_max_age_is_held_as_stale(self):
+        from engine import autonomy
+        s = autonomy.settings({"operating_mode": "autonomous",
+                               "autonomy": {"verdict_max_age_days": 7}})
+        assert s.verdict_max_age_days == 7
+        assert autonomy.judge_candidate(self._cand(8), s).reason == "stale-verdict"
+        assert autonomy.judge_candidate(self._cand(6), s).verdict == "submit"
+
+    def test_a_verdict_without_a_verify_time_is_stale(self):
+        from engine import autonomy
+        cand = self._cand(1)
+        del cand["verify"]["fetched_at"]
+        d = autonomy.judge_candidate(cand, autonomy.Settings(mode="autonomous"))
+        assert d.reason == "stale-verdict"
+
+    def test_the_default_max_age(self):
+        from engine import autonomy
+        assert autonomy.settings({"operating_mode": "autonomous"}).verdict_max_age_days == 30

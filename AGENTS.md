@@ -343,7 +343,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   business, enrich, then `engine/entity_ship.ship_entity` (event-ship's entity path) → `promoted`. Operator
   declines are remembered by name. See `docs/business-discovery-handoff.md`. It also covers
   community groups and non-profits (`--kind`; non-profits ship as communities, `kind`
-  'nonprofit'), and in autonomous mode `harvest` approves verified candidates itself.
+  'nonprofit'), and in autonomous mode `harvest` approves verified candidates itself — only on a
+  verdict this verifier produced within `autonomy.verdict_max_age_days`; an imported (`imported_from`) or
+  older one is re-verified first (`business_discovery.reverifier`).
   The CMO's stranded candidates and research drafts come in once via `scripts/import_cmo.py`
   (`engine/cmo_import.py`): candidates and business drafts as `verified` candidates
   (`source_signal` `cmo-import:…`), other drafts as `needs-review` entities in `performers.py review`.

@@ -147,7 +147,8 @@ running it is always safe — but never claim you approved or shipped anything.
 Candidates with `source_signal` `cmo-import:…` came from the CMO's old
 discovery run and research drafts (`scripts/import_cmo.py`, one-off). The
 CMO's verifier passed listicle and directory pages, so expect the operator
-to decline many of those. A `cmo-import:research-draft` candidate carries the
+to decline many of those (autonomous `harvest` re-verifies them instead — see
+below; the draft survives). A `cmo-import:research-draft` candidate carries the
 CMO's researched fields (`verify.draft`), which fill the business's blanks on
 promote.
 
@@ -180,7 +181,12 @@ again.
 
 In autonomous mode `harvest` (weekly cron `org-harvest-weekly`) sweeps and
 verifies every configured kind and approves verified candidates itself
-(`autonomy.judge_candidate` — held while `autonomy.entity_moderation` is off);
+(`autonomy.judge_candidate` — held while `autonomy.entity_moderation` is off).
+It trusts only a verdict this verifier produced within
+`autonomy.verdict_max_age_days` (default 30): a CMO-imported verdict
+(`foreign-verdict`) or an older one (`stale-verdict`) is re-verified first —
+up to `--limit` a kind per run — and judged on the fresh result, so an
+import the current verifier rejects is never approved;
 the `business-promote` cron then submits them through the gated client, so
 they land `pending` in the TownLoops moderation queue. `propose-*` answer
 `inactive`.

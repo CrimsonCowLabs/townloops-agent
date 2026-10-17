@@ -75,6 +75,7 @@ class Settings:
     series_reject_streak: int = 3
     series_publish_streak: int = 3     # published in a row → a well-established Series
     stuck_retries: int = 2             # backoff retries before a stuck event is resolved
+    verdict_max_age_days: int = 30     # an older discovery verify verdict is re-verified
 
     @property
     def autonomous(self) -> bool:
@@ -115,6 +116,7 @@ def settings(profile: Optional[dict] = None) -> Settings:
         series_reject_streak=num(a, "series_reject_streak", d.series_reject_streak),
         series_publish_streak=num(a, "series_publish_streak", d.series_publish_streak),
         stuck_retries=num(a, "stuck_retries", d.stuck_retries),
+        verdict_max_age_days=num(a, "verdict_max_age_days", d.verdict_max_age_days),
     )
 
 
@@ -701,13 +703,26 @@ def series_established(conn: sqlite3.Connection, series_slug: Optional[str],
 # Discovered organisations
 # --------------------------------------------------------------------------
 
-def judge_candidate(cand: dict, s: Settings) -> Decision:
+# A candidate held for one of these is re-verified and judged again
+# (business_promote.auto_approve).
+REVERIFY = ("foreign-verdict", "stale-verdict")
+
+
+def judge_candidate(cand: dict, s: Settings, now: Optional[datetime] = None) -> Decision:
     """A verified business / community group / non-profit candidate: submit
     it (it lands pending for the moderator) once TownLoops moderates
-    entities. The verify step already checked its own site names the town,
-    shows no closure and is customer- or member-facing, and dedup already
-    matched it against TownLoops (published, pending and rejected) and
-    against remembered rejections."""
+    entities — on a verdict of the current verifier
+    (engine/discovery.verify_candidate) no older than
+    `verdict_max_age_days`. That verifier checked one page: that it names
+    the town, shows no closure, is customer- or member-facing, isn't a
+    directory, roundup or article, and passes the own-site heuristic
+    (engine/own_site — a host or platform profile carrying the name, not
+    proof of ownership). Dedup already matched it against TownLoops
+    (published, pending and rejected) and against remembered rejections.
+
+    A verdict copied in from elsewhere (the CMO import's `imported_from`)
+    is `foreign-verdict`; one older than the max age, or with no verify
+    time, is `stale-verdict` — both held until re-verified."""
     if not s.autonomous:
         return await_operator()
     verify = cand.get("verify") or {}
@@ -716,6 +731,16 @@ def judge_candidate(cand: dict, s: Settings) -> Decision:
     if not s.entity_moderation:
         return Decision("hold", "entity-moderation-off",
                         {"setting": "autonomy.entity_moderation"})
+    if verify.get("imported_from"):
+        return Decision("hold", "foreign-verdict",
+                        {"imported_from": verify["imported_from"],
+                         "source_signal": cand.get("source_signal")})
+    at = parse_instant(verify.get("fetched_at"))
+    now = now or datetime.now(timezone.utc)
+    if at is None or now - at > timedelta(days=s.verdict_max_age_days):
+        return Decision("hold", "stale-verdict",
+                        {"verified_at": verify.get("fetched_at"),
+                         "max_age_days": s.verdict_max_age_days})
     return Decision("submit", "verified-on-own-site",
                     {"url": cand.get("canonical_url"), "kind": cand.get("kind"),
                      **{k: verify[k] for k in ("address", "phone", "reasons") if verify.get(k)}})
