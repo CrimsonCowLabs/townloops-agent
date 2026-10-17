@@ -603,6 +603,19 @@ class TestSweepFunctions:
         out = discovery.sweep_directories(list(links))
         assert [c.canonical_url for c in out] == ["https://real-biz.com/", "https://other-biz.com/"]
 
+    def test_sweep_directories_drops_another_kinds_seed_directory(self, monkeypatch):
+        """A business directory linking the community seed directory."""
+        from engine import discovery
+        monkeypatch.setattr(
+            discovery, "firecrawl_scrape",
+            lambda url, *, raise_on_error=False: {
+                "markdown": "x", "title": "",
+                "links": ["https://clubs.example/groups", "https://real-biz.com/"]})
+        monkeypatch.setattr(discovery.firecrawl_bucket, "wait", lambda **_: None)
+        out = discovery.sweep_directories(["https://chamber.example/"],
+                                          directory_hosts=["clubs.example"])
+        assert [c.canonical_url for c in out] == ["https://real-biz.com/"]
+
     def test_sweep_web_search_drops_a_seed_directorys_pages(self, monkeypatch):
         from engine import discovery
         monkeypatch.setattr(

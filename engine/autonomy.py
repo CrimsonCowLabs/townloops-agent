@@ -705,7 +705,9 @@ def series_established(conn: sqlite3.Connection, series_slug: Optional[str],
 
 # A candidate held for one of these is re-verified and judged again
 # (business_promote.auto_approve).
-REVERIFY = ("foreign-verdict", "stale-verdict")
+FOREIGN_VERDICT = "foreign-verdict"
+STALE_VERDICT = "stale-verdict"
+REVERIFY = (FOREIGN_VERDICT, STALE_VERDICT)
 
 
 def judge_candidate(cand: dict, s: Settings, now: Optional[datetime] = None) -> Decision:
@@ -715,7 +717,8 @@ def judge_candidate(cand: dict, s: Settings, now: Optional[datetime] = None) -> 
     (engine/discovery.verify_candidate) no older than
     `verdict_max_age_days`. That verifier checked one page: that it names
     the town, shows no closure, is customer- or member-facing, isn't a
-    directory, roundup or article, and passes the own-site heuristic
+    configured seed directory, a listing host, a roundup or an article,
+    and passes the own-site heuristic
     (engine/own_site — a host or platform profile carrying the name, not
     proof of ownership). Dedup already matched it against TownLoops
     (published, pending and rejected) and against remembered rejections.
@@ -732,13 +735,13 @@ def judge_candidate(cand: dict, s: Settings, now: Optional[datetime] = None) -> 
         return Decision("hold", "entity-moderation-off",
                         {"setting": "autonomy.entity_moderation"})
     if verify.get("imported_from"):
-        return Decision("hold", "foreign-verdict",
+        return Decision("hold", FOREIGN_VERDICT,
                         {"imported_from": verify["imported_from"],
                          "source_signal": cand.get("source_signal")})
     at = parse_instant(verify.get("fetched_at"))
     now = now or datetime.now(timezone.utc)
     if at is None or now - at > timedelta(days=s.verdict_max_age_days):
-        return Decision("hold", "stale-verdict",
+        return Decision("hold", STALE_VERDICT,
                         {"verified_at": verify.get("fetched_at"),
                          "max_age_days": s.verdict_max_age_days})
     return Decision("submit", "verified-on-own-site",

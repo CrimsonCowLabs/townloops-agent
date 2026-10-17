@@ -233,6 +233,18 @@ class TestOrganisations:
         assert scraped == [] and _status(town, "https://newcafe.example") == "approved"
         assert {d["reason"] for d in town.decisions("candidate")} == {"verified-on-own-site"}
 
+    def test_a_backlog_of_stale_verdicts_does_not_starve_a_fresh_one(self, town, harvest):
+        # Oldest first: three stale rows ahead of a fresh one, one re-verify a run.
+        from engine import business_promote as bp
+        for i in range(3):
+            _stored(town, f"https://old{i}.example", f"Old {i}", fetched_days_ago=90 + i)
+        _stored(town, "https://newcafe.example", "New Cafe", fetched_days_ago=1)
+        reverified = []
+        out = bp.auto_approve(town.conn, "slt", limit=2, reverify_limit=1,
+                              reverify=lambda conn, cand: reverified.append(cand))
+        assert len(reverified) == 1 and out["approved"] == 1
+        assert _status(town, "https://newcafe.example") == "approved"
+
     def test_harvest_is_inactive_in_supervised_mode(self, town, harvest):
         town.set_profile({**town.profile, "operating_mode": "supervised"})
         assert '"inactive": true' in discovery(town, "harvest")

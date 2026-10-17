@@ -354,11 +354,11 @@ def get_candidate(conn: sqlite3.Connection, uid: str) -> Optional[dict]:
 
 
 def list_candidates(conn: sqlite3.Connection, town_slug: str,
-                    status: Optional[str] = None, limit: int = 50,
+                    status: Optional[str] = None, limit: Optional[int] = 50,
                     kind: str = KIND) -> list[dict]:
     """Candidates for the operator. Default: the proposed ones (verified
     first, then still-unverified); `status='all'` or one status to see the
-    rest, e.g. what was deduped as `already-live`."""
+    rest, e.g. what was deduped as `already-live`. `limit=None`: all of them."""
     where, params = ["town_slug = ?", "kind = ?"], [town_slug, kind]
     if status is None:
         where.append(f"status IN ({', '.join('?' * len(PROPOSED))})")
@@ -369,7 +369,7 @@ def list_candidates(conn: sqlite3.Connection, town_slug: str,
     return _candidates(conn, f"""SELECT * FROM discovery_candidates WHERE {' AND '.join(where)}
             ORDER BY CASE status WHEN 'verified' THEN 0 WHEN 'new' THEN 1 ELSE 2 END,
                      first_seen_at, rowid
-            LIMIT ?""", (*params, limit))
+            LIMIT ?""", (*params, -1 if limit is None else limit))
 
 
 def stats(conn: sqlite3.Connection, town_slug: str, kind: str = KIND) -> dict:
@@ -450,13 +450,14 @@ def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
     if templates:
         found += discovery.sweep_web_search(town_name, region, templates, kind=kind,
                                             per_source=per_source,
-                                            # A government department is a community's.
-                                            allow_gov=kind != KIND,
+                                            allow_gov=discovery.allows_gov(kind),
                                             directory_hosts=seed_directory_hosts(profile),
                                             error_sink=errors)
     if cfg.get("seed_directories"):
         found += discovery.sweep_directories(cfg["seed_directories"], kind=kind,
-                                             per_source=per_source, error_sink=errors)
+                                             per_source=per_source,
+                                             directory_hosts=seed_directory_hosts(profile),
+                                             error_sink=errors)
     if cfg.get("facebook_terms"):
         found += discovery.sweep_facebook(town_name, cfg["facebook_terms"], kind=kind,
                                           per_source=per_source, error_sink=errors)

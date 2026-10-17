@@ -149,15 +149,19 @@ def auto_approve(conn: sqlite3.Connection, town_slug: str, kind: str = bd.KIND,
                  limit: int = 50, *, reverify: Optional[Reverify] = None,
                  reverify_limit: int = 10) -> dict:
     """Autonomous: the agent's own approval of verified candidates
-    (engine/autonomy.judge_candidate), recorded as decisions. A candidate
-    held for a foreign or stale verdict (autonomy.REVERIFY) is re-verified
-    through `reverify` — at most `reverify_limit` a run, the rest wait —
-    and judged on the fresh verdict; that hold is recorded too. A verifier
-    crash leaves it as it was for the next run."""
+    (engine/autonomy.judge_candidate), recorded as decisions — at most
+    `limit` approvals a run. Every verified row is judged (no network), so a
+    backlog held for a foreign or stale verdict (autonomy.REVERIFY) never
+    crowds out a fresh one; those are re-verified through `reverify` — at
+    most `reverify_limit` a run, the rest wait — and judged on the fresh
+    verdict; that hold is recorded too. A verifier crash leaves it as it
+    was for the next run."""
     from engine import autonomy
     s = autonomy.settings()
     out = {"approved": 0, "held": 0, "reverified": 0, "errors": []}
-    for cand in bd.list_candidates(conn, town_slug, status="verified", limit=limit, kind=kind):
+    for cand in bd.list_candidates(conn, town_slug, status="verified", limit=None, kind=kind):
+        if out["approved"] >= limit:
+            break
         d = autonomy.judge_candidate(cand, s)
         if d.reason in autonomy.REVERIFY and reverify and out["reverified"] < reverify_limit:
             out["reverified"] += 1

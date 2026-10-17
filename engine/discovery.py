@@ -135,6 +135,11 @@ def is_gov_host(url: str) -> bool:
     return any(host.endswith(sfx) or (sfx in host) for sfx in GOV_HOST_SUFFIXES)
 
 
+def allows_gov(kind: str) -> bool:
+    """A government department is community discovery's, never a business."""
+    return kind != "business"
+
+
 def host_blocked(url: str, allow_gov: bool = False) -> bool:
     host = urlparse(url).netloc.lower()
     if any(bad in host for bad in HOST_BLOCKLIST_SUBSTRINGS) or listing_hosts.is_listing_url(url):
@@ -494,15 +499,17 @@ def sweep_directories(
     *,
     kind: str = "business",
     per_source: int = 25,
+    directory_hosts: Iterable[str] = (),
     error_sink: Optional[list[str]] = None,
 ) -> list[Candidate]:
     """Scrape seed directory pages and collect the outbound links they surface.
 
     Each seed's linkset is filtered through directory_link_block_reason; a
-    link to any seed's own site (one directory links another) is dropped.
+    link to any seed's own site (one directory links another), or to one of
+    `directory_hosts` (another kind's seeds), is dropped.
     """
     seed_urls = list(seed_urls)
-    directory_hosts = [listing_hosts.bare_host(u) for u in seed_urls]
+    directory_hosts = [listing_hosts.bare_host(u) for u in seed_urls] + list(directory_hosts)
     out: list[Candidate] = []
     seen: set[str] = set()
     for seed in seed_urls:
@@ -631,8 +638,7 @@ def verify_candidate(
         fetched_at: str,
       }
     """
-    # Government departments are community discovery's, never a business.
-    allow_gov = kind != "business"
+    allow_gov = allows_gov(kind)
     directory_hosts = list(directory_hosts)
     unscraped = unscraped_reasons(canonical_url, name, allow_gov=allow_gov,
                                   directory_hosts=directory_hosts)
