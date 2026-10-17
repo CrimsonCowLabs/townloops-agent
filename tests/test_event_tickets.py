@@ -138,14 +138,30 @@ def _answer(price=None, url=None, quotes=()):
                        "ticket_url": url})
 
 
+# The event each detail fixture page is about (engine/event_provenance holds a
+# page that doesn't name the event).
+_ABOUT = {
+    "paid_range": ("Lakeview Trio — Live in the Lounge", "2026-10-09T20:00:00"),
+    "sold_out": ("Lakeview Trio — Live in the Lounge", "2026-10-09T20:00:00"),
+    "rsvp": ("Community Potluck", "2026-10-10T12:00:00"),
+    "donation": ("Sunset Yoga on the Beach", "2026-10-11T18:00:00"),
+    "free": ("Library Story Time", "2026-10-12T10:30:00"),
+}
+
+
+def staged_for(conn, fixture: str) -> dict:
+    title, date = _ABOUT[fixture]
+    return stage(conn, title=title, date=date)
+
+
 class TestExtract:
     def test_prompt_asks_for_price_and_link(self, conn):
         stub = Stub(page("paid_range"), raw=_answer())
-        run(conn, stage(conn), stub)
+        run(conn, staged_for(conn, "paid_range"), stub)
         assert '"price_quote"' in stub.prompts[0] and '"ticket_url"' in stub.prompts[0]
 
     def test_paid_range_and_ticket_link_are_stored(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "paid_range")
         result = run(conn, ev, Stub(page("paid_range"), raw=_answer(
             "Tickets: $25 general admission – $40 reserved table.", TICKETS_URL)))
         assert result.status == "read"
@@ -154,7 +170,7 @@ class TestExtract:
         assert r["rsvp_url"] == TICKETS_URL
 
     def test_sold_out_waitlist(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "sold_out")
         run(conn, ev, Stub(page("sold_out"), raw=_answer(
             "Tickets $30. SOLD OUT — join the waitlist", TICKETS_URL + "/waitlist")))
         r = row(conn, ev)
@@ -162,19 +178,19 @@ class TestExtract:
             f"Tickets: $30 (sold out; waitlist) — {TICKETS_URL}/waitlist"
 
     def test_rsvp_only(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "rsvp")
         run(conn, ev, Stub(page("rsvp"), raw=_answer(None, RSVP_URL)))
         r = row(conn, ev)
         assert r["price"] is None and r["rsvp_url"] == RSVP_URL
 
     def test_donation_is_stored_but_not_free(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "donation")
         run(conn, ev, Stub(page("donation"), raw=_answer(DONATION)))
         assert row(conn, ev)["price"] == DONATION
         assert not event_tickets.is_free(row(conn, ev)["price"])
 
     def test_free(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "free")
         run(conn, ev, Stub(page("free"), raw=_answer(FREE)))
         assert event_tickets.is_free(row(conn, ev)["price"])
 
@@ -195,7 +211,7 @@ class TestExtract:
         assert row(conn, ev)["price"] is None
 
     def test_free_parking_alone_is_not_a_price(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "paid_range")
         run(conn, ev, Stub(page("paid_range"), raw=_answer("Free parking in the north lot.")))
         assert row(conn, ev)["price"] is None
 
@@ -215,7 +231,7 @@ class TestExtract:
         assert row(conn, ev)["rsvp_url"] is None
 
     def test_the_event_page_itself_is_a_valid_link(self, conn):
-        ev = stage(conn)
+        ev = staged_for(conn, "rsvp")
         markdown = page("rsvp") + f"\n[This event]({DETAIL_URL})\n"
         run(conn, ev, Stub(markdown, raw=_answer(None, DETAIL_URL)))
         assert row(conn, ev)["rsvp_url"] == DETAIL_URL

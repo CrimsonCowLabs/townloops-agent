@@ -30,7 +30,7 @@ conditional in find.py.
 
 ## Why one skill does find+extract in v1
 
-The specification has separate `event-find` and `event-extract-metadata` stages. In v1, the find-time LLM prompt already returns title, date, venue, and description, so events skip the separate metadata pass and enter `metadata-extracted`. Detail-page metadata comes later, after approval: `event-read-detail` reads each event's own `source_url` once (accessibility notes today; RSVP URLs and prices belong in the same pass — `engine/event_detail.py`). That is why `source_url` should be the event's own page, not the listing.
+The specification has separate `event-find` and `event-extract-metadata` stages. In v1, the find-time LLM prompt already returns title, date, venue, and description, so events skip the separate metadata pass and enter `metadata-extracted`. Detail-page metadata comes later, after approval: `event-read-detail` reads each event's own `source_url` once (accessibility notes today; RSVP URLs and prices belong in the same pass — `engine/event_detail.py`). That is why `source_url` should be the event's own page, not the listing. A `source_url` the extractor gives is kept only if it is a link in that event's own card on the listing (`engine/event_provenance.check_card_urls`); another card's link is refused and the event held at read-detail.
 
 ## CLI
 

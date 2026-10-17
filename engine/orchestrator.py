@@ -27,7 +27,7 @@ import requests
 from engine import autonomy
 from engine import db as _db
 from engine.derive_helpers import load_town_profile, parse_extra_json
-from engine import event_detail, event_groups
+from engine import event_detail, event_groups, event_provenance
 from engine import event_state
 from engine import inspection
 from engine import lock as _lock
@@ -417,6 +417,13 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
                      "Not scraped until `event-seed-discovery release --seed-id N`:"]
         md_lines += [f"- {h['name']} (#{h['seed_id']}) — {h['hold_reason']}"
                      + (f": {h['hold_note']}" if h["hold_note"] else "") + f" — {h['url']}" for h in held]
+    # Held at read-detail: the detail page (or the listing card) isn't this event's.
+    provenance_held = event_provenance.held(conn, cutoff)
+    if provenance_held:
+        md_lines += ["", "## Held — source mismatch",
+                     "Its source_url is another listing's page — fix it and re-approve, or decline:"]
+        md_lines += [f"- {h['title']} — {h['date']} ({h['state']}): " + "; ".join(h["disagreed"])
+                     for h in provenance_held]
     if proposals:
         md_lines += ["", "## Adapter proposals",
                      "A deterministic adapter read these seeds' feeds in a dry run — run the "
@@ -446,6 +453,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
            if held else "")
         + ("adapter proposals: " + ", ".join(f"{p['name']} ({p['adapter']})" for p in proposals)
            + "\n" if proposals else "")
+        + (f"held for source mismatch: {len(provenance_held)}\n" if provenance_held else "")
     )
     if auto:
         tg += moderation.digest_telegram(auto)
@@ -459,6 +467,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "seeds": seeds,
         "held_seeds": held,
         "adapter_proposals": proposals,
+        "provenance_held": provenance_held,
         "shipped": shipped_counts,
         "workqueue": wq,
         **({"autonomy": auto} if auto else {}),

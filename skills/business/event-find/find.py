@@ -20,8 +20,8 @@ from typing import NamedTuple, Optional
 
 import yaml
 
-from engine import (autonomy, event_cancel, event_dedup, event_state, inspection, seed_adapters,
-                    source_health)
+from engine import (autonomy, event_cancel, event_dedup, event_provenance, event_state, inspection,
+                    seed_adapters, source_health)
 from engine import lock as _lock
 from engine.derive_helpers import parse_extra_json, seed_ref
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
@@ -222,7 +222,8 @@ def _read_seed(profile: dict, seed: dict) -> _SeedListing:
     codex_ok, out, err = _codex_exec(prompt)
     if not codex_ok:
         return _SeedListing(error=f"codex: {err}")
-    events = _extracted_events(out, md)
+    # A source_url is a link in the event's own card, never a neighbour's.
+    events = event_provenance.check_card_urls(_extracted_events(out, md), md, url)
     # An empty JSON array is a page listing nothing; anything else unparseable.
     return _SeedListing(events, md, unparseable=not events and not _EMPTY_LIST_RE.search(out or ""))
 
@@ -329,6 +330,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
                 evt = {**evt, "title": event_cancel.strip_status(evt["title"])}
             action = _upsert_event(conn, seed_name, evt)
             uid = _event_uid(seed_name, evt["title"], evt["date"])
+            event_provenance.record_extraction(conn, uid, evt)
             seen_uids.append(uid)
             listed_dates.append(evt["date"])
             listed = event_cancel.record_listing(conn, uid, said, seed_name)

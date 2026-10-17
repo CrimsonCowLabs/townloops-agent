@@ -112,7 +112,8 @@ class Town:
     def listing(self, url: str, events: list[dict], *lines: str) -> None:
         """What a seed page shows and what extraction finds on it."""
         self.pages[url] = page_text(*lines, *(
-            f"{e['title']} — {e.get('date')}{' – ' + e['end_at'] if e.get('end_at') else ''} "
+            (f"[{e['title']}]({e['source_url']})" if e.get("source_url") else e["title"])
+            + f" — {e.get('date')}{' – ' + e['end_at'] if e.get('end_at') else ''} "
             f"— {e.get('venue') or ''} {e.get('location') or ''}"
             for e in events))
         self.extractions[url] = events
@@ -124,8 +125,12 @@ class Town:
         return (True, md, "") if md else (False, "", "firecrawl http 404")
 
     def _fetch_detail(self, url: str, timeout_s: int = 0):
-        """An event's own page: canned, else a plain page that states nothing."""
-        return True, self.pages.get(url) or page_text("Event details."), ""
+        """An event's own page: canned, else a plain page naming the event
+        (engine/event_provenance) that states nothing else."""
+        titles = [e["title"] for events in self.extractions.values() for e in events
+                  if e.get("source_url") == url]
+        return True, self.pages.get(url) or page_text(*(f"# {t}" for t in titles[:1]),
+                                                      "Event details."), ""
 
     def judge_by_title(self, answers: dict[str, dict]) -> None:
         """Answer the judgement call per item title (items come numbered)."""
