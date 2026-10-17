@@ -24,6 +24,13 @@ is for the ones that never host a listed event.
      `"best {term} {town}"` / `"{term} in {town}"` shapes ranked editorial
      roundups above any actual organisation (SLT's harvest: 8 of 25 bad rows
      from two queries), so no shape says "best", "top" or "in {town}".
+     A search result verify would reject without a fetch
+     (`discovery.unscraped_reasons`: a seed directory's site, a roundup title
+     or path, a page about the organisation on another host) is dropped at
+     the sweep, so it never takes one of the `--per-source` slots — on SLT's
+     terms that moved the first 25 from three terms to all ten. Community and
+     non-profit searches keep `.gov` results (a government department is a
+     community); business searches drop them.
    - `seed_directories`: directory pages whose outbound links are candidates.
      Filtered (`discovery.directory_link_block_reason`): the seed's own site
      (`www.` and subdomains — the chamber's `business.` directory), every

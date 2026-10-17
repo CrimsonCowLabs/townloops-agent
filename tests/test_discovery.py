@@ -616,6 +616,39 @@ class TestSweepFunctions:
         out = discovery.sweep_web_search("Town", "CA", ["q"], directory_hosts=["visitlaketahoe.com"])
         assert [c.canonical_url for c in out] == ["https://real-biz.com/"]
 
+    def _search(self, monkeypatch, results):
+        from engine import discovery
+        monkeypatch.setattr(discovery, "firecrawl_search",
+                            lambda q, *, limit=10, raise_on_error=False: list(results))
+        monkeypatch.setattr(discovery.firecrawl_bucket, "wait", lambda **_: None)
+        monkeypatch.setattr(discovery, "BETWEEN_QUERIES_S", 0)
+
+    def test_sweep_web_search_drops_what_verify_rejects_unscraped(self, monkeypatch):
+        """SLT's "official website" searches: a roundup and a business-profile
+        page about one resort rank beside an own homepage. Verify would reject
+        both without a fetch, so neither becomes a candidate."""
+        from engine import discovery
+        self._search(monkeypatch, [
+            {"url": "https://restaurantobserver.com/restaurants-in-south-lake-tahoe-ca",
+             "title": "14 Best Restaurants in South Lake Tahoe, CA [2026 Updated]"},
+            {"url": "https://www.allbiz.com/business/heavenly-mountain-resort_6b-775-586-7000",
+             "title": "Heavenly Mountain Resort | (775) 586-7000 | South Lake Tahoe"},
+            {"url": "https://www.barerootscoffeetahoe.com/",
+             "title": "Coffee in South Lake Tahoe | Bare Roots Coffee & Kava Lounge"},
+        ])
+        out = discovery.sweep_web_search("South Lake Tahoe", "CA", ["q"])
+        assert [c.canonical_url for c in out] == ["https://barerootscoffeetahoe.com/"]
+
+    def test_sweep_web_search_keeps_a_government_page_when_gov_allowed(self, monkeypatch):
+        from engine import discovery
+        self._search(monkeypatch, [
+            {"url": "https://www.cityofslt.gov/27/Government",
+             "title": "Government | South Lake Tahoe, CA - Official Website"},
+        ])
+        assert discovery.sweep_web_search("South Lake Tahoe", "CA", ["q"]) == []
+        out = discovery.sweep_web_search("South Lake Tahoe", "CA", ["q"], allow_gov=True)
+        assert [c.canonical_url for c in out] == ["https://cityofslt.gov/27/Government"]
+
     def test_sweep_facebook_filters_system_paths(self, monkeypatch):
         from engine import discovery
         monkeypatch.setattr(

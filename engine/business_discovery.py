@@ -438,6 +438,8 @@ def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
     if templates:
         found += discovery.sweep_web_search(town_name, region, templates, kind=kind,
                                             per_source=per_source,
+                                            # A government department is a community's.
+                                            allow_gov=kind != KIND,
                                             directory_hosts=seed_directory_hosts(profile),
                                             error_sink=errors)
     if cfg.get("seed_directories"):

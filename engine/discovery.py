@@ -304,6 +304,23 @@ def roundup_reason(url: str, title: Optional[str], *, from_search: bool = False)
     return f"an article or roundup: {why}" if why else None
 
 
+def unscraped_reasons(url: str, name: Optional[str], *, allow_gov: bool = False,
+                      directory_hosts: Iterable[str] = ()) -> list[str]:
+    """Why `url` can't be an organisation's own site, decided from the URL and
+    the search-result `name` alone — no Firecrawl spent: a seed directory's
+    page, an article or roundup, or a page about the organisation on someone
+    else's host. Verify rejects on these unscraped; the web-search sweep drops
+    them before they become candidates."""
+    out = []
+    if why := seed_directory_reason(url, directory_hosts):
+        out.append(why)
+    if why := roundup_reason(url, name, from_search=True):
+        out.append(why)
+    if name and (why := not_own_site_reason(url, name, allow_gov=allow_gov)):
+        out.append(why)
+    return out
+
+
 # --------------------------------------------------------------------------
 # Firecrawl client
 # --------------------------------------------------------------------------
@@ -434,8 +451,9 @@ def sweep_web_search(
     """Fan out a set of Firecrawl `/v1/search` queries and collect candidates.
 
     query_templates are the resolved queries (business_discovery.query_templates
-    builds them). A result on a seed directory's site (`directory_hosts`) is
-    the directory, not an organisation, and is dropped.
+    builds them). A result verify would reject unscraped (`unscraped_reasons`:
+    a seed directory's site, a roundup, a page about an organisation on
+    another host) is dropped, so it never takes a candidate slot.
     """
     directory_hosts = list(directory_hosts)
     out: list[Candidate] = []
@@ -451,16 +469,17 @@ def sweep_web_search(
             continue
         for res in results:
             url = res.get("url") or ""
-            if not url or host_blocked(url, allow_gov=allow_gov) \
-                    or seed_directory_reason(url, directory_hosts):
+            if not url or host_blocked(url, allow_gov=allow_gov):
                 continue
             canon = canonicalize_url(url)
-            if canon in seen:
+            name = (res.get("title") or "").split(" - ")[0].strip()[:120] or None
+            if canon in seen or unscraped_reasons(canon, name, allow_gov=allow_gov,
+                                                  directory_hosts=directory_hosts):
                 continue
             seen.add(canon)
             out.append(Candidate(
                 canonical_url=canon,
-                display_name=(res.get("title") or "").split(" - ")[0].strip()[:120] or None,
+                display_name=name,
                 source_signal=f"web-search:{q[:40]}",
                 kind=kind,
             ))
@@ -614,15 +633,9 @@ def verify_candidate(
     """
     # Government departments are community discovery's, never a business.
     allow_gov = kind != "business"
-    # Decided from the URL and the search-result name: no Firecrawl spent.
     directory_hosts = list(directory_hosts)
-    unscraped = []
-    if why := seed_directory_reason(canonical_url, directory_hosts):
-        unscraped.append(why)
-    if why := roundup_reason(canonical_url, name, from_search=True):
-        unscraped.append(why)
-    if name and (why := not_own_site_reason(canonical_url, name, allow_gov=allow_gov)):
-        unscraped.append(why)
+    unscraped = unscraped_reasons(canonical_url, name, allow_gov=allow_gov,
+                                  directory_hosts=directory_hosts)
     if unscraped:
         return {"verified": False, "reasons": unscraped, "fetched_at": _iso_now()}
     scraped = firecrawl_scrape(canonical_url)

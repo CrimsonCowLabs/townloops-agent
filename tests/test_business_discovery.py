@@ -205,6 +205,27 @@ def test_run_sweep_fans_out_sources_and_dedups_against_live(fresh_db, monkeypatc
     assert ("LIST", "businesses") in [c[:2] for c in api.calls]
 
 
+@pytest.mark.parametrize("kind,allow_gov", [
+    ("business", False), ("community", True), ("nonprofit", True)])
+def test_run_sweep_searches_government_sites_for_community_kinds(fresh_db, monkeypatch,
+                                                                  kind, allow_gov):
+    """SLT's municipal group ("City of South Lake Tahoe government") must
+    reach cityofslt.gov: a government department is a community, never a
+    business."""
+    seen = {}
+
+    def web(town, region, templates, **kw):
+        seen["allow_gov"] = kw.get("allow_gov", False)
+        return []
+
+    monkeypatch.setattr(discovery, "sweep_web_search", web)
+    api = FakeAPI(entities={"businesses": LIVE, "communities": []})
+    profile = {"name": "South Lake Tahoe", "region": "California",
+               "discovery": {kind: {"category_query_terms": ["government"]}}}
+    bd.run_sweep(fresh_db, api, profile, "slt", per_source=5, kind=kind)
+    assert seen["allow_gov"] is allow_gov
+
+
 def test_run_verify_rechecks_live_and_records_verdicts(fresh_db, monkeypatch):
     bd.record_sweep(fresh_db, "slt", [
         _cand("https://brand-new.example/", "Brand New Bakery"),
