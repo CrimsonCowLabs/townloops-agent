@@ -1,5 +1,5 @@
 """Feed probing: a seed's page is checked for a machine-readable event feed
-(iCal, Google Calendar, Tribe REST, EventCalendarApp, POINT, JSON-LD, RSS,
+(iCal, Google Calendar, Tribe REST, Showare, EventCalendarApp, POINT, JSON-LD, RSS,
 a structured HTML calendar) — from the page alone, no extra fetches."""
 
 from __future__ import annotations
@@ -44,6 +44,15 @@ def test_tribe_events_calendar_points_at_its_rest_feed():
     assert got["url"] == "https://shops.example/wp-json/tribe/events/v1/events"
     # The blog RSS on the same WordPress site isn't an events feed.
     assert "rss" not in [f["type"] for f in got["feeds"]]
+
+
+def test_showare_widget_points_at_its_performance_list():
+    # The widget script is protocol-relative and served by the box office's own host.
+    got = _detect("showare.html", "https://valhallatahoe.showare.com/")
+    assert got["type"] == "showare"
+    assert got["url"] == ("https://valhallatahoe.showare.com"
+                          "/include/widgets/events/performancelist.asp")
+    assert [f["type"] for f in got["feeds"]] == ["showare"]      # two widgets, one feed
 
 
 def test_eventcalendarapp_widget_becomes_its_api_feed():

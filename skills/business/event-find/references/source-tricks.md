@@ -13,6 +13,12 @@ on a seed page; this is what to do with them.
   every page; `per_page` is capped (50 seen) whatever you ask for. Strip a
   trailing `/YYYY-MM-DD/` to group recurring occurrences, but keep each date.
   Venue may be a list or missing — handle it.
+- **Showare box offices** — `<box office>/include/widgets/events/performancelist.asp?action=perf&page=<n>&listPageSize=<k>&listMaxSize=<m>`
+  (the bare URL answers `no action`, a failed run). `perfCount` is capped at `listMaxSize`, and a page
+  past the end comes back empty with `endOfList` false — page by `perfCount`. Each row is one
+  performance (`EventID` + `PerformanceID`); `PerformanceDateTime` is the box office's wall clock
+  (labelled "PST" all year — ignore the label). `PerformanceEndDateTime` is shown only when
+  `settings.ShowEndTime` is on. The event page is `eventperformances.asp?evt=<EventID>`.
 - **EventCalendarApp** — `api.eventcalendarapp.com/events?id=<cal>&page=<n>&widgetUuid=<uuid>`
   from the widget; page until the last page.
 - **POINT** (volunteer embeds) — `pointapp-…/api/v1/shared/frames/events?token=…&page=<n>&size=<m>`

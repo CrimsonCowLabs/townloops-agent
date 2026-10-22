@@ -119,7 +119,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     listing marks cancelled/postponed — quote-checked; live → flagged, not shipped → declined; operator-confirmed only,
     marked live as `Cancelled: ` title + `cancelled` tag by the `event-cancellations` skill),
     `feed_probe.py` (machine-readable feed detection from a seed page's HTML — iCal, Google Calendar,
-    Tribe REST, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
+    Tribe REST, Showare, EventCalendarApp, POINT, JSON-LD, events RSS, HTML calendar, hidden Wix calendar —
     recorded on `event_seeds.feed_*` by `event-seed-discovery discover`/`probe`; no extra fetches),
     `seeds.py` (seed writes — feed record, status change, adapter (`set_adapter`: declared config + a dry run that
     must return usable events before it saves; `generic` reverts; subject `seed-adapter` Decisions; releases an
@@ -146,7 +146,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     timed row replaces it (`event_dedup`): live → staged as a change, its live end flagged in the digest (PATCH
     can't null `end_at`; `live_patch.flag_unclearable_end`), never a duplicate or a vanished event),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
-    its events take event-find's one path, a partial read is a failed run; `tribe` first — add an `Adapter` entry to
+    its events take event-find's one path, a partial read is a failed run; `tribe`, `showare` (one event per
+    performance, paged by `perfCount`) — add an `Adapter` entry to
     `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`)),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept

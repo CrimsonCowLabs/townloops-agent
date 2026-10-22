@@ -66,6 +66,7 @@ target). `show` prints them. Best first:
 | `ical` | `<link rel=alternate type=text/calendar>` | the .ics |
 | `google-calendar` | `calendar.google.com/calendar/embed?src=…` iframe | `…/calendar/ical/<src>/public/basic.ics` |
 | `tribe` | The Events Calendar (WordPress) markup | `/wp-json/tribe/events/v1/events` — paginate by the response's `total_pages`, not `per_page` |
+| `showare` | a Showare event widget script (`…/include/widgets/events/*.js`, often protocol-relative) | `https://<box office>/include/widgets/events/performancelist.asp` — page by `perfCount` with `action=perf`, `page`, `listPageSize`, `listMaxSize` |
 | `eventcalendarapp` | widget URL with `id` + `widgetUuid` | `api.eventcalendarapp.com/events?id=…&widgetUuid=…` (paginated) |
 | `point` | POINT iframe with a `token` | the shared `frames/events?token=…` JSON feed (paginated) |
 | `jsonld` | schema.org `Event` (or subtype) JSON-LD on the page | the page |
@@ -74,21 +75,22 @@ target). `show` prints them. Best first:
 | `wix-calendar-wrapper` | Wix `filesusr.com/html/` component | none — the Google Calendar src is hidden behind postMessage; don't extract dated events from the widget, find the calendar URL first |
 
 A recorded feed is evidence, not a switch: event-find still scrapes the seed URL until the seed is
-given an adapter (below; a `tribe` adapter reads the recorded `tribe` feed_url —
+given an adapter (below; a `tribe` / `showare` adapter reads the recorded `tribe` / `showare` feed_url —
 engine/seed_adapters.py). Basin- or county-wide feeds (POINT orgs, county libraries, destination
 calendars) need filtering to the town before any adapter uses them.
 
 ## Adapters: set-adapter
 
 Set an adapter when a seed's events come from a feed a registered adapter reads — its probed
-`feed_type` is in an adapter's `feed_types` (today `tribe` → `tribe`), or you've found the
+`feed_type` is in an adapter's `feed_types` (today `tribe` → `tribe`, `showare` → `showare`), or you've found the
 endpoint yourself (source-automation review, event-find SKILL.md) — and especially for a seed held
 `awaiting-adapter`. Adapters only exist in the repo (`seed_adapters.ADAPTERS`); a source no adapter
 reads yet stays generic or held `awaiting-adapter`, with a skill proposal for the adapter.
 
 - **`set-adapter --seed-id N --adapter KEY [--config JSON]`** — only a registered key; `--config`
   is a JSON object of the settings that adapter declares (its `params` — `tribe`: `url` http(s),
-  `max_pages` and `days_ahead` whole numbers above 0); any other key or a bad value is refused by
+  `max_pages` and `days_ahead` whole numbers above 0; `showare`: `url` http(s), `max_performances`
+  a whole number above 0); any other key or a bad value is refused by
   name. A rejected or retired seed is refused (`restore` it first). Then a dry run reads the seed
   through the adapter as event-find would: an `AdapterError`, or no usable events (a title and a
   date — what event-find keeps), refuses, saying why, and the seed is unchanged. On success the

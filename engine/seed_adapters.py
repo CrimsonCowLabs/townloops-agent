@@ -27,7 +27,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Optional
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import requests
 from dateutil import tz as _tz
@@ -36,7 +36,7 @@ from engine import blocked_page
 from engine.derive_helpers import is_http_url
 from engine.event_extract import town_tz_name
 from engine.research import UA
-from engine.feed_probe import TRIBE_REST_PATH
+from engine.feed_probe import SHOWARE_LIST_PATH, TRIBE_REST_PATH
 
 GENERIC = "generic"
 TIMEOUT_S = 30
@@ -147,12 +147,17 @@ def _tribe_endpoint(seed: dict, config: dict) -> str:
     return urljoin(seed["url"], "/wp-json/" + TRIBE_REST_PATH)
 
 
+def _location(address, city, state, zip_code) -> Optional[str]:
+    """"address, city, state zip" from whichever parts the feed gives."""
+    zip_part = " ".join(x for x in (state, zip_code) if x)
+    location = ", ".join(x for x in (address, city, zip_part) if x)
+    return _html.unescape(location) or None
+
+
 def _tribe_event(row: dict) -> dict:
     """A row without a title or start stays in (as None): event-find counts
     it as malformed rather than it vanishing here."""
     venue = row.get("venue") if isinstance(row.get("venue"), dict) else {}
-    zip_part = " ".join(x for x in (venue.get("state"), venue.get("zip")) if x)
-    location = ", ".join(x for x in (venue.get("address"), venue.get("city"), zip_part) if x)
     start = _local(row.get("utc_start_date"), row.get("start_date"))
     end = _local(row.get("utc_end_date"), row.get("end_date"))
     if row.get("all_day") is True and start:   # 00:00–23:59:59 is no published time
@@ -162,7 +167,8 @@ def _tribe_event(row: dict) -> dict:
         "date": start,
         "end_at": end,
         "venue": _text(venue.get("venue")),
-        "location": _html.unescape(location) or None,
+        "location": _location(venue.get("address"), venue.get("city"), venue.get("state"),
+                              venue.get("zip")),
         "description": _text(row.get("description")),
         "categories": [c["name"] for c in row.get("categories") or []
                        if isinstance(c, dict) and c.get("name")],
@@ -212,6 +218,131 @@ def tribe(seed: dict, config: dict, get_json: GetJson) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Showare box office performance list
+# ---------------------------------------------------------------------------
+
+SHOWARE_PAGE_SIZE = 100
+SHOWARE_MAX_PERFORMANCES = 1000
+_SHOWARE_TIME = "%A, %B %d, %Y %I:%M:%S %p"      # "Thursday, October 22, 2026 7:30:00 PM"
+
+
+def _showare_endpoint(seed: dict, config: dict) -> tuple[str, dict]:
+    """config `url`, else the feed event-seed-discovery probed
+    (engine/feed_probe), else the seed's own box office — split from its
+    query, whose settings are kept and paging replaced (a repeated `page`
+    reads as "1, 2")."""
+    if config.get("url"):
+        url = config["url"]
+    elif seed.get("feed_type") == "showare" and seed.get("feed_url"):
+        url = seed["feed_url"]
+    elif urlsplit(seed["url"]).path.lower() == SHOWARE_LIST_PATH:
+        url = seed["url"]
+    else:
+        url = urljoin(seed["url"], SHOWARE_LIST_PATH)
+    parts = urlsplit(url)
+    return parts._replace(query="", fragment="").geturl(), dict(parse_qsl(parts.query))
+
+
+def _showare_time(value) -> Optional[str]:
+    """A Showare time as the extraction's form. It is the box office's wall
+    clock: the `TimeZone`/`VenuetGMTOffset` beside it stay "PST"/-8 all year."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.strptime(" ".join(value.split()), _SHOWARE_TIME).isoformat(
+            timespec="seconds")
+    except ValueError:
+        return None
+
+
+def _undoubled(text: str) -> str:
+    """The feed's address line can be its two parts, both the same: kept once."""
+    words = text.split()
+    half = len(words) // 2
+    return " ".join(words[:half]) if half and words[:half] == words[half:] else " ".join(words)
+
+
+def _showare_event(row: dict, box_office: str, shows_end: bool) -> dict:
+    """A row without a title or start stays in (as None): event-find counts
+    it as malformed rather than it vanishing here."""
+    start = _showare_time(row.get("PerformanceDateTime"))
+    end = _showare_time(row.get("PerformanceEndDateTime")) if shows_end else None
+    if (row.get("PerformanceStartTimeAlias") or "").strip() and start:
+        start, end = start[:10], None       # "TBA" in place of the clock: no published time
+    event_id = row.get("EventID")
+    # An event the box office sends elsewhere (`RedirectionEnabled`) is read there.
+    redirect = row.get("RedirectURL") if row.get("RedirectionEnabled") else None
+    if is_http_url(redirect):
+        source_url = redirect
+    elif event_id is not None:
+        source_url = f"{box_office}/eventperformances.asp?evt={event_id}"
+    else:
+        source_url = None
+    return {
+        "title": _text(row.get("Event")),
+        "date": start,
+        "end_at": end,
+        "venue": _text(row.get("Venue")),
+        "location": _location(_undoubled(row.get("VenueAddress") or ""), row.get("VenueCity"),
+                              row.get("VenueState"), row.get("VenueZipCode")),
+        "description": _text(row.get("Description")),
+        "categories": [],
+        "tags": [],
+        "source_url": source_url,
+    }
+
+
+def showare(seed: dict, config: dict, get_json: GetJson) -> list[dict]:
+    """Every page of the performance list (`perfCount`, as each answer
+    gives it, over SHOWARE_PAGE_SIZE rows a page). Each performance is its
+    own occurrence (event id + performance id); fewer distinct performances
+    than the count — a short page, a list that shifted while paged — is an
+    error. The list holds upcoming performances only. The end time is kept
+    only when the box office shows it (`settings.ShowEndTime`)."""
+    url, query = _showare_endpoint(seed, config)
+    max_perfs = int(config.get("max_performances") or SHOWARE_MAX_PERFORMANCES)
+    parts = urlsplit(url)
+    box_office = f"{parts.scheme}://{parts.netloc}"
+    # `listMaxSize` caps `perfCount`: one over the cap tells a longer list apart.
+    params = {**query, "action": query.get("action") or "perf",
+              "listPageSize": SHOWARE_PAGE_SIZE, "listMaxSize": max_perfs + 1}
+    events: list[dict] = []
+    seen: set = set()
+    page, total_pages, count = 1, 1, 0
+    while page <= total_pages:
+        try:
+            body = get_json(url, {**params, "page": page})
+        except AdapterError as e:
+            raise AdapterError(f"page {page}: {e}") from None
+        if not isinstance(body, dict):
+            raise AdapterError(f"page {page}: answer has no performance list")
+        count = body.get("perfCount")
+        rows = [] if body.get("performance") is None and count == 0 else body.get("performance")
+        if not isinstance(rows, list):
+            raise AdapterError(f"page {page}: answer has no performance list")
+        # Every answer's count: a list that grows while it is paged is read to its end.
+        if not isinstance(count, int) or isinstance(count, bool):
+            raise AdapterError(f"page {page}: answer has no perfCount")
+        if count > max_perfs:
+            raise AdapterError(f"more than max_performances {max_perfs} performances")
+        settings = body.get("settings") if isinstance(body.get("settings"), dict) else {}
+        shows_end = bool(settings.get("ShowEndTime"))
+        total_pages = -(-count // SHOWARE_PAGE_SIZE)
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            key = (row.get("EventID"), row.get("PerformanceID"))
+            if key in seen:
+                continue
+            seen.add(key)
+            events.append(_showare_event(row, box_office, shows_end))
+        page += 1
+    if len(seen) < count:
+        raise AdapterError(f"read {len(seen)} of {count} performances")
+    return events
+
+
+# ---------------------------------------------------------------------------
 # The registry: one entry per adapter
 # ---------------------------------------------------------------------------
 
@@ -247,6 +378,12 @@ ADAPTERS: dict[str, Adapter] = {
                            _positive_int),
         "days_ahead": Param("read events through this many days from today", _positive_int),
     }, feed_types=("tribe",)),
+    "showare": Adapter(showare, {
+        "url": Param("the performancelist.asp endpoint (default: the probed feed, else the "
+                     "seed's box office)", _http_url),
+        "max_performances": Param("refuse a list longer than this "
+                                  f"(default {SHOWARE_MAX_PERFORMANCES})", _positive_int),
+    }, feed_types=("showare",)),
 }
 
 

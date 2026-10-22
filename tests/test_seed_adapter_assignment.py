@@ -70,8 +70,8 @@ def reprobe(town: Town, seed_id: int) -> None:
 class TestSetAdapter:
     def test_an_unknown_adapter_is_refused(self, town):
         sid = town.seed("Arena", ARENA)
-        rc, out = seeds_cli(town, "set-adapter", "--seed-id", str(sid), "--adapter", "showare")
-        assert rc == 1 and "unknown adapter 'showare'" in out["error"]
+        rc, out = seeds_cli(town, "set-adapter", "--seed-id", str(sid), "--adapter", "ticketleap")
+        assert rc == 1 and "unknown adapter 'ticketleap'" in out["error"]
         assert town.seed_row("Arena")["adapter"] is None
         assert adapter_decisions(town) == []
 

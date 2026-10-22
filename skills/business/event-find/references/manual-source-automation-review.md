@@ -38,7 +38,7 @@ Validated mechanisms:
 - El Dorado County Library: EngagedPatrons with `SiteID=7839` and SLT `BranchID=1000000563`; preserve concrete occurrences.
 - The Shops at Heavenly: WordPress Tribe Events REST API; pagination is mandatory (15 pages/733 rows observed).
 - LTCC: Modern Campus public calendar API, calendar `820f2290-4714-43f1-a00f-c8373f784878`; use repeated `category[]` parameters.
-- Valhalla: Showare `performancelist.asp` with `action=perf`, page, `listPageSize`, and `listMaxSize`; identify occurrences by `EventID` + `PerformanceID`.
+- Valhalla: Showare `performancelist.asp` with `action=perf`, page, `listPageSize`, and `listMaxSize`; identify occurrences by `EventID` + `PerformanceID` — now the `showare` adapter (`set-adapter --adapter showare`).
 - Tahoe Blue, Sierra State Parks, and Bally's: deterministic event-card/detail-page adapters.
 - Blue Granite, Lake Tahoe Marathon, Tahoe Brewfest, and Sample the Sierra: specialized recurrence or single-annual-event adapters.
 - Harrah's: intermittent Incapsula blocking; remain manual until a stable Caesars/Ticketmaster path is proven.

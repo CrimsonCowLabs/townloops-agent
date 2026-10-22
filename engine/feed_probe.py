@@ -20,12 +20,17 @@ from engine.ingest_core import walk_jsonld
 # The Events Calendar's REST events route, under the site's WordPress REST
 # root (engine/seed_adapters' `tribe` adapter reads it).
 TRIBE_REST_PATH = "tribe/events/v1/events"
+# A Showare box office's performance list (engine/seed_adapters' `showare`
+# adapter reads it); its event widgets are scripts under the same folder.
+SHOWARE_LIST_PATH = "/include/widgets/events/performancelist.asp"
 
 _LINK_RE = re.compile(r"<link\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'([\w:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')')
 # Calendar-view markup, not the plugin's CSS/JS (enqueued on every page).
 _TRIBE_RE = re.compile(r"post-type-archive-tribe_events|tribe-events-calendar|tribe-events-c-"
                        r"|tribe-events-l-container|/wp-json/tribe/events", re.IGNORECASE)
+_SCRIPT_RE = re.compile(r"<script\b[^>]*>", re.IGNORECASE)
+_SHOWARE_WIDGET_RE = re.compile(r"/include/widgets/events/\w+\.js", re.IGNORECASE)
 _LDJSON_RE = re.compile(
     r'<script[^>]+type=["\']application/ld\+json["\'][^>]*>(.*?)</script>',
     re.IGNORECASE | re.DOTALL)
@@ -105,6 +110,17 @@ def _tribe(html: str, page_url: str) -> list[dict]:
     return [_feed("tribe", api_root.rstrip("/") + "/" + TRIBE_REST_PATH)]
 
 
+def _showare(html: str, page_url: str) -> list[dict]:
+    # A Showare event widget (often protocol-relative) is served by the box
+    # office itself; every widget on the page reads its one performance list.
+    for tag in _SCRIPT_RE.findall(html):
+        src = _attrs(tag).get("src") or ""
+        if _SHOWARE_WIDGET_RE.search(src):
+            host = urlparse(urljoin(page_url, src)).netloc
+            return [_feed("showare", f"https://{host}{SHOWARE_LIST_PATH}")]
+    return []
+
+
 def _eventcalendarapp(html: str, page_url: str) -> list[dict]:
     for url in _urls(html, "eventcalendarapp.com"):
         q = parse_qs(urlparse(url).query)
@@ -170,5 +186,5 @@ def _wix_calendar_wrapper(html: str, page_url: str) -> list[dict]:
 
 
 # Best first.
-_PROBES = (_ical, _google_calendar, _tribe, _eventcalendarapp, _point, _jsonld,
+_PROBES = (_ical, _google_calendar, _tribe, _showare, _eventcalendarapp, _point, _jsonld,
            _rss, _html_calendar, _wix_calendar_wrapper)
