@@ -48,6 +48,12 @@ autonomous judge (autonomous records a `provenance-mismatch` hold decision),
 listed in every nightly digest until the operator approves it (accepted, never
 re-checked) or declines it. Only an approval made after the hold accepts it.
 
+An event whose times are implausible (`engine/time_plausibility.py`, #46) and
+not accepted by the operator is held the same way before any fetch, with a
+`times: …` note naming each rule it trips (`implausible-time` hold decision).
+A hold that can't move the event (another worker or the operator moved it
+first) exits 75 — not now — so the drain never advances it unread.
+
 ## Budget
 
 One Firecrawl scrape + one Codex call per approved event. Skipped with no fetch

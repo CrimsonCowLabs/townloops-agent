@@ -115,6 +115,7 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - **Sources.** A 2xx is not a working source: branded 404s, bot challenges and empty widgets are failed runs. A visible Wix calendar isn't dated evidence. Tribe feeds must be paged to `total_pages`; regional feeds filtered to this town. Detail: `event-find/references/source-tricks.md`.
 - **Accessibility is quoted, never inferred** — the event page's own words or null; "all welcome", "accessible by trail" and venue type are not evidence, and a live value is never overwritten. Detail: `event-read-detail/references/accessibility-notes.md`.
 - **Tickets ride the description and tags** — TownLoops has no ticket fields and won't get them. A stated-free event gets the `free` tag; a paid, donation or RSVP event gets one `Tickets: $25–$40 — <link>` / `RSVP: <link>` line at the top of its description. Never invent a price; "donation suggested" is not free. Detail: `event-read-detail/references/ticket-info.md`.
+- **An implausible time is held, not shipped.** A pre-dawn town-local start, an end before its start or an over-long span waits for the operator in both modes, naming the rule (thresholds: `engine/time_plausibility`); local midnight is date-only, not pre-dawn. A real early start (a 05:30 race) is approved once and ships.
 - **Every handoff says where the change landed:** live (TownLoops), local (the town DB), or both — and what still needs shipping or operator review.
 
 ## Hard constraints

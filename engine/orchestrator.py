@@ -33,6 +33,7 @@ from engine import inspection, live_patch
 from engine import lock as _lock
 from engine import moderation
 from engine import seeds as seed_ops
+from engine import time_plausibility
 from engine import workqueue
 
 
@@ -426,6 +427,15 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
                      "first) or decline it: the dashboard, or `autonomy accept|decline <uid>`:"]
         md_lines += [f"- {h['title']} — {h['date']} (`{h['event_uid']}`): "
                      + "; ".join(h["disagreed"]) for h in provenance_held]
+    # Held for review, every night until the operator resolves them: its
+    # times are implausible on their face (#46).
+    times_held = time_plausibility.held_for_review(conn)
+    if times_held:
+        md_lines += ["", "## Held — implausible time",
+                     "Not shipped until you approve it (it ships with these times — a known early "
+                     "start is fine) or decline it: the dashboard, or `autonomy accept|decline <uid>`:"]
+        md_lines += [f"- {h['title']} — {h['date']} (`{h['event_uid']}`): "
+                     + "; ".join(h["reasons"]) for h in times_held]
     provenance_live = event_provenance.live_mismatches(conn)
     if provenance_live:
         md_lines += ["", "## Live — source mismatch",
@@ -470,6 +480,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         + ("adapter proposals: " + ", ".join(f"{p['name']} ({p['adapter']})" for p in proposals)
            + "\n" if proposals else "")
         + (f"held for source mismatch: {len(provenance_held)}\n" if provenance_held else "")
+        + (f"held for an implausible time: {len(times_held)}\n" if times_held else "")
         + (f"live with a source mismatch: {len(provenance_live)}\n" if provenance_live else "")
         + (f"live end times to clear: {len(ends)}\n" if ends else "")
     )
@@ -487,6 +498,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "adapter_proposals": proposals,
         "provenance_held": provenance_held,
         "provenance_live": provenance_live,
+        "times_held": times_held,
         "unclearable_ends": ends,
         "shipped": shipped_counts,
         "workqueue": wq,

@@ -347,7 +347,8 @@ class TestDetailAgreement:
         assert row(conn, ev["event_uid"])["state"] == "approved"
 
     def test_another_events_page_holds_the_event_naming_what_disagreed(self, conn):
-        ev = approved(conn, {**DANCING, "date": "2026-10-08T19:30:00", "source_url": MARATHON_URL})
+        ev = approved(conn, {**DANCING, "date": "2026-10-08T19:30:00",
+                             "end_at": "2026-10-08T21:30:00", "source_url": MARATHON_URL})
         stub = Stub(page("marathon_detail"))
         result = read(conn, ev, stub)
         assert result.status == "held"
@@ -373,19 +374,19 @@ class TestDetailAgreement:
             '(it reads "Lakeside Marathon - Nevada Half Marathon")']
 
     def test_date_alone_disagreeing_holds(self, conn):
-        ev = approved(conn, {**DANCING, "date": "2026-10-21T19:30:00"})
+        ev = approved(conn, {**DANCING, "date": "2026-10-21T19:30:00", "end_at": None})
         assert read(conn, ev, Stub(page("line_dancing_detail"))).status == "held"
         assert provenance(conn, ev["event_uid"])["disagreed"][0].startswith(
             "detail page does not give 2026-10-21")
 
     def test_a_sidebar_naming_the_event_is_not_the_page_naming_it(self, conn):
-        ev = approved(conn, {**CROSS_WIRED, "date": "2026-10-07T19:30:00"})
+        ev = approved(conn, {**CROSS_WIRED, "date": "2026-10-07T19:30:00", "end_at": None})
         assert read(conn, ev, Stub(page("marathon_sidebar_detail"))).status == "held"
         assert provenance(conn, ev["event_uid"])["disagreed"][0].startswith(
             'detail page does not name "Line Dancing"')
 
     def test_a_sidebar_date_is_not_the_events_date(self, conn):
-        ev = approved(conn, {**DANCING, "date": "2026-10-21T19:30:00"})
+        ev = approved(conn, {**DANCING, "date": "2026-10-21T19:30:00", "end_at": None})
         assert read(conn, ev, Stub(page("line_dancing_sidebar_detail"))).status == "held"
         assert "it gives Oct 7)" in provenance(conn, ev["event_uid"])["disagreed"][0]
 
@@ -397,12 +398,12 @@ class TestDetailAgreement:
         assert read(conn, ev, Stub(md)).status == "read"
 
     def test_a_posted_date_alone_does_not_hold(self, conn):
-        ev = approved(conn, {**DANCING, "date": "2026-10-14T19:30:00"})
+        ev = approved(conn, {**DANCING, "date": "2026-10-14T19:30:00", "end_at": None})
         assert read(conn, ev, Stub(page("posted_detail"))).status == "read"
 
     def test_a_series_page_shared_by_occurrences_is_not_a_date_mismatch(self, conn):
         approved(conn, DANCING)
-        later = approved(conn, {**DANCING, "date": "2026-10-14T19:30:00"})
+        later = approved(conn, {**DANCING, "date": "2026-10-14T19:30:00", "end_at": None})
         assert read(conn, later, Stub(page("line_dancing_detail"))).status == "read"
 
     def test_operator_reapproval_after_a_hold_is_accepted(self, conn):
@@ -420,7 +421,8 @@ class TestDetailAgreement:
         uid = ev["event_uid"]
         # Another worker moved the event between the read and the hold.
         conn.execute("UPDATE events SET state = 'declined' WHERE event_uid = ?", (uid,))
-        read(conn, ev, Stub(page("marathon_detail")))
+        # Deferred, not "held": the drain must not advance an event it didn't hold.
+        assert read(conn, ev, Stub(page("marathon_detail"))).status == "deferred"
         assert row(conn, uid)["state"] == "declined"
         assert provenance(conn, uid).get("status") != event_provenance.HELD_FOR_REVIEW
         # Back to approved without a new approval: the next read judges again.
@@ -532,8 +534,9 @@ class TestDigest:
         from engine import orchestrator
         ev = approved(conn, {**CROSS_WIRED})
         read(conn, ev, Stub(page("marathon_detail")))
-        # Held days ago: still listed.
+        # Held days ago: still listed, while the event can still happen.
         conn.execute("UPDATE events SET state_updated_at = '2026-01-01T00:00:00+00:00'")
+        monkeypatch.setattr("engine.review_hold.iso_utc_now", lambda: "2026-10-01T00:00:00+00:00")
         monkeypatch.setattr(orchestrator, "_telegram_notify", lambda t: None)
         out = orchestrator.summary(conn)
         text = Path(out["report_path"]).read_text()

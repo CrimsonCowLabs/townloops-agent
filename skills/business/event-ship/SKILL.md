@@ -135,6 +135,15 @@ shipped**: ship records a failed `ship-event` activity and exits 1, so the
 workqueue retries and then marks it `stuck-` for the operator. A naive local
 date is never sent; an end time with no UTC form is left off.
 
+An implausible time (#46: a pre-dawn town-local start, an end before its
+start, an over-long span — the rules and thresholds live only in
+`engine/time_plausibility.py`) the operator hasn't accepted is **not
+shipped**: the event goes back to the approval queue with a `times: …` note
+naming each rule, and ship exits 0 with nothing sent. If the hold can't move
+it (another worker or the operator moved it first), ship exits 75 — not now,
+retried — so it is never advanced to shipped unsent. An approval after the
+hold ships it with those times.
+
 ## Categories and tags
 
 The event goes out with `category_slugs` (all of its categories) and `tags`;

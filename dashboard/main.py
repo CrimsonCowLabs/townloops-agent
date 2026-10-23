@@ -1447,6 +1447,9 @@ def v2_chat_confirm(request: Request,
                 f"queued {result['enqueued']} for the pipeline.")
         if result.get("skipped"):
             body += f" Skipped {result['skipped']} (already in a terminal state)."
+        if result.get("held"):
+            body += (f" Skipped {result['held']} held for review (a source mismatch or an "
+                     "implausible time) — approve each on its own, its reason in view.")
     elif kind == "promote_businesses":
         body = (f"Approved {result['approved']} business candidates — the next "
                 "business-discovery promote run checks live, enriches and ships them.")

@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from engine import autonomy, event_cancel, event_provenance
+from engine import autonomy, event_cancel, event_provenance, time_plausibility
 from engine.derive_helpers import iso_utc_now, seed_name_of
 from engine.event_extract import codex_exec, firecrawl_markdown
 from engine.event_provenance import canon_url as _canon
@@ -98,6 +98,7 @@ _ADA = re.compile(r"\bADA\b")
 @dataclass
 class DetailResult:
     status: str                  # read | no-detail-page | already-read | retry | failed | cancelled | held
+                                 # | deferred (a hold that lost its race: not now)
     fields: dict = field(default_factory=dict)
     error: str = ""
 
@@ -223,6 +224,12 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     url = event.get("source_url")
     canon = _canon(url)
     seeds = seed_urls(conn, event)
+    implausible = time_plausibility.gate(conn, event)
+    if implausible:   # held for its times (engine/time_plausibility): not read
+        if not implausible.held:
+            return _moved_on(implausible.reasons)
+        _record(conn, event, "held", url, {})
+        return DetailResult("held", error="; ".join(implausible.reasons))
     judge_page, hold_now = event_provenance.check_before_detail_read(conn, event)
     if hold_now:
         return _hold(conn, event, hold_now, url)
@@ -268,9 +275,18 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
 def _hold(conn, event: dict, disagreed: list[str], url: Optional[str]) -> DetailResult:
     """The page isn't this event's (engine/event_provenance): held for
     review, not read."""
-    event_provenance.hold_for_review(conn, event, disagreed, url)
+    if not event_provenance.hold_for_review(conn, event, disagreed, url):
+        return _moved_on(disagreed)
     _record(conn, event, "held", url, {})
     return DetailResult("held", error="; ".join(disagreed))
+
+
+def _moved_on(reasons: list[str]) -> DetailResult:
+    """A hold that lost its race (another worker or the operator moved the
+    event first): `deferred` — not read, and not to be advanced as if it
+    were (event-read-detail exits workqueue.RC_DEFERRED)."""
+    return DetailResult("deferred", error="hold not applied, event moved on: "
+                                          + "; ".join(reasons))
 
 
 def _cache_dir():

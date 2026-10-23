@@ -139,10 +139,10 @@ def parse_event_uid_arg(argv: Optional[list[str]] = None) -> str:
 
 
 def load_event(conn: sqlite3.Connection, event_uid: str) -> Optional[dict]:
-    row = conn.execute(
-        "SELECT * FROM events WHERE event_uid = ?", (event_uid,),
-    ).fetchone()
-    return dict(row) if row else None
+    """The event row as a dict, whatever the connection's row factory."""
+    cur = conn.execute("SELECT * FROM events WHERE event_uid = ?", (event_uid,))
+    row = cur.fetchone()
+    return dict(zip([d[0] for d in cur.description], row)) if row else None
 
 
 _WS = re.compile(r"\s+")

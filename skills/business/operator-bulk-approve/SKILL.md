@@ -12,6 +12,12 @@ approve.py --before 2026-08-15
 approve.py --source "palisades" --limit 10
 ```
 
+Events held for review (`engine/review_hold.py`: a source mismatch or an
+implausible time) are never proposed: approving one accepts what it was held
+for, so each needs its own approval with its reason in view (dashboard, or
+`autonomy accept <uid>`). They are listed under `skipped_held` — tell the
+operator how many and why. The Confirm widget skips them too (`held_uids`).
+
 Filters (at least one required):
 
 - `--before`  ISO date/datetime
@@ -28,7 +34,10 @@ Filters (at least one required):
     "count": 5,
     "uids": ["…", "…", …]
   },
-  "preview": [{"event_uid": "…", "title": "…", "date": "…", "source": "…"}, …]
+  "preview": [{"event_uid": "…", "title": "…", "date": "…", "source": "…"}, …],
+  "skipped_held": {"count": 2, "why": "held for review — …",
+                   "events": [{"event_uid": "…", "title": "…", "date": "…",
+                               "held_for": ["implausible time"]}, …]}
 }
 ```
 

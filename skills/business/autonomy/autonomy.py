@@ -10,7 +10,8 @@ Subcommands:
   resume                      close the circuit after fixing its cause, so
                               submissions start again (the operator's call)
   accept <uid> [--note T]     approve an event held for a source mismatch
-                              (engine/event_provenance) as it is
+                              (engine/event_provenance) or an implausible time
+                              (engine/time_plausibility) as it is
   decline <uid> [--note T]    decline one — both only for a held event (uid or
                               a unique prefix); the nightly digest lists them
 """
@@ -24,7 +25,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from engine import autonomy, event_provenance, event_state, moderation
+from engine import autonomy, event_state, moderation, review_hold
 from engine.derive_helpers import dict_rows, open_db, seed_ref
 
 
@@ -89,8 +90,9 @@ def _resume(args) -> int:
 def _resolve(args) -> int:
     """The operator's call on an event held for review: accept or decline."""
     conn = open_db()
-    uids = [h["event_uid"] for h in event_provenance.held_for_review(conn)
-            if h["event_uid"].startswith(args.uid)]
+    held = {h["event_uid"]: ", ".join(k.label for k in h["kinds"])
+            for h in review_hold.held(conn, upcoming=False)}
+    uids = [uid for uid in held if uid.startswith(args.uid)]
     if len(uids) != 1:
         print(json.dumps({"error": f"{len(uids)} held events match {args.uid!r}",
                           "held": uids[:10]}))
@@ -98,7 +100,7 @@ def _resolve(args) -> int:
     if args.cmd == "accept":
         done = event_state.approve(conn, uids[0], args.note or "[operator] accepted as is")
     else:
-        done = event_state.decline(conn, uids[0], args.note or "[operator] source mismatch")
+        done = event_state.decline(conn, uids[0], args.note or f"[operator] {held[uids[0]]}")
     conn.commit()
     print(json.dumps({args.cmd: uids[0], "done": done}))
     return 0 if done else 1

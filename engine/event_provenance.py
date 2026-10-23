@@ -24,25 +24,26 @@ adapter's per-item structured read is its own provenance): the event's own
 detail page must name the event in a heading and give its date in the
 event's section.
 
-Held for review (`hold_for_review`): pending at `metadata-extracted` with a
-`provenance: …` note naming what disagreed, `extra_json.provenance.status`
-`held-for-review` — in both modes. The autonomous judge skips it
-(`NOT_HELD_SQL`) and the nightly digest lists it until the operator
-approves it (accepted — never re-checked) or declines it. Acceptance needs a
+Held for review (`hold_for_review`, the lifecycle engine/review_hold shares
+with time plausibility): pending at `metadata-extracted` with a
+`provenance: …` note part naming what disagreed,
+`extra_json.provenance.status` `held-for-review` — in both modes. The
+autonomous judge skips it (`review_hold.NOT_HELD_SQL`) and the nightly
+digest lists it while it can still happen, until the operator approves it
+(accepted — never re-checked) or declines it. Acceptance needs a
 real re-approval: the hold only marks an event whose state it moved, and
 clears the approval it had (`event_state.reopen_for_review`).
 """
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
 from typing import NamedTuple, Optional
 from urllib.parse import urljoin
 
-from engine import autonomy, blocked_page, event_state
-from engine.derive_helpers import iso_utc_now, parse_extra_json
+from engine import blocked_page, review_hold
+from engine.derive_helpers import iso_utc_now, load_event
 from engine.discovery import canonicalize_url
 from engine.event_extract import day_and_clock, parse_json_array, published_times
 from engine.page_extract import PAGE_URL, normalize, plain_text
@@ -53,18 +54,18 @@ from engine.page_extract import PAGE_URL, normalize, plain_text
 # "url", "belongs_to" (refused: the card the link is), "established",
 # "reason"}.
 LISTING_CHECK = "listing_check"
-NOTE_PREFIX = "provenance: "
+KIND = review_hold.PROVENANCE
+NOTE_PREFIX = KIND.prefix
 
 # extra_json.provenance.status
-HELD_FOR_REVIEW = "held-for-review"   # pending, for the operator only
-ACCEPTED = "accepted"                 # the operator approved it after the hold
+HELD_FOR_REVIEW = review_hold.HELD_FOR_REVIEW   # pending, for the operator only
+ACCEPTED = review_hold.ACCEPTED                 # the operator approved it after the hold
 URL_DROPPED = "url-dropped"           # its link went; its listing card vouches for it
 LIVE_MISMATCH = "live-mismatch"       # shipped, and its source_url is another card's
 
-# Pending rows the autonomous judge may decide: not held for the operator.
-NOT_HELD_SQL = ("COALESCE(CASE WHEN json_valid(extra_json) THEN "
-                "json_extract(extra_json, '$.provenance.status') END, '') != "
-                f"'{HELD_FOR_REVIEW}'")
+# Pending rows not held for a source mismatch (review_hold.NOT_HELD_SQL: for
+# any reason).
+NOT_HELD_SQL = review_hold.not_held_sql(KIND)
 
 
 def canon_url(url, base: Optional[str] = None) -> Optional[str]:
@@ -329,25 +330,11 @@ def listing_events(stdout: str, page: str, base_url: str) -> list:
 
 
 def _provenance(extra_json) -> dict:
-    p = parse_extra_json(extra_json).get("provenance")
-    return p if isinstance(p, dict) else {}
+    return review_hold.mark_of(extra_json, KIND)
 
 
 def _write(conn: sqlite3.Connection, uid: str, prov: Optional[dict]) -> None:
-    raw = conn.execute("SELECT extra_json FROM events WHERE event_uid = ?", (uid,)).fetchone()
-    extra = parse_extra_json(raw[0] if raw else None)
-    if prov is None:
-        extra.pop("provenance", None)
-    else:
-        extra["provenance"] = prov
-    conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
-                 (json.dumps(extra, ensure_ascii=False), uid))
-
-
-def _event(conn: sqlite3.Connection, uid: str) -> Optional[dict]:
-    cur = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,))
-    r = cur.fetchone()
-    return dict(zip([d[0] for d in cur.description], r)) if r else None
+    review_hold.write(conn, uid, KIND, prov)
 
 
 def record_extraction(conn: sqlite3.Connection, uid: str, evt: dict) -> None:
@@ -357,7 +344,7 @@ def record_extraction(conn: sqlite3.Connection, uid: str, evt: dict) -> None:
     for the operator (live is never touched here). A clean extraction clears
     an earlier listing verdict; an acceptance or a detail-page hold stands.
     Caller commits."""
-    ev = _event(conn, uid)
+    ev = load_event(conn, uid)
     if ev is None:
         return
     check = evt.get(LISTING_CHECK)
@@ -379,12 +366,9 @@ def record_extraction(conn: sqlite3.Connection, uid: str, evt: dict) -> None:
             hold_for_review(conn, ev, [check["reason"]], check.get("url"), stage="listing")
         return
     if listing_hold or status == URL_DROPPED:   # the listing vouches for it now
-        _write(conn, uid, None)
-        conn.execute(
-            "UPDATE events SET source_url = COALESCE(source_url, ?), "
-            "  approval_note = CASE WHEN approval_note LIKE ? THEN NULL ELSE approval_note END "
-            "WHERE event_uid = ?",
-            (evt.get("source_url") or None, NOTE_PREFIX + "%", uid))
+        review_hold.release(conn, uid, KIND)
+        conn.execute("UPDATE events SET source_url = COALESCE(source_url, ?) WHERE event_uid = ?",
+                     (evt.get("source_url") or None, uid))
     if check:
         _write(conn, uid, {"status": URL_DROPPED, **check, "at": iso_utc_now()})
 
@@ -550,11 +534,7 @@ def detail_disagreements(conn: sqlite3.Connection, event: dict, page: str) -> li
     return out
 
 
-def operator_accepted(event: dict, prov: dict) -> bool:
-    """The operator approved the event after it was held: the hold cleared
-    its approval, so an approval now is a new one."""
-    return (prov.get("status") == HELD_FOR_REVIEW and event.get("approval_status") == "approved"
-            and bool(event.get("approval_at")) and event["approval_at"] >= (prov.get("held_at") or ""))
+operator_accepted = review_hold.accepted
 
 
 def check_before_detail_read(conn: sqlite3.Connection, event: dict) -> tuple[bool, list[str]]:
@@ -565,9 +545,7 @@ def check_before_detail_read(conn: sqlite3.Connection, event: dict) -> tuple[boo
     prov = _provenance(event.get("extra_json"))
     status = prov.get("status")
     if status == HELD_FOR_REVIEW:
-        if operator_accepted(event, prov):
-            _write(conn, event["event_uid"], {**prov, "status": ACCEPTED,
-                                              "accepted_at": iso_utc_now()})
+        if review_hold.accept(conn, event, KIND):
             return False, []
         return False, prov.get("disagreed") or ["held for review, not re-approved since"]
     return status != ACCEPTED, []
@@ -576,44 +554,23 @@ def check_before_detail_read(conn: sqlite3.Connection, event: dict) -> tuple[boo
 def hold_for_review(conn: sqlite3.Connection, event: dict, disagreed: list[str],
                     url: Optional[str], stage: str = "detail") -> bool:
     """Hold an event whose provenance failed (`stage`: listing | detail),
-    naming what disagreed: pending for the operator, its approval cleared,
-    with autonomy's verdict recorded. Marked only if the hold moved it — an
-    event another worker or the operator moved first is left as it is.
-    Caller commits."""
-    uid = event["event_uid"]
-    note = NOTE_PREFIX + "; ".join(disagreed)
-    if url and url not in note:
-        note += f" — source_url {url}"
+    naming what disagreed (`review_hold.hold`). False when another worker or
+    the operator moved it first. Caller commits."""
+    text = "; ".join(disagreed)
+    if url and url not in text:
+        text += f" — source_url {url}"
     evidence = {"disagreed": disagreed, "source_url": url, "stage": stage}
-    d = autonomy.judge_provenance(evidence, autonomy.settings())
-    now = iso_utc_now()
-    moved = conn.execute(
-        "UPDATE events SET approval_note = ?, approval_at = NULL WHERE event_uid = ? "
-        "AND state = 'metadata-extracted' AND approval_status = 'pending'",
-        (note[:1000], uid)).rowcount > 0 or event_state.reopen_for_review(
-            conn, uid, event_state.IN_FLIGHT_STATES, note[:1000], include_stuck=True)
-    if not moved:
-        return False
-    _write(conn, uid, {"status": HELD_FOR_REVIEW, "stage": stage, "disagreed": disagreed,
-                       "source_url": url, "held_at": now})
-    if d.verdict != autonomy.AWAIT:
-        autonomy.record(conn, "event", uid, d)
-    return True
+    return review_hold.hold(conn, event, KIND, text,
+                            {"stage": stage, "disagreed": disagreed, "source_url": url}, evidence)
 
 
-def held_for_review(conn: sqlite3.Connection) -> list[dict]:
-    """Every event held for a source mismatch, still awaiting the operator."""
-    rows = conn.execute(
-        "SELECT event_uid, COALESCE(title, name), COALESCE(date_local, date), extra_json "
-        f"FROM events WHERE state = 'metadata-extracted' AND NOT ({NOT_HELD_SQL}) "
-        "ORDER BY date_utc, event_uid").fetchall()
-    out = []
-    for r in rows:
-        prov = _provenance(r[3])
-        out.append({"event_uid": r[0], "title": r[1], "date": r[2],
-                    "source_url": prov.get("source_url"),
-                    "disagreed": prov.get("disagreed") or []})
-    return out
+def held_for_review(conn: sqlite3.Connection, upcoming: bool = True) -> list[dict]:
+    """Events held for a source mismatch, still awaiting the operator —
+    `upcoming` only those that can still happen (the nightly digest)."""
+    return [{"event_uid": h["event_uid"], "title": h["title"], "date": h["date"],
+             "source_url": h["marks"][KIND.key].get("source_url"),
+             "disagreed": h["marks"][KIND.key].get("disagreed") or []}
+            for h in review_hold.held(conn, KIND, upcoming=upcoming)]
 
 
 def live_mismatches(conn: sqlite3.Connection) -> list[dict]:

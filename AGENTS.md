@@ -165,11 +165,24 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     go, the card gives the date — a card with no detail link ships on the listing; an unplaced title or a
     dropped link plus a date its card doesn't give is held. Adapter rows are established by the adapter; read-detail
     still checks any detail URL: a heading must name the event and its section (minus posted/updated lines and
-    "other events" lists) give its date. Held = pending + `extra_json.provenance.status` `held-for-review` in both
-    modes (`event_state.reopen_for_review`; verdict `autonomy.judge_provenance`): the autonomous judge skips it,
-    every nightly digest lists it until the operator approves (accepted — only an approval after the hold counts)
-    or declines it (dashboard, or `autonomy accept|decline <uid>`). A refused link a shipped row carries →
-    `live-mismatch`, digest-listed, live untouched),
+    "other events" lists) give its date. Held via `review_hold` (verdict `autonomy.judge_provenance`). A refused
+    link a shipped row carries → `live-mismatch`, digest-listed, live untouched),
+    `time_plausibility.py` (#46: times implausible on their face are held, whatever their provenance. The one
+    place for the rules and thresholds — `check(start, end)`, pure: pre-dawn town-local start, end before start,
+    longer than `MAX_DURATION`; local midnight is date-only (`day_and_clock`), an end with no time on the start's
+    own day is no end. `record` after every extraction upsert (event-find, event-reconcile — so a staged change to
+    a live row is held before ship), `gate` before read-detail and ship. Held via `review_hold` (verdict
+    `autonomy.judge_times`, digest "Held — implausible time"); an approval after the hold accepts *those* times —
+    new times are checked afresh, a source that corrects them releases the hold),
+    `review_hold.py` (the one hold-for-review lifecycle; a `Kind` per reason — `PROVENANCE`, `TIMES` — each keeping
+    its rules/evidence in its own module; a third reason is one more `KINDS` entry. Held = pending at
+    `metadata-extracted` + `extra_json.<key>.status` `held-for-review` in both modes, approval cleared
+    (`event_state.reopen_for_review`); `hold` is False when the event moved on first — the caller exits
+    `RC_DEFERRED` so the drain never advances it (read-detail, ship). One note part per kind (`<prefix>…`, joined
+    ` | `; `with_note`/`without_note`/`with_base` — no kind or reconcile note clobbers another). `NOT_HELD_SQL`
+    (any kind): the autonomous judge and bulk approval skip held events (operator-bulk-approve, the
+    `approve_events` widget — each is approved on its own; only an approval after the hold accepts it); `held()`
+    — pending, upcoming by default — for the digest and `autonomy accept|decline <uid>`),
     `series.py` (TownLoops Series, ADR 0007 — the agent never writes one, the client refuses: `series_key`
     = TownLoops' title normalization, pinned to python-slugify; the `state/series.json` snapshot; `decide_title`
     — the title event-ship creates an occurrence under so it auto-links into the right Series (Series title only

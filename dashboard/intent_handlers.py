@@ -21,6 +21,7 @@ from engine import business_promote
 from engine import event_cancel
 from engine import event_state as _event_state
 from engine import listing_website_cleanup
+from engine import review_hold
 from engine import workqueue as _wq
 
 
@@ -113,11 +114,14 @@ def _decline_events(uids: list[str], *, note: Optional[str] = None) -> dict:
 
 def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
     """Flip approval_status → approved AND enqueue the first pipeline action for each
-    successful approval. Mirrors the dashboard's per-row approve button."""
+    successful approval. Mirrors the dashboard's per-row approve button — except
+    for an event held for review (engine/review_hold), which a bulk approval
+    never accepts: it is skipped (`held_uids`) for its own approval."""
     now = _iso_utc_now()
     approved = 0
     enqueued = 0
     skipped: list[str] = []
+    held: list[str] = []
     with db_v2.connect() as c:
         # connect() is autocommit; wrap the batch in one explicit transaction so
         # each approval and its first-action enqueue commit together (or the
@@ -125,6 +129,10 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
         c.execute("BEGIN")
         try:
             for uid in uids:
+                if c.execute("SELECT 1 FROM events WHERE event_uid=? AND approval_status="
+                             f"'pending' AND NOT {review_hold.NOT_HELD_SQL}", (uid,)).fetchone():
+                    held.append(uid)
+                    continue
                 cur = c.execute(
                     "UPDATE events SET approval_status='approved', "
                     "  approval_note=?, approval_at=?, "
@@ -148,6 +156,8 @@ def _approve_events(uids: list[str], *, note: Optional[str] = None) -> dict:
         "enqueued": enqueued,
         "skipped": len(skipped),
         "skipped_uids": skipped,
+        "held": len(held),
+        "held_uids": held,
     }
 
 

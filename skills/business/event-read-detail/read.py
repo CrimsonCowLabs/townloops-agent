@@ -26,6 +26,11 @@ def main() -> int:
         print(f"event {event_uid[:12]}: detail read failed, will retry: {result.error[:300]}",
               file=sys.stderr)
         return 1
+    if result.status == "deferred":
+        # Its hold lost a race (another worker or the operator moved it
+        # first): release the claim so the drain doesn't advance it unread.
+        print(f"event {event_uid[:12]}: {result.error[:300]} — not now", file=sys.stderr)
+        return workqueue.RC_DEFERRED
     found = sorted(k for k, v in result.fields.items() if v)
     record_activity(
         conn, _WORKER, f"detail-{result.status}", event_uid,

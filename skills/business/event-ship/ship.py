@@ -4,7 +4,9 @@
 Per plan adversarial pass #19: entities go first (venue, host, people),
 then the event. The event references its venue by live `venue_id`, so the
 venue must exist before the event references it. Nothing is created
-without first looking it up live (`engine/live_lookup.py`).
+without first looking it up live (`engine/live_lookup.py`). An event whose
+times are implausible (engine/time_plausibility) and not accepted by the
+operator is held for review instead — nothing is sent.
 
 TownLoops Series (ADR 0007, `engine/series.py`): an event joins a Series
 only by TownLoops auto-linking its title at create, so the title it ships
@@ -34,7 +36,7 @@ from typing import Any, Optional
 
 from engine import autonomy
 from engine import categories as cats
-from engine import event_dedup, event_detail, event_state, event_tickets
+from engine import event_dedup, event_detail, event_state, event_tickets, time_plausibility
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
     seed_name_of,
@@ -764,6 +766,23 @@ def main() -> int:
         record_activity(conn, _WORKER, "duplicate-of", event_uid,
                         detail=f"{sibling['event_uid'][:12]} already live as {sibling['townloops_slug']}")
         print(f"event {event_uid[:12]}: duplicate of {sibling['event_uid'][:12]} — not shipped")
+        return 0
+
+    implausible = time_plausibility.gate(conn, event)
+    if implausible:
+        # Never an implausible time on TownLoops: back to the operator, who
+        # ships it as is by approving it (engine/time_plausibility).
+        why = "; ".join(implausible.reasons)
+        if not implausible.held:
+            # The hold lost a race (the event moved on first): rc 0 would let
+            # the drain advance it to shipped unsent. Not now — retried.
+            print(f"event {event_uid[:12]}: hold not applied, event moved on ({why}) — not now")
+            return RC_DEFERRED
+        record_activity(conn, _WORKER, "ship-event", event_uid, ok=False,
+                        error="held for review: " + why)
+        print(f"event {event_uid[:12]}: held for review — " + why)
+        # rc 0 with ok=False: the hold moved it to metadata-extracted, so the
+        # drain's optimistic advance (from entities-enriched) is a no-op.
         return 0
 
     if not _tl_configured():

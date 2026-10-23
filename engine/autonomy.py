@@ -958,6 +958,19 @@ def judge_provenance(evidence: dict, s: Settings) -> Decision:
     return Decision("hold", "provenance-mismatch", evidence)
 
 
+def judge_times(evidence: dict, s: Settings) -> Decision:
+    """An event whose times are implausible on their face
+    (engine/time_plausibility's `evidence["rules"]`: a pre-dawn start, an
+    end before its start, a duration over the limit) is held for review —
+    never shipped, never dropped — on the provenance contract: pending for
+    the operator in both modes until approved (accepted) or declined."""
+    if not evidence.get("rules"):
+        return Decision("ship", "times-plausible", evidence)
+    if not s.autonomous:
+        return await_operator("implausible time", evidence)
+    return Decision("hold", "implausible-time", evidence)
+
+
 # --------------------------------------------------------------------------
 
 def _town() -> str:

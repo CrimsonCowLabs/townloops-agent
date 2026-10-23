@@ -25,7 +25,7 @@ import yaml
 from dateutil import tz as _tz
 
 from engine import (entity_classify, entity_enrich, event_provenance, event_state, inspection,
-                    series_sync)
+                    review_hold, series_sync, time_plausibility)
 from engine import lock as _lock
 from engine import reconcile as rc
 from engine.derive_helpers import (
@@ -157,7 +157,7 @@ def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str
     action = upsert_event(conn, seed_name, ev)
     uid = event_uid(seed_name, ev.get("title") or "", ev.get("date") or "")
     row = conn.execute(
-        "SELECT extra_json FROM events WHERE event_uid = ?", (uid,),
+        "SELECT extra_json, approval_note FROM events WHERE event_uid = ?", (uid,),
     ).fetchone()
     live = c.live or {}
     meta = {
@@ -189,7 +189,7 @@ def _stage(conn, seed_name: str, c: rc.Classification, run_id: str) -> tuple[str
         (_merge_extra(row["extra_json"], "reconcile", meta),
          ev.get("image_url") if isinstance(ev.get("image_url"), str) and ev["image_url"].startswith("http") else None,
          1 if c.kind == "new" else 0,
-         note, uid),
+         review_hold.with_base(row["approval_note"], note), uid),
     )
     return uid, action
 
@@ -201,11 +201,14 @@ def _annotate_already_live(conn, seed_name: str, c: rc.Classification) -> bool:
     longer states a time — engine/event_dedup) keeps its note."""
     ev = c.extracted
     uid = event_uid(seed_name, ev.get("title") or "", ev.get("date") or "")
+    old = conn.execute("SELECT approval_note FROM events WHERE event_uid = ?", (uid,)).fetchone()
     cur = conn.execute(
         "UPDATE events SET approval_note = ? "
         "WHERE event_uid = ? AND approval_status = 'pending' "
         "  AND COALESCE(json_extract(extra_json, '$.reconcile.kind'), '') != 'changed'",
-        (f"[reconcile] already live as {c.live.get('slug')} — likely duplicate", uid),
+        (review_hold.with_base(old[0] if old else None,
+                               f"[reconcile] already live as {c.live.get('slug')} — likely duplicate"),
+         uid),
     )
     return cur.rowcount > 0
 
@@ -260,6 +263,7 @@ def pull(conn, live: Live, profile: dict, args, run_id: str) -> dict:
                 continue
             uid, _ = _stage(conn, name, c, run_id)
             event_provenance.record_extraction(conn, uid, c.extracted)
+            time_plausibility.record(conn, uid)
             stats["staged_uids"].append(uid)
         if not args.dry_run:
             conn.execute(

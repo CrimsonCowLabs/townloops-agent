@@ -21,7 +21,7 @@ from typing import NamedTuple, Optional
 import yaml
 
 from engine import (autonomy, event_cancel, event_dedup, event_provenance, event_state, inspection,
-                    seed_adapters, source_health)
+                    review_hold, seed_adapters, source_health, time_plausibility)
 from engine import lock as _lock
 from engine.derive_helpers import parse_extra_json, seed_ref
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
@@ -92,7 +92,7 @@ def _pending_rows(conn: sqlite3.Connection, where: str, args: tuple) -> list[dic
     cur.row_factory = sqlite3.Row
     return [dict(r) for r in cur.execute(
         "SELECT * FROM events WHERE state = 'metadata-extracted' AND approval_status = 'pending' "
-        f"AND status = 'active' AND {event_provenance.NOT_HELD_SQL} AND {where} "
+        f"AND status = 'active' AND {review_hold.NOT_HELD_SQL} AND {where} "
         "ORDER BY date_utc, event_uid", args).fetchall()]
 
 
@@ -331,6 +331,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
             action = _upsert_event(conn, seed_name, evt)
             uid = _event_uid(seed_name, evt["title"], evt["date"])
             event_provenance.record_extraction(conn, uid, evt)
+            time_plausibility.record(conn, uid)
             seen_uids.append(uid)
             listed_dates.append(evt["date"])
             listed = event_cancel.record_listing(conn, uid, said, seed_name)
