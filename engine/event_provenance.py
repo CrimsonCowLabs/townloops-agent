@@ -43,7 +43,7 @@ from typing import NamedTuple, Optional
 from urllib.parse import urljoin
 
 from engine import blocked_page, review_hold
-from engine.derive_helpers import iso_utc_now, load_event
+from engine.derive_helpers import dict_rows as _rows, iso_utc_now, load_event
 from engine.discovery import canonicalize_url
 from engine.event_extract import day_and_clock, parse_json_array, published_times
 from engine.page_extract import PAGE_URL, normalize, plain_text
@@ -500,14 +500,32 @@ def event_section(title: str, page: str) -> tuple[bool, str]:
     return False, page
 
 
+def page_key(event: dict) -> Optional[tuple[str, str]]:
+    """What occurrences share a page by: its canonical URL and the event's
+    trimmed, case-folded title. None without an http(s) source_url."""
+    url = canon_url(event.get("source_url"))
+    if url is None:
+        return None
+    return url, (event.get("title") or event.get("name") or "").strip().lower()
+
+
+def is_shared(event: dict, others) -> bool:
+    """Another occurrence of the same event (among `others`, which exclude
+    `event` itself) links the same page — a Series' page, which gives one
+    date (or the rule), not each occurrence's. The one rule: read-detail
+    (local siblings) and the live source-attribution audit (live siblings)
+    both ask here."""
+    key = page_key(event)
+    return key is not None and any(page_key(o) == key for o in others)
+
+
 def _shared_page(conn: sqlite3.Connection, event: dict) -> bool:
-    """Another occurrence of the same event links the same page — a Series'
-    page, which gives one date (or the rule), not each occurrence's."""
-    title = event.get("title") or event.get("name") or ""
-    return conn.execute(
-        "SELECT 1 FROM events WHERE source_url = ? AND event_uid != ? "
-        "AND lower(COALESCE(title, name)) = lower(?) LIMIT 1",
-        (event.get("source_url"), event["event_uid"], title)).fetchone() is not None
+    """`is_shared` among the event's local siblings."""
+    if page_key(event) is None:
+        return False
+    others = _rows(conn, "SELECT title, name, source_url FROM events "
+                         "WHERE event_uid != ? AND source_url IS NOT NULL", (event["event_uid"],))
+    return is_shared(event, others)
 
 
 def detail_disagreements(conn: sqlite3.Connection, event: dict, page: str) -> list[str]:

@@ -18,13 +18,15 @@ from typing import Optional
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    from engine.source_attribution_audit import DEFAULT_MAX_FETCHES, audit_source_attribution
+
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     when = p.add_mutually_exclusive_group()
     when.add_argument("--since", metavar="YYYY-MM-DD",
                       help="only events starting on or after this town-local day")
     when.add_argument("--upcoming", action="store_true",
                       help="only events starting from now on")
-    p.add_argument("--max-fetches", type=int, default=300,
+    p.add_argument("--max-fetches", type=int, default=DEFAULT_MAX_FETCHES,
                    help="max source pages fetched through Firecrawl (0..5000); the rest are "
                         "listed unverified")
     p.add_argument("--limit", type=int, default=200, help="max rows (1..1000); counts are uncapped")
@@ -50,7 +52,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         since = datetime.now(timezone.utc)
 
     from engine import db as _engine_db  # lazy imports for clean --help
-    from engine.source_attribution_audit import audit_source_attribution
     from engine.townloops_api import Client
 
     client = Client()

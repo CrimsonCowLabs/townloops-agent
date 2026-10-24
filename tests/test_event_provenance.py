@@ -406,6 +406,15 @@ class TestDetailAgreement:
         later = approved(conn, {**DANCING, "date": "2026-10-14T19:30:00", "end_at": None})
         assert read(conn, later, Stub(page("line_dancing_detail"))).status == "read"
 
+    def test_a_series_page_is_keyed_like_the_live_audits(self, conn):
+        # One rule (event_provenance.is_shared): a sibling spelling the
+        # title or the URL another way still shares the page.
+        first = approved(conn, DANCING)
+        conn.execute("UPDATE events SET title = ' line dancing ', source_url = ? "
+                     "WHERE event_uid = ?", (DANCING_URL + "?utm_source=x", first["event_uid"]))
+        later = approved(conn, {**DANCING, "date": "2026-10-14T19:30:00", "end_at": None})
+        assert read(conn, later, Stub(page("line_dancing_detail"))).status == "read"
+
     def test_operator_reapproval_after_a_hold_is_accepted(self, conn):
         ev = approved(conn, {**CROSS_WIRED})
         read(conn, ev, Stub(page("marathon_detail")))

@@ -38,8 +38,7 @@ def page(name: str) -> str:
 
 def _ev(slug, title, start_at, source_url, **kw):
     return {"slug": slug, "title": title, "start_at": start_at, "end_at": None,
-            "source_url": source_url, "venue_name": "Cascade Kitchens",
-            "venue_slug": "cascade-kitchens", "status": "published", **kw}
+            "source_url": source_url, "venue_slug": "cascade-kitchens", "status": "published", **kw}
 
 
 # The live row: Line Dancing at Cascade Kitchens, on the marathon's URL and
@@ -59,6 +58,8 @@ class Fetch:
         got = self.pages.get(url)
         if isinstance(got, Exception):
             raise got
+        if isinstance(got, tuple):   # firecrawl_listing's own failed read
+            return got
         return (True, got, "") if got is not None else (False, "", "firecrawl http 500")
 
 
@@ -92,7 +93,7 @@ def test_line_dancing_on_the_marathons_page_is_reported(conn):
     found, _ = _sweep(conn, [CROSS_WIRED], {MARATHON_URL: page("marathon_detail")})
     assert found.rows == [{
         "slug": "line-dancing-2026-10-08", "title": "Line Dancing",
-        "start_at": "2026-10-09T13:30:00Z", "date": "2026-10-09", "venue": "Cascade Kitchens",
+        "start_at": "2026-10-09T13:30:00Z", "date": "2026-10-09", "venue_slug": "cascade-kitchens",
         "status": "published", "source_url": MARATHON_URL,
         "disagreed": ['detail page does not name "Line Dancing" '
                       '(it reads "Lakeside Marathon - Nevada Half Marathon")'],
@@ -128,6 +129,18 @@ def test_live_occurrences_sharing_a_series_page_are_not_held_to_its_one_date(con
     assert fetch.urls == [DANCING_URL]   # each distinct page fetched once
 
 
+def test_a_series_page_is_one_rule_for_live_and_local(conn):
+    # Trailing whitespace, case, and a URL spelled two ways: still one page.
+    later = {**DANCING, "slug": "line-dancing-2026-10-14", "start_at": "2026-10-15T02:30:00Z",
+             "title": "line dancing ", "source_url": DANCING_URL + "?utm_source=x"}
+    found, _ = _sweep(conn, [DANCING, later], {DANCING_URL: page("line_dancing_detail")})
+    assert found.rows == []
+    assert event_provenance.is_shared(later, [DANCING])
+    assert not event_provenance.is_shared({**later, "title": "Salsa Night"}, [DANCING])
+    assert not event_provenance.is_shared({**later, "source_url": None},
+                                          [{**DANCING, "source_url": None}])
+
+
 def test_paired_with_its_local_row_by_slug(conn):
     _local(conn, "e1", CROSS_WIRED["slug"], "Line Dancing", "2026-10-09T13:30:00+00:00",
            MARATHON_URL)
@@ -157,7 +170,8 @@ def test_failed_or_blocked_fetch_is_unverified_never_a_mismatch(conn):
                 "https://business.tahoechamber.org/events/details/fall-art-walk")
     third = _ev("trivia", "Trivia", "2026-10-11T02:00:00Z", "https://trivia.example/night")
     found, _ = _sweep(conn, [CROSS_WIRED, other, third], {
-        MARATHON_URL: "Attention Required! | Cloudflare\nChecking your browser",
+        # firecrawl_listing fails a challenge page itself (engine/blocked_page).
+        MARATHON_URL: (False, "", "cloudflare challenge"),
         "https://trivia.example/night": TimeoutError("token bucket empty"),
     })
     assert found.rows == []
@@ -169,13 +183,44 @@ def test_failed_or_blocked_fetch_is_unverified_never_a_mismatch(conn):
     assert all(u["error"] for u in found.unverified)
 
 
+def test_any_failed_fetch_is_unverified_and_the_sweep_goes_on(conn):
+    trivia = _ev("trivia", "Trivia", "2026-10-11T02:00:00Z", "https://trivia.example/night")
+    found, fetch = _sweep(conn, [trivia, CROSS_WIRED], {
+        "https://trivia.example/night": ConnectionError("connection reset"),
+        MARATHON_URL: page("marathon_detail")})
+    assert len(fetch.urls) == 2
+    assert [r["slug"] for r in found.rows] == [CROSS_WIRED["slug"]]
+    assert found.unverified == [{"source_url": "https://trivia.example/night", "slugs": ["trivia"],
+                                 "error": "ConnectionError: connection reset"}]
+
+
+def test_firecrawl_not_configured_aborts_the_sweep(conn):
+    from engine.firecrawl_env import FirecrawlNotConfigured
+    with pytest.raises(FirecrawlNotConfigured):
+        _sweep(conn, [CROSS_WIRED], {MARATHON_URL: FirecrawlNotConfigured("no local URL")})
+
+
+def test_fetch_budget_is_spent_newest_first(conn):
+    # Live pages oldest-first; a recent cross-wired row must not fall past the cap.
+    old = [_ev(f"old-{i}", f"Old Event {i}", f"2025-0{i}-01T18:00:00Z",
+               f"https://old.example/{i}") for i in range(1, 4)]
+    found, fetch = _sweep(conn, [*old, CROSS_WIRED], {
+        MARATHON_URL: page("marathon_detail"),
+        "https://old.example/3": "# Old Event 3\n\nSaturday, March 1, 2025 10:00 AM\n"},
+        max_fetches=2)
+    assert fetch.urls == [MARATHON_URL, "https://old.example/3"]
+    assert [r["slug"] for r in found.rows] == [CROSS_WIRED["slug"]]
+    # Reported by start, oldest first, whatever order the pages were read in.
+    assert [u["slugs"] for u in found.unverified] == [["old-1"], ["old-2"]]
+
+
 def test_fetch_cap_leaves_the_rest_unverified(conn):
     found, fetch = _sweep(conn, [DANCING, CROSS_WIRED],
                           {DANCING_URL: page("line_dancing_detail"),
                            MARATHON_URL: page("marathon_detail")}, max_fetches=1)
-    assert fetch.urls == [DANCING_URL]
-    assert found.rows == []
-    assert found.unverified == [{"source_url": MARATHON_URL, "slugs": [CROSS_WIRED["slug"]],
+    assert fetch.urls == [MARATHON_URL]   # the newer page first
+    assert [r["slug"] for r in found.rows] == [CROSS_WIRED["slug"]]
+    assert found.unverified == [{"source_url": DANCING_URL, "slugs": [DANCING["slug"]],
                                  "error": "not fetched: fetch cap (1) reached"}]
 
 

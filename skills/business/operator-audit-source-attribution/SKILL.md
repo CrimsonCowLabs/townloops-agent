@@ -31,13 +31,20 @@ python skills/business/operator-audit-source-attribution/audit.py --max-fetches 
 - `--since YYYY-MM-DD` / `--upcoming`: only events starting on or after that
   town-local day / from now. Default: every live event, past ones included —
   a cross-wired past row is still a wrong public page.
+  Under either, a local `live-mismatch` flag whose slug isn't in the sweep
+  is left out (it isn't listed in `local_flags` either): only a full sweep
+  can tell a flag whose live row is gone from one outside the window.
 - `--max-fetches`: source pages fetched, 0–5000, default 300. Each distinct
-  page is fetched once; past the cap its events are `unverified`. Firecrawl
-  is budgeted (≈1 scrape/s), so a whole-town sweep takes a while — run it
-  from a shell, not a chat turn.
+  page is fetched once, the pages of the latest events first; past the cap
+  the rest (the oldest) are `unverified`. Firecrawl is budgeted (≈1
+  scrape/s), so a whole-town sweep takes a while — run it from a shell, not
+  a chat turn. SLT has ~650 distinct pages: a full sweep there needs
+  `--max-fetches 1000`.
 - `--limit`: max rows, 1–1000, default 200. Counts and `total` are never capped.
 
 ## Output
+
+From a whole-town SLT run with `--max-fetches 1000`:
 
 ```json
 {
@@ -46,7 +53,7 @@ python skills/business/operator-audit-source-attribution/audit.py --max-fetches 
   "total": 1,
   "rows": [{"slug": "line-dancing-2026-10-08", "title": "Line Dancing",
             "start_at": "2026-10-09T13:30:00Z", "date": "2026-10-09",
-            "venue": "Cascade Kitchens", "status": "published",
+            "venue_slug": "cascade-kitchens", "status": "published",
             "source_url": "https://business.tahoechamber.org/events/details/lakeside-marathon-nevada-half-marathon-10-09-2026-17355",
             "disagreed": ["detail page does not name \"Line Dancing\" (it reads \"Lakeside Marathon - Nevada Half Marathon\")"],
             "found_by": ["detail-page"], "event_uid": "…", "seed": "Tahoe Chamber"}],
@@ -56,9 +63,14 @@ python skills/business/operator-audit-source-attribution/audit.py --max-fetches 
 }
 ```
 
+- The sweep covers every event TownLoops lists for the town in any
+  non-deleted status — `pending` and `rejected` as well as `published` — so
+  each row carries its `status`. A `pending` row can still be fixed in the
+  moderation queue before anyone sees it.
 - One row per live event, by start. `title`, `date` (town-local) and
-  `venue` are **live's** — live is what's wrong; `event_uid` and `seed` are
-  the local row paired by `townloops_slug` (null when none).
+  `venue_slug` are **live's** — live is what's wrong; `event_uid` and `seed`
+  are the local row paired by `townloops_slug` (null when none). The event
+  resource carries only the venue's slug, not its name.
 - `disagreed` — one sentence per finding:
   - `detail page does not name "<title>" (it reads "<heading>")` — the page
     is another event's. The strongest signal.
@@ -69,14 +81,18 @@ python skills/business/operator-audit-source-attribution/audit.py --max-fetches 
   - a listing reason (`found_by: "listing"`) — event-find saw on the seed's
     listing that this link is another card's (#45's `live-mismatch` flag,
     also in the nightly digest), while live still carries that link.
-- There is no venue check: pages often name no venue, or name it another
-  way. A cross-wired row is caught by its title or date.
+- There is no venue check, for two reasons: the TownLoops event resource
+  has no venue name to look for (only `venue_slug`), and pages name venues
+  inconsistently — often not at all, or another way ("Cascade Kitchens" /
+  "Cascade Kitchens Food Hall & Bar", a street address). A check would flag
+  correct events. A cross-wired row is caught by its title or date.
 - `skipped` — not fetched: no `source_url`, or the seed's listing page (a
   listing names many events; it is no one event's page). `listing_page`
   rows are no evidence either way.
-- `unverified` — the page couldn't be read (Firecrawl error, a challenge
+- `unverified` — the page couldn't be read (any fetch error, a challenge
   or error page, the fetch cap): **unknown**, not clean. Re-run later or
-  with a higher `--max-fetches`.
+  with a higher `--max-fetches`. Listed by start. Only a missing local
+  Firecrawl configuration (`FirecrawlNotConfigured`) aborts the run.
 - `local_flags` — local `live-mismatch` flags whose slug no longer lists
   live (deleted, merged or renamed) — check TownLoops admin by hand.
 

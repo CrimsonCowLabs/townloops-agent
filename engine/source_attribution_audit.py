@@ -7,20 +7,24 @@ Each live event's own source page is read and judged by #45's predicate,
 `event_provenance.page_disagreements` — the check read-detail holds on, so
 the two can't drift: a heading must name the event's live title, and its
 section must give its town-local date (unless another live occurrence of
-the same title links the same page — a Series' page). Live is what's
+the same title links the same page — a Series' page, by
+`event_provenance.is_shared`, read-detail's rule too). Live is what's
 wrong, so the live title and start are judged, never the local row's.
-There is no venue check: a page that names no venue, or names it another
+There is no venue check: the event resource carries only `venue_slug`, no
+venue name to look for, and a page that names no venue, or names it another
 way ("Cascade Kitchens" / "Cascade Kitchens Food Hall & Bar", an address),
 is the common case, not a cross-wire.
 
 - Each distinct source page is fetched once, through local Firecrawl
   (`event_extract.firecrawl_listing`: a challenge or error page is a failed
-  read), at most `max_fetches` times — Firecrawl is budgeted. A page
-  read-detail cached for the paired local row is used instead of a fetch.
+  read), at most `max_fetches` times, the pages of the latest events first
+  — Firecrawl is budgeted. A page read-detail cached for the paired local
+  row is used instead of a fetch.
 - Not fetched: an event with no source_url, or whose source_url is a seed's
   listing page (a listing names many events; it is no event's own page).
-- A failed, blocked or capped read leaves its events in `unverified`, never
-  in the report: unread is not a mismatch.
+- A failed, blocked or capped read — any fetch error — leaves its events
+  in `unverified`, never in the report: unread is not a mismatch. Only
+  `FirecrawlNotConfigured` aborts the sweep: it fails every page.
 - Live rows pair with local rows by `townloops_slug` (event_uid and seed,
   for context). A local row #45 flagged `live-mismatch` (its listing shows
   the link is another card's) adds its reason to the live row while live
@@ -37,10 +41,11 @@ import sqlite3
 from datetime import datetime
 from typing import Callable, NamedTuple, Optional
 
-from engine import blocked_page, event_detail
+from engine import event_detail
 from engine.derive_helpers import dict_rows as _rows, parse_instant, utc_z
 from engine.event_extract import day_and_clock, firecrawl_listing
-from engine.event_provenance import canon_url, live_mismatches, page_disagreements
+from engine.event_provenance import canon_url, is_shared, live_mismatches, page_disagreements
+from engine.firecrawl_env import FirecrawlNotConfigured
 
 
 DEFAULT_MAX_FETCHES = 300
@@ -76,7 +81,7 @@ def find_cross_wired(conn: sqlite3.Connection, client, *, since: Optional[dateti
     """Every live event (starting at or after `since`, if given) its source
     page or its listing says isn't its own, ordered by start. Each row:
 
-        {"slug", "title", "start_at", "date" (town-local), "venue", "status",
+        {"slug", "title", "start_at", "date" (town-local), "venue_slug", "status",
          "source_url", "disagreed" (one sentence each),
          "found_by": ["detail-page" | "listing"], "event_uid", "seed"
          (the paired local row's; None when unpaired)}
@@ -90,9 +95,8 @@ def find_cross_wired(conn: sqlite3.Connection, client, *, since: Optional[dateti
     seeds = {u for u in (canon_url(r["url"]) for r in _rows(conn, "SELECT url FROM event_seeds"))
              if u}
 
-    # Who links each page: a page two live occurrences of one title share is
-    # a Series' page, which gives one date.
-    titles: dict[str, list[str]] = {}
+    # Who links each page (in start order): a page two live occurrences of
+    # one title share is a Series' page, which gives one date.
     skipped = {"no_source_url": 0, "listing_page": 0}
     by_url: dict[str, list[dict]] = {}
     for r in live:
@@ -103,33 +107,35 @@ def find_cross_wired(conn: sqlite3.Connection, client, *, since: Optional[dateti
             skipped["listing_page"] += 1
         else:
             by_url.setdefault(url, []).append(r)
-            titles.setdefault(url, []).append((r.get("title") or "").strip().lower())
 
     disagreed: dict[str, list[str]] = {}
     found_by: dict[str, list[str]] = {}
-    unverified, fetched, cached, checked = [], 0, 0, 0
-    for url, events in by_url.items():
+    unverified, fetched, cached, checked = {}, 0, 0, 0
+    # The fetch budget goes to the newest pages first: live lists oldest
+    # first, and a recent row is the one still misleading people.
+    for url in sorted(by_url, key=lambda u: by_url[u][-1].get("start_at") or "", reverse=True):
+        events = by_url[url]
         page = _cached(local, events, url)
         if page is not None:
             cached += 1
         elif fetched >= max_fetches:
-            unverified.append(_unread(url, events, f"not fetched: fetch cap ({max_fetches}) reached"))
+            unverified[url] = _unread(url, events, f"not fetched: fetch cap ({max_fetches}) reached")
             continue
         else:
             fetched += 1
-            try:
+            try:   # a challenge or error page is a failed read (firecrawl_listing)
                 ok, page, err = fetch(events[0]["source_url"])
-            except TimeoutError as e:   # the Firecrawl token bucket stayed empty
-                ok, page, err = False, "", str(e)
-            blocked = blocked_page.reason(page, None, None) if ok else None
-            if not ok or blocked:
-                unverified.append(_unread(url, events, err or blocked))
+            except FirecrawlNotConfigured:
+                raise   # configuration, not this page: every read would fail
+            except Exception as e:   # one bad page (a timeout, the token bucket) is unread
+                ok, page, err = False, "", f"{type(e).__name__}: {e}"
+            if not ok:
+                unverified[url] = _unread(url, events, err)
                 continue
         for r in events:
             checked += 1
-            title = (r.get("title") or "").strip().lower()
             reasons = page_disagreements({"title": r.get("title"), "date": r.get("start_at")}, page,
-                                         shared_page=titles[url].count(title) > 1)
+                                         shared_page=is_shared(r, [o for o in events if o is not r]))
             if reasons:
                 disagreed[r["slug"]] = list(reasons)
                 found_by[r["slug"]] = ["detail-page"]
@@ -149,7 +155,8 @@ def find_cross_wired(conn: sqlite3.Connection, client, *, since: Optional[dateti
 
     rows = [_finding(r, disagreed[r["slug"]], found_by[r["slug"]], local.get(r["slug"]))
             for r in live if r.get("slug") in disagreed]
-    return CrossWired(rows, unverified, local_flags, skipped, len(live), checked, fetched, cached)
+    unread = [unverified[u] for u in by_url if u in unverified]   # by start, like the rows
+    return CrossWired(rows, unread, local_flags, skipped, len(live), checked, fetched, cached)
 
 
 def _local_rows(conn: sqlite3.Connection) -> dict[str, dict]:
@@ -186,7 +193,7 @@ def _finding(live: dict, disagreed: list[str], found_by: list[str],
         "title": live.get("title"),
         "start_at": live.get("start_at"),
         "date": (day_and_clock(live.get("start_at")) or (None,))[0],
-        "venue": live.get("venue_name") or live.get("venue_slug"),
+        "venue_slug": live.get("venue_slug"),
         "status": live.get("status"),
         "source_url": live.get("source_url"),
         "disagreed": disagreed,
