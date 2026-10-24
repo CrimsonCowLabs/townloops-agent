@@ -213,6 +213,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     listing slug → `live_id` → merge-following GET (no re-point); one row per entity, `side` local/live/both,
     `live_unread` when the GET failed, a shared live row counted once (`duplicate_of`) — the listing-website
     cleanup works from `find_listing_websites`' rows + `unverified`; LIST/GET only),
+    `source_attribution_audit.py` (read-only, for the `operator-audit-source-attribution` skill, #47: live events
+    whose `source_url` is another event's page — each distinct page read once via local Firecrawl (cap
+    `--max-fetches`; a cached read-detail page first) and judged by `event_provenance.page_disagreements`, the one
+    predicate read-detail holds on (live title + town-local date; no venue check); seed listing pages and blank URLs
+    skipped, an unread page `unverified`, never a mismatch; #45's local `live-mismatch` flags folded in; LIST only),
     `listing_website_cleanup.py` (the one-off `listing-website-cleanup` skill — operator-run `apply`, no cron; ledger
     `listing_website_clears`, optimistic status moves, entity writes under the `workqueue-drain` lock. Supervised:
     `clear_listing_websites` widget → `apply`: `live_patch.clear_entity_fields` (`website: ""` + GET verify) first,

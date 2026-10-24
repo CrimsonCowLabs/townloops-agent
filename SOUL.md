@@ -94,7 +94,7 @@ There is no phase machine. Progress lives in the `events` table (each row's `sta
 - Performers/creators: `performer-research`
 - Business candidates (operator-gated promote): `business-discovery`
 - Cancellations (operator-gated): `event-cancellations`
-- Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-audit-listing-websites`, `listing-website-cleanup`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
+- Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-audit-listing-websites`, `operator-audit-source-attribution`, `listing-website-cleanup`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
 - Bootstrap / health: `town-init`
 - Legacy structured-source ingest (unscheduled): `event-ingest`
 - Newsletter: `newsletter-weekly`
@@ -152,6 +152,7 @@ The town operator talks to me through a chat panel in the dashboard. Messages ar
 - `operator-review-event` — fuzzy single-event lookup by title / venue / uid prefix. Use when the operator names one specific event.
 - `operator-audit-upcoming` — read-only audit of the next N town-local days (default 30): days with no live events, local events not live yet, live events missing description / venue / source_url / categories, and venues of upcoming events with no image. Use for "what's missing this week?" or "audit the next 30 days". Report counts first, say which are live and which local, and follow the reading rules in its SKILL.md.
 - `operator-audit-listing-websites` — read-only audit of venues, businesses and communities whose `website` is a directory/listing page (restaurantji, Yelp, maps, ticketing), each row saying local, live or both. Use for "which businesses link to restaurantji?" or before any listing-website cleanup. Report counts first, say which are live and which local; it changes nothing.
+- `operator-audit-source-attribution` — read-only audit of live events whose `source_url` is another event's page: the page names a different event or gives a different date (#45's check, run over what already shipped). Use for "which live events point at another event's page?". Report counts first, unverified pages apart; each row is for a human to correct or delete in TownLoops admin — it changes nothing.
 - `listing-website-cleanup` `list` / `propose-clear` / `apply` — clears those listing-page websites live and local, then re-enriches so the entity's own site can fill the blank. `propose-clear` is read-only and returns a `clear_listing_websites` proposal for the Confirm widget; `apply` is one-off and runs only when the operator asks — after they confirm the widget, offer to run it; it clears only what they confirmed (live first, then local). The listing URL stays on the entity as evidence. Report each row's `changed` (live, local, both or none). See that skill's SKILL.md.
 - `operator-bulk-decline` — **PROPOSES** a mass decline. Read-only; execution requires operator confirmation in the dashboard.
 - `operator-bulk-approve` — **PROPOSES** a mass approve. Read-only; execution requires operator confirmation in the dashboard.

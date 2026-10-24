@@ -511,11 +511,19 @@ def _shared_page(conn: sqlite3.Connection, event: dict) -> bool:
 
 
 def detail_disagreements(conn: sqlite3.Connection, event: dict, page: str) -> list[str]:
+    """`page_disagreements` for a local event: its page is shared when
+    another local occurrence of it links the same page."""
+    return page_disagreements(event, page, shared_page=_shared_page(conn, event))
+
+
+def page_disagreements(event: dict, page: str, *, shared_page: bool = False) -> list[str]:
     """What the event's detail page contradicts, one sentence each: no
     heading names the event, or its section states dates (other than when
-    the page was posted or updated) and none is the event's. [] when it
-    agrees — or when the fetch got a challenge/error page, which says
-    nothing either way."""
+    the page was posted or updated) and none is the event's — unless
+    `shared_page` (a Series' page, which gives one date). [] when it agrees
+    — or when the fetch got a challenge/error page, which says nothing
+    either way. read-detail and the live source-attribution audit
+    (engine/source_attribution_audit) both judge here."""
     if not page or blocked_page.reason(page, None, None):
         return []
     out = []
@@ -526,7 +534,7 @@ def detail_disagreements(conn: sqlite3.Connection, event: dict, page: str) -> li
         out.append(f'detail page does not name "{title}"'
                    + (f' (it reads "{heads[0].text}")' if heads else ""))
     day = (day_and_clock(event.get("date_local") or event.get("date")) or ("",))[0]
-    if day and not _shared_page(conn, event):
+    if day and not shared_page:
         stated = page_dates("\n".join(ln for ln in section.splitlines() if not _STAMP.search(ln)))
         if stated and (int(day[5:7]), int(day[8:10])) not in stated:
             shown = ", ".join(f"{_MONTHS[m - 1].title()} {d}" for m, d in sorted(stated)[:5])
@@ -573,15 +581,18 @@ def held_for_review(conn: sqlite3.Connection, upcoming: bool = True) -> list[dic
             for h in review_hold.held(conn, KIND, upcoming=upcoming)]
 
 
-def live_mismatches(conn: sqlite3.Connection) -> list[dict]:
-    """Upcoming shipped events whose source_url the listing shows is another
-    card's own — live, for the operator (#47 audits live)."""
+def live_mismatches(conn: sqlite3.Connection, upcoming: bool = True) -> list[dict]:
+    """Shipped events whose source_url the listing shows is another card's
+    own — live, for the operator; `upcoming` only those that can still
+    happen (the nightly digest). The source-attribution audit
+    (engine/source_attribution_audit) reads them all."""
     rows = conn.execute(
         "SELECT event_uid, COALESCE(title, name), COALESCE(date_local, date), townloops_slug, "
         "  extra_json FROM events WHERE state = 'shipped' "
-        "  AND (date_utc IS NULL OR date_utc >= ?) "
+        "  AND (? OR date_utc IS NULL OR date_utc >= ?) "
         "  AND CASE WHEN json_valid(extra_json) THEN "
         "    json_extract(extra_json, '$.provenance.status') END = ? "
-        "ORDER BY date_utc, event_uid", (iso_utc_now(), LIVE_MISMATCH)).fetchall()
+        "ORDER BY date_utc, event_uid", (not upcoming, iso_utc_now(), LIVE_MISMATCH)).fetchall()
     return [{"event_uid": r[0], "title": r[1], "date": r[2], "townloops_slug": r[3],
+             "source_url": _provenance(r[4]).get("url"),
              "reason": _provenance(r[4]).get("reason")} for r in rows]
