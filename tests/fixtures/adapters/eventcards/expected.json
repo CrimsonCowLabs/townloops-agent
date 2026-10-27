@@ -1,0 +1,35 @@
+[
+ {
+  "title": "Business After Hours & Mixer",
+  "date": "2027-03-05T17:30:00",
+  "end_at": null,
+  "venue": "Lakeview Lodge",
+  "location": null,
+  "description": "Meet local business owners over appetizers on the lodge deck.\nMembers free; guests $10 at the door.",
+  "categories": [],
+  "tags": [],
+  "source_url": "https://chamber.example/events/business-after-hours"
+ },
+ {
+  "title": "Spring Job Fair",
+  "date": "2027-03-12",
+  "end_at": null,
+  "venue": "Community Recreation Center",
+  "location": null,
+  "description": "Seasonal and year-round employers hiring for the summer season. Bring a resume.",
+  "categories": [],
+  "tags": [],
+  "source_url": "https://chamber.example/events/spring-job-fair"
+ },
+ {
+  "title": "Ribbon Cutting: Alpine Bakery",
+  "date": "2027-03-20T10:00:00",
+  "end_at": null,
+  "venue": null,
+  "location": null,
+  "description": null,
+  "categories": [],
+  "tags": [],
+  "source_url": "https://chamber.example/events/ribbon-cutting-bakery"
+ }
+]

@@ -121,11 +121,22 @@ endpoint yourself (source-automation review, event-find SKILL.md) — and especi
 
 A town writes its own adapter as `$HERMES_HOME/adapters/<name>.py` — persistent, this town only —
 exposing `ADAPTER = Adapter(read, params, feed_types=(...))` from `engine.seed_adapters` (it may
-import `fetch_json`, `html_text`, `local_time`, `location`, `AdapterError`, `Param`). The file name
-is the adapter key: a-z, 0-9, `_`, `-` (≤40), never `generic`; `_`-prefixed files are helpers, not
-adapters. `read(seed, config, get_json)` returns every event of the listing in the extraction's
-shape and fetches only through `get_json` (fixtures stub it; its answers are blocked-page checked).
-It is loaded at lookup — `set-adapter`, `review`, event-find — and again when the file changes.
+import `html_text`, `local_time`, `location`, `AdapterError`, `Param`; `bs4`, `lxml` and
+`icalendar` are installed). The file name is the adapter key: a-z, 0-9, `_`, `-` (≤40), never
+`generic`; `_`-prefixed files are helpers, not adapters. `read(seed, config, fetch)` returns every
+event of the listing in the extraction's shape and fetches only through the `fetch` it is handed —
+fixtures stand in for it:
+
+- `fetch(url, params)` / `fetch.get_json(url, params)` → parsed JSON (a feed API);
+- `fetch.get_text(url, params=None)` → the body as text — server-rendered HTML cards, iCal, CSV;
+- `fetch.get_rendered(url)` → the page as the local Firecrawl renders it (markdown, scripts run) —
+  only for a calendar a browser builds (Wix, Squarespace widgets); it spends Firecrawl budget.
+
+Every answer is checked by engine/blocked_page: an error status, a challenge, a platform 404 or a
+near-empty body is an `AdapterError` — a failed run, never a page that lists nothing. Direct
+fetches go out like any other (the egress proxy), so the source's host must be in `allowed_hosts`.
+The adapter is loaded at lookup — `set-adapter`, `review`, event-find — and again when the file
+changes.
 
 - A shared adapter of the same name wins; the town file is **shadowed** (logged, listed) — so a
   promoted adapter takes over, and the town copy can be deleted.
@@ -142,13 +153,20 @@ $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py test-adapt
 - **`adapters`** — every key a seed can name (`source` shared/town, `feed_types`, `params`), the
   town `shadowed` names and broken files (`errors`, file → why).
 - **`test-adapter`** — no network: reads a captured response through the adapter's reader with
-  `get_json` answered from the capture, `--config` checked against its `params`. `--fixture` is one
-  JSON file (answers every request) or a directory of `page-<N>.json` (answered by the request's
-  `page`). `--case DIR` is the layout a promotion carries: `fixture.json` or `fixture/`,
-  `expected.json`, optional `seed.json` (`url`/`feed_type`/`feed_url` and a `config`). `--seed-id`
-  reads as that seed would. Prints one JSON object — `events`, `requests` and, with expected
-  events, `pass` and a unified `diff`; exit 1 on a mismatch or any error. Capture the response
-  from inside the container (the adapter's own fetch, or Firecrawl), and keep it for the case.
+  every fetch answered from the capture (text answers blocked-page checked, so a captured challenge
+  fails here too), `--config` checked against its `params`. `--fixture` is one file —
+  `.json`, `.html`, `.ics`, … — answering every request, or a directory: with `index.json`
+  (`{"<URL as requested>": "<file>"}`) each request is answered by the URL it would fetch, params
+  included (`?page=2`; the bare URL as a fallback) — a listing and its detail pages; without one,
+  by the request's `page` param from `page-<N>.<ext>`. `--case DIR` is the layout a promotion
+  carries: `fixture.<ext>` or `fixture/`, `expected.json`, optional `seed.json`
+  (`url`/`feed_type`/`feed_url` and a `config`). `--seed-id` reads as that seed would. Prints one
+  JSON object — `events`, `requests` (each with `fetch` json/text/rendered and the `requested`
+  URL, the index key) and, with expected events, `pass` and a unified `diff`; exit 1 on a mismatch
+  or any error. Capture each response from inside the container (the live fetches themselves —
+  `engine.seed_adapters.fetch_json` / `fetch_text` / `fetch_rendered` — so the capture is what the
+  adapter will get), and keep it for the case. Example:
+  tests/fixtures/adapters/eventcards/ in the repo (HTML cards, paged, detail pages read).
 
 Then `set-adapter` (its dry run against the live source is the gate), or declare the seed's probed
 `feed_type` in `feed_types` and let `review` trial it. Promotion: event-find SKILL.md.

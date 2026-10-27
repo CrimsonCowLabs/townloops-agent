@@ -25,8 +25,9 @@ An adapter's events take the generic path below from step 3 unchanged — same
 `event_uid`, so a seed moved onto an adapter keeps its rows; nothing about approval or trust changes. The
 cancellation and judgement quote checks read the adapter's rows rendered as text. Anything short of the whole
 listing (a failed page, an answer without an events list, more pages than `max_pages`, a Showare `no action`, an adapter bug) is a
-failed run, never a zero. An adapter fetches the feed directly, not through Firecrawl, so its host must be in the
-town's `allowed_hosts` (egress). A town adds its own adapter as `$HERMES_HOME/adapters/<name>.py` exposing an
+failed run, never a zero. An adapter fetches the feed directly — JSON, or text for HTML cards and iCal; Firecrawl
+only through `get_rendered`, for a page scripts build — so its host must be in the town's `allowed_hosts` (egress);
+every answer is blocked-page checked. A town adds its own adapter as `$HERMES_HOME/adapters/<name>.py` exposing an
 `ADAPTER` (reader, `params`, `feed_types`) — tested with `event-seed-discovery test-adapter`, loaded beside the shared
 ones, a shared one of the same name winning (event-seed-discovery SKILL.md, Town adapters). A shared adapter is an
 `Adapter` entry in `seed_adapters.ADAPTERS`. Never a URL or hostname conditional in find.py.
@@ -37,8 +38,8 @@ Once a town adapter has read its seeds cleanly, the agent proposes it for every 
 `$HERMES_HOME/skill-proposals/engine-adapters/<name>/` holds
 
 - `<name>.py` — the adapter file as it runs in the town;
-- its case — `fixture.json` (or `fixture/page-<N>.json`), the response captured from inside the container (the
-  adapter's own fetch, or Firecrawl); `expected.json`, the events it reads as; `seed.json`, the seed's `url` (and
+- its case — `fixture.<ext>` or `fixture/` (`index.json` {requested URL: file}, or `page-<N>.<ext>`), the responses
+  captured from inside the container through the adapter's own fetches; `expected.json`, the events it reads as; `seed.json`, the seed's `url` (and
   `feed_type`/`feed_url`, `config`) — passing `test-adapter --adapter <name> --case <dir>`;
 - `PROPOSAL.md` — the seeds it reads, why generic fails them (evidence: counts, truncation, misses), and its results
   (trial counts, runs since `set-adapter`).

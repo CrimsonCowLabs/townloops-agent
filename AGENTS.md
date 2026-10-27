@@ -152,9 +152,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     adapters are `$HERMES_HOME/adapters/<name>.py` exposing `ADAPTER`, loaded at lookup by `registry()` — the one
     name resolver (`read`, `check_config`, `for_feed`, `seeds.set_adapter`/`assign_adapters`); a shared adapter of the
     same name wins (town copy `shadowed`), a broken file is skipped and named (`town_adapters().errors`), a reader that
-    raises is an `AdapterError`. `run_fixture`/`run_case` + `FixtureFeed` read a captured response with fetching
-    stubbed — `event-seed-discovery test-adapter` in a town, `tests/test_adapter_fixtures.py` over every
-    `tests/fixtures/adapters/<name>/` case here; helpers adapters import: `fetch_json`, `html_text`, `local_time`, `location`),
+    raises is an `AdapterError`. A reader gets a `Fetch`: called as `fetch(url, params)` it is the JSON fetch (old
+    `get_json` readers unchanged), plus `get_text` (HTML/iCal; `fetch_text`) and `get_rendered` (Firecrawl markdown via
+    `event_extract.firecrawl_listing`); every answer is `blocked_page`-checked. `run_fixture`/`run_case` + `FixtureFeed`
+    (a `Fetch` answering from a file, `index.json` {requested URL: file} or `page-<N>.<ext>`) read a capture with
+    no network — `event-seed-discovery test-adapter` in a town, `tests/test_adapter_fixtures.py` over every
+    `tests/fixtures/adapters/<name>/` case here (a case carrying `<name>.py` runs as a town adapter: `eventcards`);
+    helpers adapters import: `html_text`, `local_time`, `location`),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
     only as quote-checked sentences that name an access feature, else null; skipped with no fetch

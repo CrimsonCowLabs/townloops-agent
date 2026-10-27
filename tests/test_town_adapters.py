@@ -256,8 +256,111 @@ class TestFixtureFeed:
             (tmp_path / f"page-{n}.json").write_text(json.dumps({"n": n}))
         f = seed_adapters.FixtureFeed(tmp_path)
         assert f("u", {}) == {"n": 1} and f("u", {"page": 2}) == {"n": 2}
-        with pytest.raises(seed_adapters.AdapterError, match="page-3.json"):
+        with pytest.raises(seed_adapters.AdapterError, match=r"page-3\.\*"):
             f("u", {"page": 3})
+
+
+PAGE = ("<html><body><h1>Events</h1><div class='event-card'><h3>Trivia Night</h3>"
+        "<time datetime='2027-02-03T19:00:00'>Feb 3, 7pm</time></div>"
+        "<p>All events are free and open to the public.</p></body></html>")
+CHALLENGE = ("<html><head><title>Just a moment...</title></head><body>"
+             "<script>window._cf_chl_opt={cvId: '3'};</script></body></html>")
+
+
+class FakeResponse:
+    def __init__(self, text, status=200):
+        self.text, self.status_code, self.ok = text, status, status < 400
+
+
+class TestTextFetch:
+    """Readers get a `Fetch`: called as before it is the JSON fetch, plus
+    `get_text` (HTML/iCal…) and `get_rendered` (Firecrawl markdown)."""
+
+    def test_a_reader_reads_text_through_the_fetch_it_is_handed(self, home):
+        home("cards.py", '''
+            import re
+            from engine.seed_adapters import Adapter
+
+            def read(seed, config, fetch):
+                html = fetch.get_text(seed["url"])
+                return [{"title": t, "date": d} for t, d in re.findall(
+                    r"<h3>(.*?)</h3>\\s*<time datetime='(.*?)'", html)]
+
+            ADAPTER = Adapter(read, {})
+        ''')
+        fetch = seed_adapters.Fetch(text=lambda url, params: PAGE)
+        events = seed_adapters.read(seed(adapter="cards"), get_json=fetch).events
+        assert events == [{"title": "Trivia Night", "date": "2027-02-03T19:00:00"}]
+
+    def test_a_plain_json_fetch_still_works_and_is_wrapped(self, home):
+        home("clock.py", CLOCK)
+        got = []
+        seed_adapters.read(seed(), get_json=lambda url, params: got.append(url) or FEED)
+        assert got == ["https://lib.example/api"]
+
+    def test_the_live_text_fetch_returns_the_body(self, monkeypatch):
+        monkeypatch.setattr(seed_adapters.requests, "get",
+                            lambda url, params, timeout, headers: FakeResponse(PAGE))
+        assert seed_adapters.fetch_text("https://x.example/events") == PAGE
+
+    @pytest.mark.parametrize("body,status,why", [
+        (PAGE, 403, "http 403"),
+        (CHALLENGE, 200, "cloudflare"),
+        ("<html><body>Loading…</body></html>", 200, "near-empty"),
+    ])
+    def test_a_live_challenge_or_error_page_is_an_adapter_error(self, monkeypatch, body,
+                                                               status, why):
+        monkeypatch.setattr(seed_adapters.requests, "get",
+                            lambda url, params, timeout, headers: FakeResponse(body, status))
+        with pytest.raises(seed_adapters.AdapterError, match=why):
+            seed_adapters.fetch_text("https://x.example/events")
+
+    def test_the_rendered_fetch_is_firecrawls_listing_read(self, monkeypatch):
+        monkeypatch.setattr("engine.event_extract.firecrawl_listing",
+                            lambda url: (True, "# Events\n- Trivia", ""))
+        assert seed_adapters.fetch_rendered("https://x.example/") == "# Events\n- Trivia"
+        monkeypatch.setattr("engine.event_extract.firecrawl_listing",
+                            lambda url: (False, "", "cloudflare challenge"))
+        with pytest.raises(seed_adapters.AdapterError, match="firecrawl: cloudflare"):
+            seed_adapters.fetch_rendered("https://x.example/")
+
+
+class TestTextFixtures:
+    def test_a_dir_answers_text_by_page(self, tmp_path):
+        (tmp_path / "page-1.html").write_text(PAGE)
+        f = seed_adapters.FixtureFeed(tmp_path)
+        assert f.get_text("https://x.example/", {"page": 1}) == PAGE == f.get_rendered("u")
+        assert [r["fetch"] for r in f.requests] == ["text", "rendered"]
+
+    def test_an_index_answers_by_the_url_requested(self, tmp_path):
+        (tmp_path / "list.html").write_text(PAGE)
+        (tmp_path / "feed.ics").write_text("BEGIN:VCALENDAR\nSUMMARY:Trivia Night at the hall\n"
+                                           "DTSTART:20270203T190000\nEND:VCALENDAR\n")
+        (tmp_path / "index.json").write_text(json.dumps({
+            "https://x.example/events?page=2&cat=music": "list.html",
+            "https://x.example/cal.ics": "feed.ics"}))
+        f = seed_adapters.FixtureFeed(tmp_path)
+        assert f.get_text("https://x.example/events", {"page": 2, "cat": "music"}) == PAGE
+        assert "VCALENDAR" in f.get_text("https://x.example/cal.ics")
+        assert f.requests[0]["requested"] == "https://x.example/events?page=2&cat=music"
+        with pytest.raises(seed_adapters.AdapterError, match="page=3"):
+            f.get_text("https://x.example/events", {"page": 3, "cat": "music"})
+
+    def test_a_captured_challenge_page_fails_like_a_live_one(self, tmp_path):
+        (tmp_path / "fixture.html").write_text(CHALLENGE)
+        with pytest.raises(seed_adapters.AdapterError, match="cloudflare"):
+            seed_adapters.FixtureFeed(tmp_path / "fixture.html").get_text("https://x.example/")
+
+    def test_the_html_case_runs_through_test_adapter(self, home):
+        case = CASES / "eventcards"
+        home("eventcards.py", (case / "eventcards.py").read_text())
+        rc, out = cli("test-adapter", "--adapter", "eventcards", "--case", str(case))
+        got = _last(out)
+        assert rc == 0 and got["pass"] is True and len(got["events"]) == 3
+        assert [r["requested"] for r in got["requests"]][:3] == [
+            "https://chamber.example/events/?page=1",
+            "https://chamber.example/events/business-after-hours",
+            "https://chamber.example/events/spring-job-fair"]
 
 
 class TestTestAdapterCli:

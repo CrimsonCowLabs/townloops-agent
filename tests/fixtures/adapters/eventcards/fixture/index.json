@@ -1,0 +1,7 @@
+{
+ "https://chamber.example/events/?page=1": "listing-1.html",
+ "https://chamber.example/events/?page=2": "listing-2.html",
+ "https://chamber.example/events/business-after-hours": "business-after-hours.html",
+ "https://chamber.example/events/spring-job-fair": "spring-job-fair.html",
+ "https://chamber.example/events/ribbon-cutting-bakery": "ribbon-cutting-bakery.html"
+}

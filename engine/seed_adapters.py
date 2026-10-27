@@ -50,7 +50,7 @@ from urllib.parse import parse_qsl, urljoin, urlsplit
 import requests
 from dateutil import tz as _tz
 
-from engine import blocked_page
+from engine import blocked_page, event_extract
 from engine.derive_helpers import is_http_url
 from engine.event_extract import town_tz_name
 from engine.research import UA
@@ -79,14 +79,17 @@ def adapter_of(seed: dict) -> str:
     return seed.get("adapter") or GENERIC
 
 
-def read(seed: dict, get_json: Optional[GetJson] = None) -> Listing:
+def read(seed: dict, get_json: Union["Fetch", GetJson, None] = None) -> Listing:
+    """`get_json`: a `Fetch`, or a plain JSON fetch (the text and rendered
+    fetches stay live) — None is the live `Fetch`."""
     key = adapter_of(seed)
     adapter = registry().get(key)
     if adapter is None:
         raise AdapterError(why_unknown(key))
     config = _config(seed)
+    fetch = get_json if isinstance(get_json, Fetch) else Fetch(json=get_json)
     try:
-        events = adapter.read(seed, config, get_json or fetch_json)
+        events = adapter.read(seed, config, fetch)
     except AdapterError:
         raise
     except Exception as e:  # noqa: BLE001 — a reader's bug is a failed read, never a crash
@@ -122,6 +125,56 @@ def fetch_json(url: str, params: dict) -> dict:
             pass
     # An error status, or a challenge / `no action` answered 200, is named.
     raise AdapterError(blocked_page.reason(r.text, r.status_code) or "response is not JSON")
+
+
+def fetch_text(url: str, params: Optional[dict] = None) -> str:
+    """The body as fetched (HTML, iCal, CSV…) — the same direct request as
+    `fetch_json`. An error status or a challenge / error / near-empty page
+    (engine/blocked_page) is an AdapterError, never a page that lists nothing."""
+    try:
+        r = requests.get(url, params=params or {}, timeout=TIMEOUT_S, headers={"User-Agent": UA})
+    except requests.RequestException as e:
+        raise AdapterError(f"{type(e).__name__}: {e}") from None
+    blocked = blocked_page.reason(r.text, r.status_code)
+    if blocked:
+        raise AdapterError(blocked)
+    return r.text
+
+
+def fetch_rendered(url: str) -> str:
+    """The page as the local Firecrawl renders it (markdown, scripts run) —
+    for a calendar a browser builds. event-find's own listing read, blocked
+    pages included; it spends Firecrawl budget, so only for what a direct
+    fetch can't read."""
+    ok, md, err = event_extract.firecrawl_listing(url)
+    if not ok:
+        raise AdapterError(f"firecrawl: {err}")
+    return md
+
+
+class Fetch:
+    """What a reader fetches with. Called as `fetch(url, params)` it is the
+    JSON fetch — so a reader written as `read(seed, config, get_json)` works
+    unchanged — plus `get_text(url, params=None)` → the body as text and
+    `get_rendered(url)` → Firecrawl markdown. Each fetch is the live one
+    unless given; the live ones are looked up per call."""
+
+    def __init__(self, json: Optional[GetJson] = None,
+                 text: Optional[Callable[..., str]] = None,
+                 rendered: Optional[Callable[[str], str]] = None):
+        self._json, self._text, self._rendered = json, text, rendered
+
+    def __call__(self, url: str, params: dict) -> dict:
+        return self.get_json(url, params)
+
+    def get_json(self, url: str, params: dict) -> dict:
+        return (self._json or fetch_json)(url, params)
+
+    def get_text(self, url: str, params: Optional[dict] = None) -> str:
+        return (self._text or fetch_text)(url, params or {})
+
+    def get_rendered(self, url: str) -> str:
+        return (self._rendered or fetch_rendered)(url)
 
 
 def _page_entry(e: dict) -> str:
@@ -392,10 +445,12 @@ def _positive_int(v) -> Optional[str]:
 
 @dataclass(frozen=True)
 class Adapter:
-    """`read(seed, config, get_json)` → the whole listing's events;
-    `params`, the settings its config may hold; `feed_types`, the probed
-    `event_seeds.feed_type`s (engine/feed_probe) it reads as they are."""
-    read: Callable[[dict, dict, GetJson], list[dict]]
+    """`read(seed, config, fetch)` → the whole listing's events (`fetch`: a
+    `Fetch` — called as `fetch(url, params)` it is the JSON fetch, plus
+    `fetch.get_text` / `fetch.get_rendered`); `params`, the settings its
+    config may hold; `feed_types`, the probed `event_seeds.feed_type`s
+    (engine/feed_probe) it reads as they are."""
+    read: Callable[[dict, dict, Fetch], list[dict]]
     params: dict[str, Param]
     feed_types: tuple[str, ...] = ()
 
@@ -557,28 +612,85 @@ def check_config(adapter: str, config: dict) -> None:
 FIXTURE_SEED_URL = "https://fixture.invalid/"
 
 
-class FixtureFeed:
-    """A captured source answering an adapter's `get_json`: a JSON file
-    answers every request; a directory answers each by its `page` param
-    from `page-<N>.json` (no `page` is page 1). `requests` is what the
-    adapter asked for."""
+FIXTURE_INDEX = "index.json"
+
+
+def request_url(url: str, params: Optional[dict] = None) -> str:
+    """The URL a fetch of `url` with `params` requests — a fixture index's key."""
+    prepared = requests.models.PreparedRequest()
+    try:
+        prepared.prepare_url(url, params or {})
+    except requests.RequestException:      # not a fetchable URL: keyed as given
+        return url
+    return prepared.url
+
+
+class FixtureFeed(Fetch):
+    """A captured source answering every fetch (`get_json`, `get_text`,
+    `get_rendered`), no network:
+    - a file (`fixture.json`, `.html`, `.ics`, …) answers every request;
+    - a directory with `index.json` — {request URL: file name} — answers
+      each by the URL it would fetch (`request_url`; the URL without its
+      params as a fallback): an HTML listing and its detail pages;
+    - any other directory answers by the request's `page` param from
+      `page-<N>.<ext>` (no `page` is page 1).
+    A text answer is checked like a live one (engine/blocked_page), so a
+    captured challenge page fails here too. `requests` is what was asked."""
 
     def __init__(self, path: Union[str, Path]):
+        super().__init__()
         self.path = Path(path)
         self.requests: list[dict] = []
 
-    def __call__(self, url: str, params: dict) -> dict:
-        self.requests.append({"url": url, "params": dict(params)})
-        file = (self.path / f"page-{params.get('page', 1)}.json" if self.path.is_dir()
-                else self.path)
+    def _file(self, url: str, params: dict) -> Path:
+        if not self.path.is_dir():
+            return self.path
+        index = self.path / FIXTURE_INDEX
+        if index.exists():
+            try:
+                files = json.loads(index.read_text())
+            except ValueError as e:
+                raise AdapterError(f"fixture {FIXTURE_INDEX} is not JSON: {e}") from None
+            name = files.get(request_url(url, params)) or files.get(url)
+            if not name:
+                raise AdapterError(f"fixture {FIXTURE_INDEX} has no {request_url(url, params)}")
+            return self.path / name
+        page = params.get("page", 1)
+        found = sorted(p for p in self.path.glob(f"page-{page}.*") if p.name != FIXTURE_INDEX)
+        if not found:
+            raise AdapterError(f"fixture has no page-{page}.* file")
+        return found[0]
+
+    def _read(self, kind: str, url: str, params: Optional[dict]) -> tuple[str, str]:
+        params = dict(params or {})
+        self.requests.append({"fetch": kind, "url": url, "params": params,
+                              "requested": request_url(url, params)})
+        file = self._file(url, params)
         try:
-            text = file.read_text()
+            return file.name, file.read_text()
         except OSError:
             raise AdapterError(f"fixture has no {file.name}") from None
+
+    def get_json(self, url: str, params: dict) -> dict:
+        name, text = self._read("json", url, params)
         try:
             return json.loads(text)
         except ValueError as e:
-            raise AdapterError(f"fixture {file.name} is not JSON: {e}") from None
+            raise AdapterError(f"fixture {name} is not JSON: {e}") from None
+
+    def get_text(self, url: str, params: Optional[dict] = None) -> str:
+        _, text = self._read("text", url, params)
+        blocked = blocked_page.reason(text, 200)
+        if blocked:
+            raise AdapterError(blocked)
+        return text
+
+    def get_rendered(self, url: str) -> str:
+        _, text = self._read("rendered", url, None)
+        blocked = blocked_page.reason(text, 200)
+        if blocked:
+            raise AdapterError(f"firecrawl: {blocked}")
+        return text
 
 
 @dataclass(frozen=True)
@@ -614,15 +726,17 @@ def run_fixture(adapter: str, fixture: Union[str, Path], *, seed: Optional[dict]
 def run_case(adapter: str, case: Union[str, Path], *, seed: Optional[dict] = None,
              config: Optional[dict] = None, expected: Optional[list] = None) -> FixtureRun:
     """A case directory — tests/fixtures/adapters/<name>/, and what a
-    promotion proposal carries: `fixture.json` or `fixture/page-<N>.json`
-    (the capture), `expected.json` (the events it must read as) and,
-    optionally, `seed.json` (the seed's url/feed_type/feed_url and a
-    `config`). `seed`, `config` and `expected` given here win over the
-    case's own."""
+    promotion proposal carries: the capture — one `fixture.<ext>` file or a
+    `fixture/` directory (`FixtureFeed`) — `expected.json` (the events it
+    must read as) and, optionally, `seed.json` (the seed's
+    url/feed_type/feed_url and a `config`). `seed`, `config` and `expected`
+    given here win over the case's own."""
     case = Path(case)
-    fixture = case / "fixture" if (case / "fixture").is_dir() else case / "fixture.json"
-    if not fixture.exists():
-        raise ValueError(f"{case} has no fixture.json or fixture/ directory")
+    found = [case / "fixture"] if (case / "fixture").is_dir() else sorted(case.glob("fixture.*"))
+    if len(found) != 1:
+        raise ValueError(f"{case} needs one capture: a fixture/ directory or one fixture.<ext> "
+                         f"file (found {len(found)})")
+    fixture = found[0]
     try:
         stored = (json.loads((case / "seed.json").read_text())
                   if (case / "seed.json").exists() else {})

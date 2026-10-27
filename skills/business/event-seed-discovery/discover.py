@@ -600,8 +600,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     src = ta.add_mutually_exclusive_group(required=True)
     src.add_argument("--case", help="dir: fixture.json or fixture/page-<N>.json, expected.json, "
                                     "optional seed.json")
-    src.add_argument("--fixture", help="one captured JSON response (answers every request), or "
-                                       "a dir of page-<N>.json answered by the `page` param")
+    src.add_argument("--fixture", help="one captured response file (.json/.html/.ics/…, answers "
+                                       "every request), or a dir: index.json {URL: file}, else "
+                                       "page-<N>.<ext> answered by the `page` param")
     ta.add_argument("--expected", help="JSON list of the events it must read as")
     ta.add_argument("--config", help="adapter settings as a JSON object")
     ta.add_argument("--seed-id", type=int, help="read as this seed would (its url, probed feed)")
