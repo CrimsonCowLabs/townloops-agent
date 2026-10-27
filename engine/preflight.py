@@ -28,7 +28,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
-from engine import autonomy, db, firecrawl_env, policy
+from engine import autonomy, db, egress, firecrawl_env, policy
 from engine.derive_helpers import load_town_profile
 from engine.ingest_core import DEFAULT_TZ_NAME
 
@@ -73,6 +73,7 @@ def run(client=None, *, profile: Optional[dict] = None,
     _circuit(out)
     _firecrawl(http_get or _http_get, out)
     _codex(out)
+    _agent_egress(out)
     _timezone(profile or {}, out)
     _listmonk(listmonk, out)
     if s.autonomous and not (_env("TELEGRAM_BOT_TOKEN") and _env("TELEGRAM_CHAT_ID")):
@@ -247,6 +248,22 @@ def _codex(out: list[Finding]) -> None:
         out.append(Finding(ERROR, "codex-login-missing", f"{home}/auth.json (CODEX_HOME)",
                            "no Codex CLI login — every LLM step (event finding, judgement) "
                            "no-ops; run `codex login` on the host"))
+
+
+def _agent_egress(out: list[Finding]) -> None:
+    """The hosts the agent opened for itself (egress-hosts) — listed, so the
+    operator sees them; an entry the sync will skip is a warning."""
+    path = egress.agent_hosts_path()
+    where = f"$HERMES_HOME/{egress.AGENT_HOSTS.as_posix()}: hosts"
+    notes: list[str] = []
+    hosts = egress.agent_hosts(path, _env("TOWNLOOPS_TOWN_SLUG") or "town", notes.append)
+    if hosts:
+        out.append(Finding(INFO, "egress-agent-hosts", where,
+                           f"the agent opened {len(hosts)} host(s) beyond town-profile.yaml's "
+                           f"allowed_hosts: {', '.join(hosts)}", {"hosts": hosts}))
+    for n in notes:
+        out.append(Finding(WARNING, "egress-agent-host-invalid", where,
+                           f"skipped by the egress sync, so not reachable: {n}"))
 
 
 def _timezone(profile: dict, out: list[Finding]) -> None:

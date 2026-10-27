@@ -13,6 +13,8 @@
 # any town's allowed_hosts:
 #   bin/townloops-agent-add --egress
 #   docker exec squid-egress squid -k reconfigure
+# (bin/townloops-egress-sync on the operator's crontab does both, and applies
+# the hosts each town's agent adds in hermes-home/egress/allowed_hosts.yaml.)
 # A host every agent needs belongs in engine/egress.py's PLATFORM block.
 # Set TOWNLOOPS_AGENTS_ROOT the same for the generator and for `up`.
 # (./squid.conf next to this file is the legacy hand-written list, no longer

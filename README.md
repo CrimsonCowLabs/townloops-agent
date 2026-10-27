@@ -66,7 +66,7 @@ The dashboard has two views:
 Shared panels:
 - **Newsletter** — preview current-week HTML draft (sandboxed iframe); "Push to Listmonk" with typed confirmation.
 - **Reports** — renders nightly-digest markdown files as HTML.
-- **Blocked** — squid egress log tail, grouped by denied host → guides which domains to add to `allowed_hosts` (then `bin/townloops-agent-add --egress` + reload Squid).
+- **Blocked** — squid egress log tail, grouped by denied host → guides which domains to add to `allowed_hosts` (then `bin/townloops-agent-add --egress` + reload Squid, or let `bin/townloops-egress-sync` on the operator's crontab do both — it also applies the hosts a town's agent adds itself via `egress-hosts`; see docs/vps-quickstart.md).
 
 Auth is single-password bcrypt with a signed session cookie (`HttpOnly`, `SameSite=Strict`, 30-day TTL). Set `DASHBOARD_COOKIE_SECURE=true` in `.env` when fronting with TLS.
 

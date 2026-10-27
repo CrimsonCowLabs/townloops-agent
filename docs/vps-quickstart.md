@@ -264,6 +264,23 @@ The Squid allowlist lives at `~/townloops-agents/_egress/squid.conf`
 same way for the generator and for `docker compose up`). It's generated;
 never edit it.
 
+**Let the agents' own hosts through: install the egress sync.** Each town's
+agent can open a host its town needs (an event API behind a calendar page)
+with its `egress-hosts` skill; that writes
+`~/townloops-agents/<slug>/hermes-home/egress/allowed_hosts.yaml`, for that
+town only. `bin/townloops-egress-sync` recompiles the allowlist and, only if
+it changed, checks it (`squid -k parse`) and reloads Squid. Add it to your
+crontab (`crontab -e`), every 5 minutes:
+
+```
+*/5 * * * * $HOME/workspace/townloops-agent/bin/townloops-egress-sync >> $HOME/townloops-agents/_egress/sync.log 2>&1
+```
+
+It's silent when nothing changed and logs one line when it applies (plus a
+note for any agent entry it skipped). Set `TOWNLOOPS_AGENTS_ROOT` on the
+crontab line too if you use it. The nightly digest lists what each agent
+opened, and `town-init preflight` lists a town's agent-added hosts.
+
 **Upgrading a server set up before the allowlist moved out of the repo?**
 Once: run `./bin/townloops-agent-add --egress`, then
 `docker compose -f templates/_shared/egress/docker-compose.yml up -d` —
@@ -662,12 +679,14 @@ overwrites it. To allow a website:
    ./bin/townloops-agent-add --egress
    ```
 
-3. Tell Squid to reload it (this never happens automatically — it's shared
-   by every town on the server):
+3. Tell Squid to reload it (it's shared by every town on the server):
 
    ```
    docker exec squid-egress squid -k reconfigure
    ```
+
+   With the egress sync on your crontab (above), skip steps 2–3: it does
+   both within 5 minutes.
 
 Reloading doesn't interrupt running agents; the website becomes reachable
 on the next connection. (If `squid-egress` was created before the allowlist

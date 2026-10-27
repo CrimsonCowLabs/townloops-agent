@@ -52,7 +52,8 @@ All jobs except the newsletter and sponsor digests run as raw subprocesses (`no_
 ## Operating mode
 I run in **hardened autonomous mode**:
 - `HERMES_YOLO_MODE=1` — approval prompts are bypassed by design. Safety comes from the sandbox, not from me stopping to ask.
-- HTTP egress goes through a Squid allowlist (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk, and hosts declared in `town-profile.yaml.allowed_hosts`). Anything not on that list gets a 403 from the proxy. The local Firecrawl is reached in-network, not through the proxy.
+- HTTP egress goes through a Squid allowlist (OpenAI/ChatGPT, TownLoops, Telegram, Listmonk, hosts declared in `town-profile.yaml.allowed_hosts`, and the ones I added). Anything not on that list gets a 403 from the proxy. The local Firecrawl is reached in-network, not through the proxy.
+- I may open a host my town needs — an adapter's API, a feed — with `egress-hosts add HOST --reason …` (plus `--seed-id`/`--evidence`): the narrowest bare hostname that works, never a wildcard, IP or public suffix, for my town only. It's reachable only after the host-side sync applies it (a few minutes); I retry then, and if it's still a proxy 403 I tell the operator rather than add it again. I `remove` a host when the seed that needed it goes.
 - Container is non-root, read-only rootfs, no host network, no docker.sock, `cap_drop: ALL`.
 - Compromise blast radius: this town's `state/townloops.db`, this town's TownLoops bearer, the allowlisted hosts. Nothing on the host, nothing on other towns.
 
@@ -96,6 +97,7 @@ There is no phase machine. Progress lives in the `events` table (each row's `sta
 - Cancellations (operator-gated): `event-cancellations`
 - Operator surface: `operator-status`, `operator-list-events`, `operator-review-event`, `operator-audit-upcoming`, `operator-audit-listing-websites`, `operator-audit-source-attribution`, `listing-website-cleanup`, `operator-bulk-approve`, `operator-bulk-decline`, `operator-requeue`
 - Bootstrap / health: `town-init`
+- Outbound hosts my town needs (Squid allowlist): `egress-hosts`
 - Legacy structured-source ingest (unscheduled): `event-ingest`
 - Newsletter: `newsletter-weekly`
 - Sponsors/ads: `sponsor-management` (only when `SPONSORS_ENABLED=true`)

@@ -24,7 +24,7 @@ from typing import Callable, Optional
 
 import requests
 
-from engine import autonomy
+from engine import autonomy, egress
 from engine import db as _db
 from engine.derive_helpers import load_town_profile, parse_extra_json
 from engine import event_detail, event_groups, event_provenance
@@ -457,6 +457,16 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         md_lines += [f"- {p['name']} (#{p['seed_id']}) — {p['feed_type']} feed, "
                      f"{p['trial_events']} events in a dry run — `{p['command']}`"
                      for p in proposals]
+    # Hosts the agent opened or closed for itself (egress-hosts skill).
+    egress_changes = egress.recent_changes(conn, cutoff)
+    if egress_changes:
+        md_lines += ["", "## Egress hosts opened",
+                     "The agent changed this town's Squid allowlist (applied by the host-side "
+                     "sync; `egress-hosts list` shows every host with its reason):"]
+        md_lines += [f"- {'added' if c['action'] == 'add' else 'removed'} {c['host']}"
+                     + (f" — {c['reason']}" if c["reason"] else "")
+                     + (f" (seed #{c['seed_id']})" if c["seed_id"] else "") for c in egress_changes]
+    egress_added = sum(c["action"] == "add" for c in egress_changes)
 
     report_dir = Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "reports"
     report_dir.mkdir(parents=True, exist_ok=True)
@@ -483,6 +493,8 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         + (f"held for an implausible time: {len(times_held)}\n" if times_held else "")
         + (f"live with a source mismatch: {len(provenance_live)}\n" if provenance_live else "")
         + (f"live end times to clear: {len(ends)}\n" if ends else "")
+        + (f"egress hosts: +{egress_added} added, {len(egress_changes) - egress_added} removed\n"
+           if egress_changes else "")
     )
     if auto:
         tg += moderation.digest_telegram(auto)
@@ -500,6 +512,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "provenance_live": provenance_live,
         "times_held": times_held,
         "unclearable_ends": ends,
+        "egress_changes": egress_changes,
         "shipped": shipped_counts,
         "workqueue": wq,
         **({"autonomy": auto} if auto else {}),
