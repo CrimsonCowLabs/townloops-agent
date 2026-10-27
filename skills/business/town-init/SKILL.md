@@ -22,9 +22,9 @@ One-shot bootstrap + status dashboard for the town this agent operates.
 ## Commands
 
 ```
-python skills/business/town-init/init.py setup
-python skills/business/town-init/init.py preflight [--json]
-python skills/business/town-init/init.py status
+$PYTHON $HERMES_HOME/skills/business/town-init/init.py setup
+$PYTHON $HERMES_HOME/skills/business/town-init/init.py preflight [--json]
+$PYTHON $HERMES_HOME/skills/business/town-init/init.py status
 ```
 
 ### `setup`

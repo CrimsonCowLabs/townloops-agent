@@ -78,23 +78,23 @@ The local DB kept the older column names (predates the API landing). Translation
 
 ```
 # Note: --image-alt is REQUIRED (accessibility mandate on the API).
-python skills/business/sponsor-management/sponsors.py add-sponsor \
+$PYTHON $HERMES_HOME/skills/business/sponsor-management/sponsors.py add-sponsor \
     --name "Alibi Ale Works" --kind business --tier gold \
     --link-url https://alibialeworks.com \
     --image-url https://.../logo.png \
     --image-alt "Alibi Ale Works logo — pint glass over Lake Tahoe" \
     --blurb "Craft brewery on Ski Run Blvd."
 
-python skills/business/sponsor-management/sponsors.py list-sponsors
+$PYTHON $HERMES_HOME/skills/business/sponsor-management/sponsors.py list-sponsors
 
 # --starts-at is REQUIRED for ad-slots (server's natural-key de-dup).
-python skills/business/sponsor-management/sponsors.py assign \
+$PYTHON $HERMES_HOME/skills/business/sponsor-management/sponsors.py assign \
     --sponsor <sponsor_uid|slug> \
     --placement homepage \
     --starts-at 2026-07-14T00:00:00Z --ends-at 2026-10-31T23:59:59Z \
     --priority 100
 
-python skills/business/sponsor-management/sponsors.py audit
+$PYTHON $HERMES_HOME/skills/business/sponsor-management/sponsors.py audit
 ```
 
 ## The Monday audit

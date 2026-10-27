@@ -10,9 +10,9 @@ Turns the coming week's published TownLoops events into an HTML campaign and han
 ## Commands
 
 ```
-python skills/business/newsletter-weekly/newsletter.py compose --week 2026-W28
-python skills/business/newsletter-weekly/newsletter.py push    --week 2026-W28 [--send-at ISO]
-python skills/business/newsletter-weekly/newsletter.py show    --week 2026-W28
+$PYTHON $HERMES_HOME/skills/business/newsletter-weekly/newsletter.py compose --week 2026-W28
+$PYTHON $HERMES_HOME/skills/business/newsletter-weekly/newsletter.py push    --week 2026-W28 [--send-at ISO]
+$PYTHON $HERMES_HOME/skills/business/newsletter-weekly/newsletter.py show    --week 2026-W28
 ```
 
 - `compose` — queries `GET /api/v1/towns/<slug>/events?from=<mon>&to=<sun>&status=published`, renders `template.html`, writes `state/newsletters/<week>.html`, logs `status='draft'` in the `newsletters` table. Prints `{"week", "events", "entries", "series", "singletons", "body"}` — `events` is raw occurrences, `entries` what the reader sees.

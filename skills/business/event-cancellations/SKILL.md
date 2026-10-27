@@ -44,10 +44,10 @@ the marker off the title so it still matches its row, and then:
 ## CLI
 
 ```bash
-python skills/business/event-cancellations/cancellations.py list
-python skills/business/event-cancellations/cancellations.py propose-confirm [--uid U ...]
-python skills/business/event-cancellations/cancellations.py propose-dismiss [--uid U ...]
-python skills/business/event-cancellations/cancellations.py apply [--limit N]   # cron
+$PYTHON $HERMES_HOME/skills/business/event-cancellations/cancellations.py list
+$PYTHON $HERMES_HOME/skills/business/event-cancellations/cancellations.py propose-confirm [--uid U ...]
+$PYTHON $HERMES_HOME/skills/business/event-cancellations/cancellations.py propose-dismiss [--uid U ...]
+$PYTHON $HERMES_HOME/skills/business/event-cancellations/cancellations.py apply [--limit N]   # cron
 ```
 
 - `list` — flagged events (`possibly-cancelled`, or `apply-failed`), soonest

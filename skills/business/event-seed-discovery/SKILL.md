@@ -17,23 +17,23 @@ approve, reject, or edit in the dashboard's Seeds panel.
 ## CLI
 
 ```bash
-python skills/business/event-seed-discovery/discover.py discover
-python skills/business/event-seed-discovery/discover.py discover --limit N
-python skills/business/event-seed-discovery/discover.py discover --dry-run
-python skills/business/event-seed-discovery/discover.py show
-python skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
-python skills/business/event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config JSON]  # dry-run first; or generic
-python skills/business/event-seed-discovery/discover.py review [--trials N] [--moves N] [--adapters N]
-python skills/business/event-seed-discovery/discover.py probe [--limit N] # seeds never probed
-python skills/business/event-seed-discovery/discover.py probe --all       # re-probe every seed
-python skills/business/event-seed-discovery/discover.py probe --seed-id N
-python skills/business/event-seed-discovery/discover.py health            # seeds with a source-health alert
-python skills/business/event-seed-discovery/discover.py health --ack N    # accept seed N's new event count
-python skills/business/event-seed-discovery/discover.py move --seed-id N --url URL [--note TEXT]
-python skills/business/event-seed-discovery/discover.py hold --seed-id N --reason manual-only|awaiting-adapter [--note TEXT]
-python skills/business/event-seed-discovery/discover.py release --seed-id N
-python skills/business/event-seed-discovery/discover.py restore --seed-id N [--previous-url]
-python skills/business/event-seed-discovery/discover.py retire --seed-id N [--reason TEXT]
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover --limit N
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover --dry-run
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py show
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config JSON]  # dry-run first; or generic
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py review [--trials N] [--moves N] [--adapters N]
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py probe [--limit N] # seeds never probed
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py probe --all       # re-probe every seed
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py probe --seed-id N
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py health            # seeds with a source-health alert
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py health --ack N    # accept seed N's new event count
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py move --seed-id N --url URL [--note TEXT]
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py hold --seed-id N --reason manual-only|awaiting-adapter [--note TEXT]
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py release --seed-id N
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py restore --seed-id N [--previous-url]
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py retire --seed-id N [--reason TEXT]
 ```
 
 `discover` runs LLM discovery, HEAD-verifies each URL, and inserts survivors

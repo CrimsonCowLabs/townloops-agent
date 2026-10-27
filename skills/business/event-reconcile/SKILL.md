@@ -85,10 +85,10 @@ duplicate. Live-mirrored entities are never re-POSTed.
 ## CLI
 
 ```bash
-python skills/business/event-reconcile/reconcile.py                 # = run
-python skills/business/event-reconcile/reconcile.py run --dry-run   # classify + print, write nothing
-python skills/business/event-reconcile/reconcile.py run --seed-id 9 --skip-enrich
-python skills/business/event-reconcile/reconcile.py enrich          # re-enrich all pending staged rows
+$PYTHON $HERMES_HOME/skills/business/event-reconcile/reconcile.py                 # = run
+$PYTHON $HERMES_HOME/skills/business/event-reconcile/reconcile.py run --dry-run   # classify + print, write nothing
+$PYTHON $HERMES_HOME/skills/business/event-reconcile/reconcile.py run --seed-id 9 --skip-enrich
+$PYTHON $HERMES_HOME/skills/business/event-reconcile/reconcile.py enrich          # re-enrich all pending staged rows
 ```
 
 Flags: `--horizon-days N` (180), `--max-lookups N` (80); `run` also takes

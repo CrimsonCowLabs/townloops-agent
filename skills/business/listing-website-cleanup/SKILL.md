@@ -22,9 +22,9 @@ to see the scope.
 ## CLI
 
 ```bash
-python skills/business/listing-website-cleanup/cleanup.py list
-python skills/business/listing-website-cleanup/cleanup.py propose-clear [--uid T ...]
-python skills/business/listing-website-cleanup/cleanup.py apply [--limit 20]
+$PYTHON $HERMES_HOME/skills/business/listing-website-cleanup/cleanup.py list
+$PYTHON $HERMES_HOME/skills/business/listing-website-cleanup/cleanup.py propose-clear [--uid T ...]
+$PYTHON $HERMES_HOME/skills/business/listing-website-cleanup/cleanup.py apply [--limit 20]
 ```
 
 - `list` — every clear: `status`, what `changed`, `reenrich` and the

@@ -29,9 +29,9 @@ skill's `tick` is an equivalent entry point.
 ## Commands
 
 ```
-python skills/business/onboarding-orchestrator/orchestrate.py tick
-python skills/business/onboarding-orchestrator/orchestrate.py status
-python skills/business/onboarding-orchestrator/orchestrate.py finalize
+$PYTHON $HERMES_HOME/skills/business/onboarding-orchestrator/orchestrate.py tick
+$PYTHON $HERMES_HOME/skills/business/onboarding-orchestrator/orchestrate.py status
+$PYTHON $HERMES_HOME/skills/business/onboarding-orchestrator/orchestrate.py finalize
 ```
 
 - `tick` — drains the workqueue once. Exit 0 on success, 1 on lock contention.

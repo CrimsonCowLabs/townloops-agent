@@ -22,12 +22,12 @@ This skill reads the local event-first review database, not the complete catalog
 ## CLI
 
 ```bash
-python skills/business/operator-list-events/list.py
-python skills/business/operator-list-events/list.py --status approved
-python skills/business/operator-list-events/list.py --status pending --limit 5
-python skills/business/operator-list-events/list.py --status pending --before 2026-08-15
-python skills/business/operator-list-events/list.py --source "chamber"
-python skills/business/operator-list-events/list.py --series trivia-thursday
+$PYTHON $HERMES_HOME/skills/business/operator-list-events/list.py
+$PYTHON $HERMES_HOME/skills/business/operator-list-events/list.py --status approved
+$PYTHON $HERMES_HOME/skills/business/operator-list-events/list.py --status pending --limit 5
+$PYTHON $HERMES_HOME/skills/business/operator-list-events/list.py --status pending --before 2026-08-15
+$PYTHON $HERMES_HOME/skills/business/operator-list-events/list.py --source "chamber"
+$PYTHON $HERMES_HOME/skills/business/operator-list-events/list.py --series trivia-thursday
 ```
 
 - `--status`: `pending`, `approved`, `declined`, or `shipped` (default `pending`)

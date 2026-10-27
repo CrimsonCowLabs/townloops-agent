@@ -20,11 +20,11 @@ Owns the agent's contract-of-record with TownLoops's REST API. Three concerns:
 ## Commands
 
 ```
-python skills/business/townloops-api/api.py snapshot [--url URL]
-python skills/business/townloops-api/api.py diff [--against PATH]
-python skills/business/townloops-api/api.py check [--url URL]
-python skills/business/townloops-api/api.py describe <resource>
-python skills/business/townloops-api/api.py query <resource> \
+$PYTHON $HERMES_HOME/skills/business/townloops-api/api.py snapshot [--url URL]
+$PYTHON $HERMES_HOME/skills/business/townloops-api/api.py diff [--against PATH]
+$PYTHON $HERMES_HOME/skills/business/townloops-api/api.py check [--url URL]
+$PYTHON $HERMES_HOME/skills/business/townloops-api/api.py describe <resource>
+$PYTHON $HERMES_HOME/skills/business/townloops-api/api.py query <resource> \
     [--filter K=V ...] [--from ISO] [--to ISO] [--order-by KEY] \
     [--limit N] [--offset N] [--all]
 ```
@@ -46,7 +46,7 @@ The query helper builds `TOWNLOOPS_API_URL + /towns/{slug}/{resource}`. Therefor
 
 ```bash
 TOWNLOOPS_API_URL=https://townloops.com/api/v1 \
-  python skills/business/townloops-api/api.py query events \
+  $PYTHON $HERMES_HOME/skills/business/townloops-api/api.py query events \
   --filter status=published --from 2026-10-06 --to 2026-10-12 --all
 ```
 

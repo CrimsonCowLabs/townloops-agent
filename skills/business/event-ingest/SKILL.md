@@ -37,7 +37,7 @@ For requests such as “find events,” “review sources,” “collect current
 ## Commands
 
 ```
-python skills/business/event-ingest/ingest.py <subcommand> [flags]
+$PYTHON $HERMES_HOME/skills/business/event-ingest/ingest.py <subcommand> [flags]
 ```
 
 | Subcommand | What it does |
@@ -60,8 +60,8 @@ python skills/business/event-ingest/ingest.py <subcommand> [flags]
 The legacy pipeline can be run manually as:
 
 ```bash
-python skills/business/event-ingest/ingest.py ingest \
-  && python skills/business/event-ingest/ingest.py ship
+$PYTHON $HERMES_HOME/skills/business/event-ingest/ingest.py ingest \
+  && $PYTHON $HERMES_HOME/skills/business/event-ingest/ingest.py ship
 ```
 
 Do not use that chain as the default town event job. The active event-first scheduler runs seed discovery, `event-find`, operator review, workqueue derivation/enrichment, and `event-ship`. Legacy `ingest` writes legacy-owned rows into `state/townloops.db`; legacy `ship` reads and publishes their deltas.
