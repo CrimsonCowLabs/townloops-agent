@@ -22,10 +22,21 @@ here.
 ## CLI
 
 ```bash
-python skills/business/operator-audit-source-attribution/audit.py                     # every live event
-python skills/business/operator-audit-source-attribution/audit.py --upcoming
-python skills/business/operator-audit-source-attribution/audit.py --since 2026-10-01 --limit 50
-python skills/business/operator-audit-source-attribution/audit.py --max-fetches 2000
+A=$HERMES_HOME/skills/business/operator-audit-source-attribution/audit.py
+$PYTHON $A                                  # every live event
+$PYTHON $A --upcoming
+$PYTHON $A --since 2026-10-01 --limit 50
+$PYTHON $A --max-fetches 2000
+```
+
+`$PYTHON` is `/usr/bin/python3`, the system Python that has the skill's
+dependencies; there is no bare `python` on the container's PATH. From the host,
+a whole-town sweep (slow, so run it in a shell, not a chat turn) is:
+
+```bash
+docker exec -w /app townloops-agent-<slug> /usr/bin/python3 \
+  /home/agent/.hermes/skills/business/operator-audit-source-attribution/audit.py \
+  --max-fetches 1000 --limit 1000 > source-attribution.json
 ```
 
 - `--since YYYY-MM-DD` / `--upcoming`: only events starting on or after that
