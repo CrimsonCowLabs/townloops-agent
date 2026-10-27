@@ -20,9 +20,13 @@ missing from it is added there, not here.
 ## CLI
 
 ```bash
-python skills/business/operator-audit-listing-websites/audit.py
-python skills/business/operator-audit-listing-websites/audit.py --limit 50
+A=$HERMES_HOME/skills/business/operator-audit-listing-websites/audit.py
+$PYTHON $A
+$PYTHON $A --limit 50
 ```
+
+`$PYTHON` is `/usr/bin/python3`, the system Python that has the skill's
+dependencies; there is no bare `python` on the container's PATH.
 
 - `--limit`: max rows, 1–1000, default 200. `total`, `counts` and `by_kind` are never capped.
 

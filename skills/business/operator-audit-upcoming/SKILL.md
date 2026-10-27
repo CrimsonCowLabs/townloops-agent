@@ -18,10 +18,14 @@ approve, enrichment, event-ship PATCH) — say which one when reporting.
 ## CLI
 
 ```bash
-python skills/business/operator-audit-upcoming/audit.py                 # next 30 days
-python skills/business/operator-audit-upcoming/audit.py --days 7
-python skills/business/operator-audit-upcoming/audit.py --days 14 --limit 20
+A=$HERMES_HOME/skills/business/operator-audit-upcoming/audit.py
+$PYTHON $A                          # next 30 days
+$PYTHON $A --days 7
+$PYTHON $A --days 14 --limit 20
 ```
+
+`$PYTHON` is `/usr/bin/python3`, the system Python that has the skill's
+dependencies; there is no bare `python` on the container's PATH.
 
 - `--days`: window in whole town-local days starting today (`$AGENT_TZ`), 1–90, default 30.
 - `--limit`: max rows in each list, 1–200, default 50. Counts and `total`s are never capped.
