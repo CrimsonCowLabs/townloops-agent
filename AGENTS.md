@@ -72,8 +72,12 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     its `http_access allow`, `deny all` last; entries → `.host` form, a scheme/path/port/wildcard, an IP literal or
     a public suffix (`PUBLIC_SUFFIXES`, `co.uk`-shaped ccTLD levels) is an `EgressError` naming town + entry;
     sorted, byte-identical on rerun. `towns_from(base_dir)` reads the profiles (non-slug folders like `slt.bak`,
-    `_egress` skipped with a note; a non-mapping profile is an error naming the file); `main` (`python -m
-    engine.egress BASE_DIR`, what `townloops-agent-add --egress` runs) writes `BASE_DIR/_egress/squid.conf`.
+    `_egress` skipped with a note; a non-mapping profile is an error naming the file) and merges each town's
+    agent-written `<slug>/hermes-home/egress/allowed_hosts.yaml` (`AGENT_HOSTS`; written only by the `egress-hosts`
+    skill via `add_agent_host`/`remove_agent_host`, same rules via `check_host` — but a bad agent entry or file is a
+    note, skipped, never an error: it must not break every town's allowlist); `main` (`python -m engine.egress
+    BASE_DIR`, what `townloops-agent-add --egress` and `bin/townloops-egress-sync` run) writes `BASE_DIR/_egress/squid.conf`.
+    `recent_changes` feeds the nightly digest's "Egress hosts opened"; preflight lists the agent's hosts (info).
   - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
     `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
     same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"),
@@ -353,7 +357,11 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   asserts everything a scaffolded town schedules exists. `--egress` compiles every town's `allowed_hosts`
   under `TOWNLOOPS_AGENTS_ROOT` into `$TOWNLOOPS_AGENTS_ROOT/_egress/squid.conf` — outside the repo, the file the
   shared egress compose mounts (generated — never hand-edit; written in place) — and prints, but never runs, the
-  shared reload (`docker exec squid-egress squid -k reconfigure`). `templates/_shared/egress/squid.conf` is the
+  shared reload (`docker exec squid-egress squid -k reconfigure`). Agents add hosts for their own town themselves
+  (`egress-hosts` skill); `bin/townloops-egress-sync` — the operator's crontab, every 5 min, never installed by
+  the repo — recompiles and, only when the file differs from the last one Squid accepted
+  (`_egress/squid.conf.applied`), runs `squid -k parse` then `-k reconfigure` (a refused file is put back in
+  place). Silent when nothing changed. `templates/_shared/egress/squid.conf` is the
   legacy hand-written list, unmounted, kept only for a `squid-egress` created before the move (recreate it once).
 - **Firecrawl is always the local instance, never cloud.** Every Firecrawl call resolves its endpoint through
   `engine/firecrawl_env.base_url()` (`TOWNLOOPS_FIRECRAWL_URL` → `FIRECRAWL_API_URL`); unset, or a

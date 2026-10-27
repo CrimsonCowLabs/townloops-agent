@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# townloops-egress-sync — apply every town's egress hosts to the shared Squid.
+#
+# Recompiles $TOWNLOOPS_AGENTS_ROOT/_egress/squid.conf (engine/egress.py: each
+# town's town-profile.yaml allowed_hosts + the hosts its agent added in
+# hermes-home/egress/allowed_hosts.yaml). Only when it differs from the last
+# file Squid accepted (_egress/squid.conf.applied) does it check it
+# (`squid -k parse`) and reload (`squid -k reconfigure`) the running
+# squid-egress. A file Squid refuses is put back as it was — in place, Squid's
+# single-file bind mount keeps the inode — and the run fails; the next run
+# tries again. Idempotent; silent when nothing changed, one line when it
+# applies. Meant for the operator's crontab (docs/vps-quickstart.md):
+#
+#   */5 * * * * $HOME/workspace/townloops-agent/bin/townloops-egress-sync >> $HOME/townloops-agents/_egress/sync.log 2>&1
+#
+# Set TOWNLOOPS_AGENTS_ROOT the same as for `townloops-agent-add --egress` and
+# the egress compose (default $HOME/townloops-agents). SQUID_CONTAINER
+# overrides the container name (default squid-egress).
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+BASE_DIR="${TOWNLOOPS_AGENTS_ROOT:-$HOME/townloops-agents}"
+CONF="$BASE_DIR/_egress/squid.conf"
+APPLIED="$CONF.applied"
+SQUID="${SQUID_CONTAINER:-squid-egress}"
+
+stamp() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# The file as it was, to put back if Squid refuses the new one.
+prev="$(mktemp)"
+trap 'rm -f "$prev"' EXIT
+had_prev=0
+if [[ -f "$CONF" ]]; then
+  cat "$CONF" > "$prev"
+  had_prev=1
+fi
+
+# Notes (a skipped folder, a skipped agent-added host) are shown only when the
+# run applies or fails, so an unchanged run stays silent.
+if ! out="$(PYTHONPATH="$REPO" "${PYTHON:-python3}" -m engine.egress "$BASE_DIR" 2>&1)"; then
+  echo "$(stamp) egress-sync: compile failed, $CONF unchanged:" >&2
+  echo "$out" >&2
+  exit 1
+fi
+
+if [[ -f "$APPLIED" ]] && cmp -s "$APPLIED" "$CONF"; then
+  exit 0
+fi
+
+refused() {  # $1 what failed, $2 its output
+  if [[ "$had_prev" == 1 ]]; then
+    cat "$prev" > "$CONF"
+  fi
+  echo "$(stamp) egress-sync: $1 failed — $CONF put back as it was:" >&2
+  echo "$2" | tail -n 20 >&2
+  echo "$out" >&2
+  exit 1
+}
+
+parse="$(docker exec "$SQUID" squid -k parse 2>&1)" || refused "squid -k parse" "$parse"
+reload="$(docker exec "$SQUID" squid -k reconfigure 2>&1)" || refused "squid -k reconfigure" "$reload"
+cat "$CONF" > "$APPLIED"
+
+towns="$(echo "$out" | sed -n 's/.*(towns: \(.*\))$/\1/p')"
+echo "$(stamp) egress-sync: applied $CONF (towns: ${towns:-none})"
+notes="$(echo "$out" | grep -v -e '(towns: ' -e '^Reload ' -e 'squid -k reconfigure$' || true)"
+if [[ -n "$notes" ]]; then
+  echo "$notes" >&2
+fi
