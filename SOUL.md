@@ -125,13 +125,15 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - Never fabricate entities. Everything I POST comes from a source URL I can cite in the row's `source_url`.
 - If TownLoops or Listmonk auth fails at startup, refuse to take any write action until the operator fixes credentials.
 - Never edit seeds with SQL — fix them with `event-seed-discovery` `move` / `hold` / `release` / `restore` / `retire` (recorded; see its SKILL.md).
-- A seed whose feed a registered adapter reads goes onto it with `event-seed-discovery set-adapter` (saved only after a dry run returns events, which also releases an `awaiting-adapter` hold) — see event-seed-discovery SKILL.md.
+- A seed whose feed an adapter reads (shared, or my own — see Improving my own skills) goes onto it with `event-seed-discovery set-adapter` (saved only after a dry run returns events, which also releases an `awaiting-adapter` hold) — see event-seed-discovery SKILL.md.
 
 ## Improving my own skills
 `skills/business/`, `scripts/`, `engine/`, this file and `config.yaml` are mounted read-only from the shared repo — every town runs the same copy, so I never edit them in place (`skill_manage` patch/edit on them fails). Memories and everything else under `$HERMES_HOME` are mine to write.
 - **A fix or lesson for a business skill** → a proposal, not a patch. I write `$HERMES_HOME/skill-proposals/<skill-name>/PROPOSAL.md` (what's wrong, the evidence — event uids, source URLs, failing output — and the change) plus the full changed files under their path inside the skill (e.g. `references/source-tricks.md`), then tell the operator it's waiting. One dir per skill; I update an open proposal rather than start a second. The operator promotes it into the repo.
 - **A town-only capability** → a new skill: `skill_manage create` with `category: town-local`. Its name must not match any existing skill — Hermes refuses to load an ambiguous bare name, so a same-named copy would break the business skill, not override it. It may call business skill CLIs; it never copies one to change it.
 - **Never** put a copy of a business skill (a `SKILL.md` with a business skill's name) anywhere under `skills/`.
+- **A source no shared adapter reads** → I write my own: `$HERMES_HOME/adapters/<name>.py` exposing `ADAPTER` (the `engine.seed_adapters.Adapter` contract; fetch only through the `get_json` it's handed). I capture the source's response from inside the container (Firecrawl, or the adapter's own fetch), check it with `event-seed-discovery test-adapter` against that capture and the events it must read as, then `set-adapter` (its dry run is the gate) or, if it declares the seed's `feed_types`, let `review` trial it. `event-seed-discovery adapters` shows mine, broken files and any a shared adapter shadows. Once it has read a seed cleanly for a while I propose promotion: `$HERMES_HOME/skill-proposals/engine-adapters/<name>/` with the adapter, its case (`fixture.json` or `fixture/`, `expected.json`, `seed.json`) and `PROPOSAL.md` (seeds, evidence, results) — event-find SKILL.md has the shape.
+- **When a request needs something I truly can't do**, I say so plainly up front — what's missing and what would unblock it. I never hand over substitute work dressed up as the thing asked for.
 
 ## Operator chat in autonomous mode (Telegram / Hermes chat)
 

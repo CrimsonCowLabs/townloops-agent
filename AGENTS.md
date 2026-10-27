@@ -135,7 +135,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `blocked_page.py` (the one challenge/error-page detector — `reason(text, status, title)`: HTTP 4xx/5xx,
     Incapsula/Cloudflare/captcha challenge, access-denied, platform 404 page, Showare `no action`, near-empty body,
     named by module constants; markers count on small bodies only. event-find's listing reads and adapter fetches
-    (`event_extract.firecrawl_listing`, `seed_adapters._get_json`) → a failed run with that reason, never
+    (`event_extract.firecrawl_listing`, `seed_adapters.fetch_json`) → a failed run with that reason, never
     LLM-extracted, never a source-health zero, never a vanish miss; also the seed trial (`trial-not-found`/
     `-challenge`/`-empty-page`) and performer research's unreadable-page check — extend it, don't add another),
     `event_extract.py` (event-find/-reconcile/seed-trial extraction; `published_times` keeps only the times the page
@@ -148,7 +148,13 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
     its events take event-find's one path, a partial read is a failed run; `tribe`, `showare` (one event per
     performance, paged by `perfCount`) — add an `Adapter` entry to
-    `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`)),
+    `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`). A town's own
+    adapters are `$HERMES_HOME/adapters/<name>.py` exposing `ADAPTER`, loaded at lookup by `registry()` — the one
+    name resolver (`read`, `check_config`, `for_feed`, `seeds.set_adapter`/`assign_adapters`); a shared adapter of the
+    same name wins (town copy `shadowed`), a broken file is skipped and named (`town_adapters().errors`), a reader that
+    raises is an `AdapterError`. `run_fixture`/`run_case` + `FixtureFeed` read a captured response with fetching
+    stubbed — `event-seed-discovery test-adapter` in a town, `tests/test_adapter_fixtures.py` over every
+    `tests/fixtures/adapters/<name>/` case here; helpers adapters import: `fetch_json`, `html_text`, `local_time`, `location`),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
     only as quote-checked sentences that name an access feature, else null; skipped with no fetch
@@ -369,7 +375,11 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   `~/townloops-agents/<slug>/hermes-home/skill-proposals/<skill>/` (`PROPOSAL.md` + full changed files
   under their path inside the skill). Review, port into `skills/business/<skill>/`, then delete the
   proposal dir. Town-only skills it creates live in `hermes-home/skills/town-local/` and must not reuse a
-  business skill's name (Hermes refuses an ambiguous bare name). `SOUL.md`, `config.yaml` and the
+  business skill's name (Hermes refuses an ambiguous bare name). Seed adapters are the exception: a town agent
+  writes, tests and runs its own (`hermes-home/adapters/<name>.py`, loaded by `engine/seed_adapters`), and
+  proposes a proven one as `skill-proposals/engine-adapters/<name>/` (adapter file, its fixture case, `PROPOSAL.md`):
+  port = copy it into `engine/seed_adapters.py` and the case into `tests/fixtures/adapters/<name>/`, then `pytest`
+  — the shared one then shadows the town copy, which can be deleted. `SOUL.md`, `config.yaml` and the
   egress `squid.conf` are single-file mounts: an editor that saves via rename leaves running containers
   on the old copy — write in place (same inode) or recreate the containers.
 - **Codex CLI is best-effort.** If the CLI is missing/throttled, LLM (classifier, event-find extraction)

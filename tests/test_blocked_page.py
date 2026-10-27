@@ -171,7 +171,7 @@ class TestAdapterFetch:
     def _get(self, monkeypatch, resp):
         monkeypatch.setattr("engine.seed_adapters.requests.get", lambda *a, **k: resp)
         with pytest.raises(seed_adapters.AdapterError) as e:
-            seed_adapters._get_json("https://x.example/wp-json/tribe/events/v1/events", {})
+            seed_adapters.fetch_json("https://x.example/wp-json/tribe/events/v1/events", {})
         return str(e.value)
 
     def test_challenge_status_names_the_challenge(self, monkeypatch):

@@ -22,6 +22,8 @@ Use this reference when converting `manual_only` event seeds into reliable autom
 
 Adapters should be selected through per-seed configuration (for example an adapter key), not scattered URL conditionals. They must paginate explicitly and use stable vendor IDs plus occurrence start time where available.
 
+A town writes a new one as `$HERMES_HOME/adapters/<name>.py`, captures the source's response from inside the container, checks it with `event-seed-discovery test-adapter`, sets it with `set-adapter` (dry-run gate), and proposes a proven one under `skill-proposals/engine-adapters/<name>/` (event-find SKILL.md, Promoting a town adapter).
+
 ## Failure handling
 
 Treat HTTP error pages, branded 404s, Cloudflare/Incapsula challenges, empty widgets, and vendor messages such as `no action` as failed source runs, not successful zero-event runs. A 2xx response alone does not prove that a source is usable.

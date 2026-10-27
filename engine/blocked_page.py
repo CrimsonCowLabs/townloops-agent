@@ -9,7 +9,7 @@ those, never against hand-typed strings.
 
 Callers: event-find's listing reads (the generic Firecrawl path via
 `event_extract.firecrawl_listing`, an adapter's fetch via
-`seed_adapters._get_json`) — a named reason is a failed run, never
+`seed_adapters.fetch_json`) — a named reason is a failed run, never
 LLM-extracted, never a source-health zero, never a vanish miss; the
 autonomous seed trial (`seeds.trial`); performer research's unreadable-page
 check (`performer_research._unreadable`, which reads a near-empty profile

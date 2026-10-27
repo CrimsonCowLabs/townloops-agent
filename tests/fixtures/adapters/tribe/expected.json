@@ -1,0 +1,78 @@
+[
+ {
+  "title": "Live Music: The Mountain Boys & Friends",
+  "date": "2027-01-08T18:00:00",
+  "end_at": "2027-01-08T21:00:00",
+  "venue": "The Shops at Heavenly Village",
+  "location": "1001 Heavenly Village Way, South Lake Tahoe, CA 96150",
+  "description": "Bluegrass on the plaza stage.\nFree.",
+  "categories": [
+   "Live Music"
+  ],
+  "tags": [],
+  "source_url": "https://shops.example/event/live-music/2027-01-08/"
+ },
+ {
+  "title": "Ice Skating Lessons",
+  "date": "2027-01-09T10:00:00",
+  "end_at": "2027-01-09T11:00:00",
+  "venue": "The Shops at Heavenly Village",
+  "location": "1001 Heavenly Village Way, South Lake Tahoe, CA 96150",
+  "description": "Learn to skate on the village rink. All ages welcome.",
+  "categories": [
+   "Family"
+  ],
+  "tags": [
+   "all-ages"
+  ],
+  "source_url": "https://shops.example/event/ice-skating-lessons/2027-01-09/"
+ },
+ {
+  "title": "Ice Skating Lessons",
+  "date": "2027-01-16T10:00:00",
+  "end_at": "2027-01-16T11:00:00",
+  "venue": "The Shops at Heavenly Village",
+  "location": "1001 Heavenly Village Way, South Lake Tahoe, CA 96150",
+  "description": "Learn to skate on the village rink. All ages welcome.",
+  "categories": [
+   "Family"
+  ],
+  "tags": [
+   "all-ages"
+  ],
+  "source_url": "https://shops.example/event/ice-skating-lessons/2027-01-16/"
+ },
+ {
+  "title": "CANCELLED: Snow Sculpture Contest",
+  "date": "2027-01-20T12:00:00",
+  "end_at": "2027-01-20T15:00:00",
+  "venue": "The Shops at Heavenly Village",
+  "location": "1001 Heavenly Village Way, South Lake Tahoe, CA 96150",
+  "description": "Cancelled due to lack of snow.",
+  "categories": [],
+  "tags": [],
+  "source_url": "https://shops.example/event/snow-sculpture-contest/2027-01-20/"
+ },
+ {
+  "title": "Winter Market",
+  "date": "2027-01-23T09:00:00",
+  "end_at": "2027-01-23T14:00:00",
+  "venue": null,
+  "location": null,
+  "description": "Local makers.",
+  "categories": [],
+  "tags": [],
+  "source_url": "https://shops.example/event/winter-market/2027-01-23/"
+ },
+ {
+  "title": "New Year Fireworks",
+  "date": "2027-12-31T21:00:00",
+  "end_at": "2027-12-31T21:30:00",
+  "venue": "The Shops at Heavenly Village",
+  "location": "1001 Heavenly Village Way, South Lake Tahoe, CA 96150",
+  "description": null,
+  "categories": [],
+  "tags": [],
+  "source_url": "https://shops.example/event/fireworks/2027-12-31/"
+ }
+]

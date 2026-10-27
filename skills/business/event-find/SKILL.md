@@ -26,8 +26,26 @@ An adapter's events take the generic path below from step 3 unchanged — same
 cancellation and judgement quote checks read the adapter's rows rendered as text. Anything short of the whole
 listing (a failed page, an answer without an events list, more pages than `max_pages`, a Showare `no action`, an adapter bug) is a
 failed run, never a zero. An adapter fetches the feed directly, not through Firecrawl, so its host must be in the
-town's `allowed_hosts` (egress). Add an adapter as an `Adapter` entry in `seed_adapters.ADAPTERS` (reader, `params`, `feed_types`) — never a URL or hostname
-conditional in find.py.
+town's `allowed_hosts` (egress). A town adds its own adapter as `$HERMES_HOME/adapters/<name>.py` exposing an
+`ADAPTER` (reader, `params`, `feed_types`) — tested with `event-seed-discovery test-adapter`, loaded beside the shared
+ones, a shared one of the same name winning (event-seed-discovery SKILL.md, Town adapters). A shared adapter is an
+`Adapter` entry in `seed_adapters.ADAPTERS`. Never a URL or hostname conditional in find.py.
+
+## Promoting a town adapter
+
+Once a town adapter has read its seeds cleanly, the agent proposes it for every town:
+`$HERMES_HOME/skill-proposals/engine-adapters/<name>/` holds
+
+- `<name>.py` — the adapter file as it runs in the town;
+- its case — `fixture.json` (or `fixture/page-<N>.json`), the response captured from inside the container (the
+  adapter's own fetch, or Firecrawl); `expected.json`, the events it reads as; `seed.json`, the seed's `url` (and
+  `feed_type`/`feed_url`, `config`) — passing `test-adapter --adapter <name> --case <dir>`;
+- `PROPOSAL.md` — the seeds it reads, why generic fails them (evidence: counts, truncation, misses), and its results
+  (trial counts, runs since `set-adapter`).
+
+Porting it is copying the reader and its `Adapter` entry into `engine/seed_adapters.py` (or a module it imports),
+the case into `tests/fixtures/adapters/<name>/` (tests/test_adapter_fixtures.py runs every case there), then
+`pytest`. From then on the shared adapter shadows the town copy, which can be deleted.
 
 ## Why one skill does find+extract in v1
 
@@ -103,7 +121,7 @@ Do not approve a manual source merely because it returns HTTP 200 or produces on
    the seed's recorded `feed_type`/`feed_url` (`event-seed-discovery show`).
 5. Validate pagination, timezone behavior, recurrence representation, stable source IDs, and town or branch affinity.
 6. Prefer deterministic adapters in this order: JSON/iCal, stable HTML cards, specialized recurrence or annual parser, then LLM fallback.
-7. Implement the adapter in `engine/seed_adapters.py`, returning records in the extraction's shape, so event state, deduplication, pending approval, and workqueue behavior remain unchanged.
+7. Write the adapter as a town adapter (`$HERMES_HOME/adapters/<name>.py`), returning records in the extraction's shape, so event state, deduplication, pending approval, and workqueue behavior remain unchanged; check it against a captured response with `event-seed-discovery test-adapter`, and propose a proven one for promotion into `engine/seed_adapters.py` (above).
 8. Re-run all reviewed seeds against the copied database and compare counts and deduplication with the generic baseline before changing production configuration.
 
 Select adapters through the seed's adapter key (`set-adapter`). Do not scatter hostname or URL conditionals through the extraction loop.

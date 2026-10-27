@@ -17,9 +17,9 @@ import pytest
 from engine import seed_adapters
 from engine.event_extract import event_uid
 
-FIXTURES = Path(__file__).parent / "fixtures" / "tribe"
+FIXTURES = Path(__file__).parent / "fixtures" / "adapters" / "tribe" / "fixture"
 API = "https://shops.example/wp-json/tribe/events/v1/events"
-SHOWARE = Path(__file__).parent / "fixtures" / "showare" / "performancelist.json"
+SHOWARE = Path(__file__).parent / "fixtures" / "adapters" / "showare" / "fixture.json"
 BOX_OFFICE = "https://valhallatahoe.showare.com"
 PERF_LIST = BOX_OFFICE + "/include/widgets/events/performancelist.asp"
 
@@ -422,7 +422,7 @@ def find(tmp_state_dir, monkeypatch):
     monkeypatch.setattr(mod, "_firecrawl_listing", no_generic)
     monkeypatch.setattr(mod, "_codex_exec", no_generic)
     monkeypatch.setattr(mod, "_telegram", lambda text: None)
-    monkeypatch.setattr("engine.seed_adapters._get_json", feed)
+    monkeypatch.setattr("engine.seed_adapters.fetch_json", feed)
     monkeypatch.setattr("engine.inspection._DB_PATH", tmp_state_dir / "townloops.db")
 
     def run(dry_run=False):
@@ -505,6 +505,23 @@ class TestEventFindWiring:
         assert run["ok"] == 0 and "KeyError" in run["error"]
         assert conn.execute("SELECT last_scraped_at FROM event_seeds").fetchone()[0] is None
 
+    def test_a_town_adapter_that_raises_is_a_failed_run(self, conn, find, tmp_state_dir):
+        adapters = tmp_state_dir.parent / "adapters"          # $HERMES_HOME/adapters
+        adapters.mkdir()
+        (adapters / "boom.py").write_text(
+            "from engine.seed_adapters import Adapter\n"
+            "def read(seed, config, get_json):\n    raise KeyError('venue')\n"
+            "ADAPTER = Adapter(read, {})\n")
+        (adapters / "broken.py").write_text("def read(:\n")
+        conn.execute("INSERT INTO event_seeds (name, url, kind, status, adapter, first_seen_at, "
+                     "last_seen_at) VALUES ('Town Hall', 'https://hall.example/', 'venue', "
+                     "'approved', 'boom', 'x', 'x')")
+        find()
+        runs = {r["source"]: r for r in _runs(conn)}
+        hall = runs["seed:Town Hall"]
+        assert hall["ok"] == 0 and "boom: KeyError" in hall["error"]
+        assert runs[f"seed:{SEED}"]["ok"] == 1                # the broken file harmed no one
+
     def test_a_failed_run_is_never_a_zero(self, conn, find):
         from engine import source_health
         for _ in range(4):
@@ -529,7 +546,7 @@ class TestShowareThroughEventFind:
     @pytest.fixture
     def showare(self, conn, find, monkeypatch):
         conn.execute("UPDATE event_seeds SET adapter = 'showare', url = ?", (PERF_LIST,))
-        monkeypatch.setattr("engine.seed_adapters._get_json", FakeShoware())
+        monkeypatch.setattr("engine.seed_adapters.fetch_json", FakeShoware())
         return conn
 
     def test_town_local_times_land_in_utc(self, showare, find):
@@ -545,7 +562,7 @@ class TestShowareThroughEventFind:
     def test_a_no_action_answer_is_a_failed_run(self, showare, find, monkeypatch):
         def no_action(url, params):
             raise seed_adapters.AdapterError("showare no action")
-        monkeypatch.setattr("engine.seed_adapters._get_json", no_action)
+        monkeypatch.setattr("engine.seed_adapters.fetch_json", no_action)
         find()
         [run] = _runs(showare)
         assert run["ok"] == 0 and "showare no action" in run["error"]

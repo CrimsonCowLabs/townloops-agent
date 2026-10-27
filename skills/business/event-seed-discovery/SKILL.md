@@ -23,6 +23,8 @@ $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover -
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py show
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py set-role --seed-id N --role syndicator
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py set-adapter --seed-id N --adapter tribe [--config JSON]  # dry-run first; or generic
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py adapters          # shared + town adapters, shadowed, broken
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py test-adapter --adapter NAME --case DIR  # captured response, no network
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py review [--trials N] [--moves N] [--adapters N]
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py probe [--limit N] # seeds never probed
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py probe --all       # re-probe every seed
@@ -84,10 +86,11 @@ calendars) need filtering to the town before any adapter uses them.
 Set an adapter when a seed's events come from a feed a registered adapter reads — its probed
 `feed_type` is in an adapter's `feed_types` (today `tribe` → `tribe`, `showare` → `showare`), or you've found the
 endpoint yourself (source-automation review, event-find SKILL.md) — and especially for a seed held
-`awaiting-adapter`. Adapters only exist in the repo (`seed_adapters.ADAPTERS`); a source no adapter
-reads yet stays generic or held `awaiting-adapter`, with a skill proposal for the adapter.
+`awaiting-adapter`. Adapters are the shared ones (`seed_adapters.ADAPTERS`) plus the town's own,
+`$HERMES_HOME/adapters/<name>.py` (below); a source none reads yet stays generic or held
+`awaiting-adapter` while you write one.
 
-- **`set-adapter --seed-id N --adapter KEY [--config JSON]`** — only a registered key; `--config`
+- **`set-adapter --seed-id N --adapter KEY [--config JSON]`** — only a registered key (shared or town); `--config`
   is a JSON object of the settings that adapter declares (its `params` — `tribe`: `url` http(s),
   `max_pages` and `days_ahead` whole numbers above 0; `showare`: `url` http(s), `max_performances`
   a whole number above 0); any other key or a bad value is refused by
@@ -113,6 +116,42 @@ reads yet stays generic or held `awaiting-adapter`, with a skill proposal for th
   review assigns it itself. Failed → `keep-generic` / `adapter-trial-failed`, tried again after
   `ADAPTER_RETRY_DAYS` (7) or a new probe; empty → `adapter-trial-empty`, tried again only after a
   new probe (`probe --seed-id N`).
+
+## Town adapters: adapters, test-adapter
+
+A town writes its own adapter as `$HERMES_HOME/adapters/<name>.py` — persistent, this town only —
+exposing `ADAPTER = Adapter(read, params, feed_types=(...))` from `engine.seed_adapters` (it may
+import `fetch_json`, `html_text`, `local_time`, `location`, `AdapterError`, `Param`). The file name
+is the adapter key: a-z, 0-9, `_`, `-` (≤40), never `generic`; `_`-prefixed files are helpers, not
+adapters. `read(seed, config, get_json)` returns every event of the listing in the extraction's
+shape and fetches only through `get_json` (fixtures stub it; its answers are blocked-page checked).
+It is loaded at lookup — `set-adapter`, `review`, event-find — and again when the file changes.
+
+- A shared adapter of the same name wins; the town file is **shadowed** (logged, listed) — so a
+  promoted adapter takes over, and the town copy can be deleted.
+- A file that fails to import or has no valid `ADAPTER` is skipped, logged and listed with why; a
+  seed naming it fails its run with that reason, and no other seed is touched.
+- A reader that raises, or returns no list of event objects, is a failed run (`AdapterError`).
+
+```bash
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py adapters
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py test-adapter --adapter NAME --case DIR [--config JSON]
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py test-adapter --adapter NAME --fixture PATH [--expected PATH] [--config JSON] [--seed-id N | --seed-url URL]
+```
+
+- **`adapters`** — every key a seed can name (`source` shared/town, `feed_types`, `params`), the
+  town `shadowed` names and broken files (`errors`, file → why).
+- **`test-adapter`** — no network: reads a captured response through the adapter's reader with
+  `get_json` answered from the capture, `--config` checked against its `params`. `--fixture` is one
+  JSON file (answers every request) or a directory of `page-<N>.json` (answered by the request's
+  `page`). `--case DIR` is the layout a promotion carries: `fixture.json` or `fixture/`,
+  `expected.json`, optional `seed.json` (`url`/`feed_type`/`feed_url` and a `config`). `--seed-id`
+  reads as that seed would. Prints one JSON object — `events`, `requests` and, with expected
+  events, `pass` and a unified `diff`; exit 1 on a mismatch or any error. Capture the response
+  from inside the container (the adapter's own fetch, or Firecrawl), and keep it for the case.
+
+Then `set-adapter` (its dry run against the live source is the gate), or declare the seed's probed
+`feed_type` in `feed_types` and let `review` trial it. Promotion: event-find SKILL.md.
 
 ## Source health
 

@@ -152,9 +152,10 @@ def set_adapter(conn: sqlite3.Connection, seed: dict, adapter: str, config,
             REVERT, "back-to-generic", {"from": was, "to": adapter}))
         conn.commit()
         return AdapterChange(adapter, seed["status"])
-    if adapter not in seed_adapters.ADAPTERS:
-        raise ValueError(f"unknown adapter {adapter!r} "
-                         f"(known: {', '.join(sorted(seed_adapters.ADAPTERS))}, generic)")
+    known = seed_adapters.registry()       # shared + the town's own ($HERMES_HOME/adapters)
+    if adapter not in known:
+        raise ValueError(f"{seed_adapters.why_unknown(adapter)} "
+                         f"(known: {', '.join(sorted(known))}, generic)")
     if config is not None and not isinstance(config, dict):
         raise ValueError("adapter config must be a JSON object")
     seed_adapters.check_config(adapter, config or {})

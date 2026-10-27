@@ -1,32 +1,50 @@
 """Seed adapters: a deterministic reader per seed, chosen by the seed record.
 
 `event_seeds.adapter` names how event-find reads a seed — NULL/'generic' is
-the Firecrawl markdown → LLM path (event-find's own); any other key is one of
-`ADAPTERS`, configured by `event_seeds.adapter_config` (a JSON object). No
-URL or hostname conditionals: a seed is moved onto an adapter by setting its
-key (`event-seed-discovery set-adapter`, or the autonomous `review` when an
-adapter reads the seed's probed `feed_type`). Each `ADAPTERS` entry is an
-`Adapter`: its reader, the settings its config may hold (`check_config`
-refuses any other key or a bad value before anything is stored) and the
-feed types it reads (`for_feed`).
+the Firecrawl markdown → LLM path (event-find's own); any other key is an
+adapter of `registry()`, configured by `event_seeds.adapter_config` (a JSON
+object). No URL or hostname conditionals: a seed is moved onto an adapter by
+setting its key (`event-seed-discovery set-adapter`, or the autonomous
+`review` when an adapter reads the seed's probed `feed_type`). Each adapter
+is an `Adapter`: its reader, the settings its config may hold
+(`check_config` refuses any other key or a bad value before anything is
+stored) and the feed types it reads (`for_feed`).
+
+`registry()` is the shared `ADAPTERS` plus the town's own: a town agent
+writes `$HERMES_HOME/adapters/<name>.py` exposing `ADAPTER`
+(`town_adapters`, loaded at lookup and again whenever the file changes). A
+shared adapter of the same name wins and the town copy is reported
+shadowed — how a promoted adapter takes over; a file that fails to import or
+has no valid `ADAPTER` is skipped and named, never breaking another seed.
+Every adapter name is resolved through `registry()`.
 
 `read(seed)` returns a `Listing`: events normalized to what the extraction
 prompt returns (title, local-wall-clock `date`/`end_at`, venue, location,
 description, categories, tags, source_url) — so they go through event-find's
 one upsert / cancellation / vanish / source-health / judgement path — plus
 `page`, the text those quote-check against. Anything short of the whole
-listing raises `AdapterError`: a partial read would count every unread event
-as missing, and a failed read must be a failed run, never a zero.
+listing raises `AdapterError`, as does a reader that raises anything else or
+returns no event list: a partial read would count every unread event as
+missing, and a failed read must be a failed run, never a zero.
+
+`run_fixture` / `run_case` read a captured response through an adapter with
+fetching stubbed (`FixtureFeed`): `event-seed-discovery test-adapter` in a
+town, tests/test_adapter_fixtures.py here.
 """
 
 from __future__ import annotations
 
+import difflib
 import html as _html
+import importlib.util
 import json
+import os
 import re
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Optional
+from pathlib import Path
+from typing import Any, Callable, Optional, Union
 from urllib.parse import parse_qsl, urljoin, urlsplit
 
 import requests
@@ -37,6 +55,9 @@ from engine.derive_helpers import is_http_url
 from engine.event_extract import town_tz_name
 from engine.research import UA
 from engine.feed_probe import SHOWARE_LIST_PATH, TRIBE_REST_PATH
+from engine.log import get_logger
+
+_log = get_logger("seed-adapters")
 
 GENERIC = "generic"
 TIMEOUT_S = 30
@@ -60,10 +81,18 @@ def adapter_of(seed: dict) -> str:
 
 def read(seed: dict, get_json: Optional[GetJson] = None) -> Listing:
     key = adapter_of(seed)
-    adapter = ADAPTERS.get(key)
+    adapter = registry().get(key)
     if adapter is None:
-        raise AdapterError(f"unknown adapter {key!r}")
-    events = adapter.read(seed, _config(seed), get_json or _get_json)
+        raise AdapterError(why_unknown(key))
+    config = _config(seed)
+    try:
+        events = adapter.read(seed, config, get_json or fetch_json)
+    except AdapterError:
+        raise
+    except Exception as e:  # noqa: BLE001 — a reader's bug is a failed read, never a crash
+        raise AdapterError(f"{type(e).__name__}: {e}") from e
+    if not isinstance(events, list) or not all(isinstance(e, dict) for e in events):
+        raise AdapterError("the reader did not return a list of event objects")
     return Listing(events, "\n\n".join(_page_entry(e) for e in events))
 
 
@@ -80,7 +109,7 @@ def _config(seed: dict) -> dict:
     return cfg
 
 
-def _get_json(url: str, params: dict) -> dict:
+def fetch_json(url: str, params: dict) -> dict:
     try:
         r = requests.get(url, params=params, timeout=TIMEOUT_S,
                          headers={"Accept": "application/json", "User-Agent": UA})
@@ -105,7 +134,7 @@ _BREAK_RE = re.compile(r"<br\s*/?>|</(?:p|div|li|h\d)>", re.IGNORECASE)
 _TAG_RE = re.compile(r"<[^>]+>")
 
 
-def _text(value) -> Optional[str]:
+def html_text(value) -> Optional[str]:
     """HTML → plain text: one line per paragraph, entities decoded."""
     if not isinstance(value, str):
         return None
@@ -114,7 +143,7 @@ def _text(value) -> Optional[str]:
     return "\n".join(line for line in lines if line) or None
 
 
-def _local(utc_value, local_value) -> Optional[str]:
+def local_time(utc_value, local_value) -> Optional[str]:
     """A feed time as the extraction's form: town-local wall clock, no offset."""
     if isinstance(utc_value, str) and utc_value.strip():
         try:
@@ -147,7 +176,7 @@ def _tribe_endpoint(seed: dict, config: dict) -> str:
     return urljoin(seed["url"], "/wp-json/" + TRIBE_REST_PATH)
 
 
-def _location(address, city, state, zip_code) -> Optional[str]:
+def location(address, city, state, zip_code) -> Optional[str]:
     """"address, city, state zip" from whichever parts the feed gives."""
     zip_part = " ".join(x for x in (state, zip_code) if x)
     location = ", ".join(x for x in (address, city, zip_part) if x)
@@ -158,18 +187,18 @@ def _tribe_event(row: dict) -> dict:
     """A row without a title or start stays in (as None): event-find counts
     it as malformed rather than it vanishing here."""
     venue = row.get("venue") if isinstance(row.get("venue"), dict) else {}
-    start = _local(row.get("utc_start_date"), row.get("start_date"))
-    end = _local(row.get("utc_end_date"), row.get("end_date"))
+    start = local_time(row.get("utc_start_date"), row.get("start_date"))
+    end = local_time(row.get("utc_end_date"), row.get("end_date"))
     if row.get("all_day") is True and start:   # 00:00–23:59:59 is no published time
         start, end = start[:10], None
     return {
-        "title": _text(row.get("title")),
+        "title": html_text(row.get("title")),
         "date": start,
         "end_at": end,
-        "venue": _text(venue.get("venue")),
-        "location": _location(venue.get("address"), venue.get("city"), venue.get("state"),
+        "venue": html_text(venue.get("venue")),
+        "location": location(venue.get("address"), venue.get("city"), venue.get("state"),
                               venue.get("zip")),
-        "description": _text(row.get("description")),
+        "description": html_text(row.get("description")),
         "categories": [c["name"] for c in row.get("categories") or []
                        if isinstance(c, dict) and c.get("name")],
         "tags": [t["name"] for t in row.get("tags") or [] if isinstance(t, dict) and t.get("name")],
@@ -279,13 +308,13 @@ def _showare_event(row: dict, box_office: str, shows_end: bool) -> dict:
     else:
         source_url = None
     return {
-        "title": _text(row.get("Event")),
+        "title": html_text(row.get("Event")),
         "date": start,
         "end_at": end,
-        "venue": _text(row.get("Venue")),
-        "location": _location(_undoubled(row.get("VenueAddress") or ""), row.get("VenueCity"),
+        "venue": html_text(row.get("Venue")),
+        "location": location(_undoubled(row.get("VenueAddress") or ""), row.get("VenueCity"),
                               row.get("VenueState"), row.get("VenueZipCode")),
-        "description": _text(row.get("Description")),
+        "description": html_text(row.get("Description")),
         "categories": [],
         "tags": [],
         "source_url": source_url,
@@ -387,16 +416,131 @@ ADAPTERS: dict[str, Adapter] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Town adapters: $HERMES_HOME/adapters/<name>.py, each exposing ADAPTER
+# ---------------------------------------------------------------------------
+
+TOWN_ADAPTERS_DIR = "adapters"
+_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,39}$")
+_SHADOWED = object()
+# file path → ((mtime_ns, size), Adapter | _SHADOWED | why it was skipped)
+_town_cache: dict[str, tuple[tuple, Any]] = {}
+
+
+@dataclass(frozen=True)
+class TownAdapters:
+    """`adapters`: the town's own in use; `shadowed`: names a shared adapter
+    takes; `errors`: file name → why it was skipped."""
+    adapters: dict[str, Adapter] = field(default_factory=dict)
+    shadowed: list[str] = field(default_factory=list)
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+def town_adapters_dir() -> Path:
+    """$HERMES_HOME/adapters — the town agent's own, persistent; read fresh."""
+    return Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / TOWN_ADAPTERS_DIR
+
+
+def _invalid(obj) -> Optional[str]:
+    if not isinstance(obj, Adapter):
+        return "ADAPTER is not an engine.seed_adapters.Adapter"
+    if not callable(obj.read):
+        return "ADAPTER.read is not callable"
+    if not isinstance(obj.params, dict) or not all(
+            isinstance(k, str) and isinstance(v, Param) for k, v in obj.params.items()):
+        return "ADAPTER.params must map setting names to Param"
+    if not isinstance(obj.feed_types, (tuple, list)) or not all(
+            isinstance(t, str) for t in obj.feed_types):
+        return "ADAPTER.feed_types must be a tuple of feed type names"
+    return None
+
+
+def _import(path: Path, name: str) -> Any:
+    """The file's ADAPTER, or why it can't be used."""
+    if name == GENERIC:
+        return f"{GENERIC!r} is the Firecrawl → LLM path, not an adapter name"
+    if not _NAME_RE.match(name):
+        return "the file name names the adapter: a-z, 0-9, _ or -, up to 40, lowercase first"
+    mod_name = f"town_adapters.{name}"
+    spec = importlib.util.spec_from_file_location(mod_name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[mod_name] = mod       # a dataclass in the file looks its module up
+    try:
+        spec.loader.exec_module(mod)
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — any import failure skips the file
+        sys.modules.pop(mod_name, None)
+        return f"failed to import — {type(e).__name__}: {e}"
+    if not hasattr(mod, "ADAPTER"):
+        return "no ADAPTER defined"
+    return _invalid(mod.ADAPTER) or mod.ADAPTER
+
+
+def _load(path: Path) -> Any:
+    """Cached per file version, so loading (or skipping) is logged once."""
+    try:
+        st = path.stat()
+    except OSError as e:
+        return f"unreadable — {e}"
+    stamp = (st.st_mtime_ns, st.st_size)
+    cached = _town_cache.get(str(path))
+    if cached and cached[0] == stamp:
+        return cached[1]
+    name = path.stem
+    if name in ADAPTERS:
+        got = _SHADOWED
+        _log.warning(f"town adapter {path} is shadowed by the shared {name!r} adapter",
+                     extra={"adapter": name, "path": str(path)})
+    else:
+        got = _import(path, name)
+        if isinstance(got, str):
+            _log.warning(f"town adapter {path} skipped: {got}",
+                         extra={"adapter": name, "path": str(path)})
+    _town_cache[str(path)] = (stamp, got)
+    return got
+
+
+def town_adapters() -> TownAdapters:
+    """The town's adapter files (`_`-prefixed ones are helpers, not adapters)."""
+    folder = town_adapters_dir()
+    if not folder.is_dir():
+        return TownAdapters()
+    out = TownAdapters()
+    for path in sorted(p for p in folder.glob("*.py") if not p.name.startswith("_")):
+        got = _load(path)
+        if got is _SHADOWED:
+            out.shadowed.append(path.stem)
+        elif isinstance(got, str):
+            out.errors[path.name] = got
+        else:
+            out.adapters[path.stem] = got
+    return out
+
+
+def registry() -> dict[str, Adapter]:
+    """Every adapter a seed can name: the shared ones first, then the town's."""
+    return {**ADAPTERS, **town_adapters().adapters}
+
+
+def why_unknown(name: str) -> str:
+    """Why `name` isn't an adapter — a town file that didn't load says so."""
+    why = town_adapters().errors.get(f"{name}.py")
+    return f"town adapter {name}.py did not load: {why}" if why \
+        else f"unknown adapter {name!r}"
+
+
 def for_feed(feed_type: Optional[str]) -> Optional[str]:
     """The adapter that reads a seed's probed feed, None when none does."""
-    return next((k for k, a in ADAPTERS.items() if feed_type and feed_type in a.feed_types),
+    return next((k for k, a in registry().items() if feed_type and feed_type in a.feed_types),
                 None)
 
 
 def check_config(adapter: str, config: dict) -> None:
-    """ValueError naming the first setting `adapter` doesn't declare, or
-    whose value its check refuses."""
-    params = ADAPTERS[adapter].params
+    """ValueError for an unknown adapter, or naming the first setting
+    `adapter` doesn't declare, or whose value its check refuses."""
+    known = registry()
+    if adapter not in known:
+        raise ValueError(why_unknown(adapter))
+    params = known[adapter].params
     for key, value in config.items():
         if key not in params:
             raise ValueError(f"{adapter} has no setting {key!r} "
@@ -404,3 +548,89 @@ def check_config(adapter: str, config: dict) -> None:
         why = params[key].check(value)
         if why:
             raise ValueError(f"{adapter} setting {key!r} {why} (got {value!r})")
+
+
+# ---------------------------------------------------------------------------
+# Fixture runs: a captured response through an adapter, no network
+# ---------------------------------------------------------------------------
+
+FIXTURE_SEED_URL = "https://fixture.invalid/"
+
+
+class FixtureFeed:
+    """A captured source answering an adapter's `get_json`: a JSON file
+    answers every request; a directory answers each by its `page` param
+    from `page-<N>.json` (no `page` is page 1). `requests` is what the
+    adapter asked for."""
+
+    def __init__(self, path: Union[str, Path]):
+        self.path = Path(path)
+        self.requests: list[dict] = []
+
+    def __call__(self, url: str, params: dict) -> dict:
+        self.requests.append({"url": url, "params": dict(params)})
+        file = (self.path / f"page-{params.get('page', 1)}.json" if self.path.is_dir()
+                else self.path)
+        try:
+            text = file.read_text()
+        except OSError:
+            raise AdapterError(f"fixture has no {file.name}") from None
+        try:
+            return json.loads(text)
+        except ValueError as e:
+            raise AdapterError(f"fixture {file.name} is not JSON: {e}") from None
+
+
+@dataclass(frozen=True)
+class FixtureRun:
+    """`diff` is empty when the events are `expected` (or none was given)."""
+    events: list[dict]
+    requests: list[dict]
+    expected: Optional[list] = None
+    diff: str = ""
+
+
+def _dump(value) -> list[str]:
+    return json.dumps(value, indent=1, sort_keys=True, ensure_ascii=False).splitlines()
+
+
+def run_fixture(adapter: str, fixture: Union[str, Path], *, seed: Optional[dict] = None,
+                config: Optional[dict] = None, expected: Optional[list] = None) -> FixtureRun:
+    """Read `fixture` through `adapter` as it would read `seed` (only what the
+    adapter reads matters — url, feed_type, feed_url). ValueError for an
+    unknown adapter or a config its params refuse; AdapterError when the
+    read fails."""
+    check_config(adapter, config or {})
+    feed = FixtureFeed(fixture)
+    events = read({"seed_id": 0, "name": "fixture", "url": FIXTURE_SEED_URL, "feed_type": None,
+                   "feed_url": None, **(seed or {}), "adapter": adapter,
+                   "adapter_config": json.dumps(config) if config else None},
+                  get_json=feed).events
+    diff = "" if expected is None or expected == events else "\n".join(difflib.unified_diff(
+        _dump(expected), _dump(events), "expected", "read", lineterm=""))
+    return FixtureRun(events, feed.requests, expected, diff)
+
+
+def run_case(adapter: str, case: Union[str, Path], *, seed: Optional[dict] = None,
+             config: Optional[dict] = None, expected: Optional[list] = None) -> FixtureRun:
+    """A case directory — tests/fixtures/adapters/<name>/, and what a
+    promotion proposal carries: `fixture.json` or `fixture/page-<N>.json`
+    (the capture), `expected.json` (the events it must read as) and,
+    optionally, `seed.json` (the seed's url/feed_type/feed_url and a
+    `config`). `seed`, `config` and `expected` given here win over the
+    case's own."""
+    case = Path(case)
+    fixture = case / "fixture" if (case / "fixture").is_dir() else case / "fixture.json"
+    if not fixture.exists():
+        raise ValueError(f"{case} has no fixture.json or fixture/ directory")
+    try:
+        stored = (json.loads((case / "seed.json").read_text())
+                  if (case / "seed.json").exists() else {})
+        if expected is None and (case / "expected.json").exists():
+            expected = json.loads((case / "expected.json").read_text())
+    except ValueError as e:
+        raise ValueError(f"{case}: {e}") from None
+    stored_config = stored.pop("config", None)
+    return run_fixture(adapter, fixture, seed={**stored, **(seed or {})},
+                       config=config if config is not None else stored_config,
+                       expected=expected)

@@ -14,7 +14,11 @@ whose calendar can't be found again on its own site — is retired
 Maintenance (engine/seeds; every change recorded for `autonomy why`): `move`
 corrects a seed URL after verifying the new one, `hold` takes a seed out of
 service (`manual-only` / `awaiting-adapter`) — event-find and `review` leave
-it alone — and `release` puts it back."""
+it alone — and `release` puts it back.
+
+Adapters (engine/seed_adapters): `adapters` lists the shared ones and the
+town's own ($HERMES_HOME/adapters/<name>.py), shadowed and broken files;
+`test-adapter` reads a captured response through one with no network."""
 
 from __future__ import annotations
 
@@ -33,7 +37,7 @@ from urllib.parse import urlparse
 
 import yaml
 
-from engine import autonomy, event_dedup, inspection, source_health
+from engine import autonomy, event_dedup, inspection, seed_adapters, source_health
 from engine import seeds as seed_ops
 from engine.event_extract import firecrawl_listing as _listing_fetch   # move: event-find's read
 from engine.event_extract import firecrawl_markdown as _trial_fetch
@@ -389,6 +393,61 @@ def cmd_set_adapter(args) -> int:
     return _maintain(args.seed_id, change)
 
 
+def cmd_adapters(args) -> int:
+    """Every adapter a seed can name: shared, the town's own
+    ($HERMES_HOME/adapters), town files a shared one shadows, and town files
+    skipped with why."""
+    town = seed_adapters.town_adapters()
+    print(json.dumps({
+        "adapters": [{"name": name, "source": "shared" if name in seed_adapters.ADAPTERS
+                      else "town", "feed_types": list(a.feed_types),
+                      "params": {k: p.help for k, p in a.params.items()}}
+                     for name, a in seed_adapters.registry().items()],
+        "town_dir": str(seed_adapters.town_adapters_dir()),
+        "shadowed": town.shadowed, "errors": town.errors}))
+    return 0
+
+
+def cmd_test_adapter(args) -> int:
+    """Read a captured response through an adapter, no network: print the
+    events (and the requests it made); with an expected file, pass/fail and
+    a diff — exit 1 on a mismatch or any error."""
+    def fail(msg: str) -> int:
+        print(json.dumps({"adapter": args.adapter, "error": msg}))
+        return 1
+    try:
+        config = json.loads(args.config) if args.config else None
+        expected = json.loads(Path(args.expected).read_text()) if args.expected else None
+    except (OSError, ValueError) as e:
+        return fail(f"{type(e).__name__}: {e}")
+    if config is not None and not isinstance(config, dict):
+        return fail("--config must be a JSON object")
+    seed = {}
+    if args.seed_id is not None:
+        conn = sqlite3.connect(_DB_PATH)
+        row = _seed(conn, args.seed_id)
+        conn.close()
+        if not row:
+            return fail(f"no seed {args.seed_id}")
+        seed = {k: row[k] for k in ("name", "url", "feed_type", "feed_url")}
+    if args.seed_url:
+        seed["url"] = args.seed_url
+    try:
+        if args.case:
+            run = seed_adapters.run_case(args.adapter, args.case, seed=seed, config=config,
+                                         expected=expected)
+        else:
+            run = seed_adapters.run_fixture(args.adapter, args.fixture, seed=seed,
+                                            config=config, expected=expected)
+    except (ValueError, seed_adapters.AdapterError) as e:
+        return fail(str(e))
+    out = {"adapter": args.adapter, "events": run.events, "requests": run.requests}
+    if run.expected is not None:
+        out.update({"pass": not run.diff, "diff": run.diff})
+    print(json.dumps(out, ensure_ascii=False))
+    return 1 if run.diff else 0
+
+
 def cmd_health(args) -> int:
     """List seeds with a source-health alert, or `--ack` one: accept its
     current level as normal (earlier runs stop counting)."""
@@ -533,6 +592,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     a.add_argument("--adapter", required=True, help="e.g. tribe; generic = Firecrawl → LLM")
     a.add_argument("--config", help="adapter settings as a JSON object")
     a.set_defaults(func=cmd_set_adapter)
+    la = sub.add_parser("adapters", help="list adapters: shared, the town's own, shadowed, broken")
+    la.set_defaults(func=cmd_adapters)
+    ta = sub.add_parser("test-adapter", help="read a captured response through an adapter "
+                                             "(no network); compare with expected events")
+    ta.add_argument("--adapter", required=True)
+    src = ta.add_mutually_exclusive_group(required=True)
+    src.add_argument("--case", help="dir: fixture.json or fixture/page-<N>.json, expected.json, "
+                                    "optional seed.json")
+    src.add_argument("--fixture", help="one captured JSON response (answers every request), or "
+                                       "a dir of page-<N>.json answered by the `page` param")
+    ta.add_argument("--expected", help="JSON list of the events it must read as")
+    ta.add_argument("--config", help="adapter settings as a JSON object")
+    ta.add_argument("--seed-id", type=int, help="read as this seed would (its url, probed feed)")
+    ta.add_argument("--seed-url", help="the seed URL the adapter sees "
+                                       f"(default {seed_adapters.FIXTURE_SEED_URL})")
+    ta.set_defaults(func=cmd_test_adapter)
     h = sub.add_parser("health", help="list source-health alerts, or --ack one")
     h.add_argument("--ack", type=int, metavar="SEED_ID",
                    help="accept the seed's current event count as its new normal")
