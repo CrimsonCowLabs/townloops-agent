@@ -95,5 +95,5 @@ dependencies; there is no bare `python` on the container's PATH.
   marketing copy.
 - Report which counts are **live** and which are **local** — the operator
   needs to know what is actually on TownLoops.
-- Big windows: summarise counts first; offer to walk lists in batches (SOUL.md
-  §Batching).
+- Big windows: summarise counts first; offer to walk lists in batches
+  (`operator-status/references/dashboard-chat.md` §Batching large requests).

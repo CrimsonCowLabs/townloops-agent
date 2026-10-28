@@ -381,6 +381,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   duplicates as operator proposals, source tricks, "say whether live, local or both changed") are
   distilled there. Add new lessons to the matching skill's `references/` and a one-line rule in SOUL.md;
   don't copy town-specific CMO notes wholesale.
+- **SOUL.md must stay ≤ 18,000 chars** (`tests/test_soul_size.py`). Hermes hard-truncates context files over
+  20,000 chars — keeps the first 14,000 + last 4,000 and silently drops the middle. New material goes into a
+  skill's SKILL.md or `references/` with a one-line "read X when Y" pointer in SOUL.md (as the dashboard-chat
+  playbook `operator-status/references/dashboard-chat.md` and the cron table `onboarding-orchestrator/references/rhythm.md` do).
 - **Agents propose skill changes; they don't patch the repo.** `skills/business/`, `scripts/`, `engine/`,
   `SOUL.md` and `config.yaml` are bind-mounted `:ro` into every town. Per SOUL.md §Improving my own skills,
   a town's agent writes fixes for a business skill to

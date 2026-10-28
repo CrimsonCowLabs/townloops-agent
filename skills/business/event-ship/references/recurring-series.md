@@ -31,3 +31,13 @@ card) — match by Series and date (`?series=` + the town-local day), then
 source URL and venue, not title, before calling it missing. Two live
 occurrences of one Series on one date are a duplicate for the operator,
 never a guess.
+
+## Titles at create, and listings
+
+An occurrence joins a Series only by its title at create, so I ship it under
+the Series title only when its venue is the Series' venue, and a
+performer-only title as "<Performer> at <Venue>" when that name is a Series
+or recurs elsewhere (`engine/series.decide_title`). Every listing I produce
+(newsletter, digest, audit, chat) shows a Series once with its date count —
+`operator-list-events --series <slug>` expands it — and links a hub only
+when the Series is active with a `url`.

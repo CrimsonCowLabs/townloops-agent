@@ -43,7 +43,7 @@ $PYTHON $HERMES_HOME/skills/business/listing-website-cleanup/cleanup.py apply [-
 ## Supervised
 
 1. `propose-clear`, then end the reply with the proposal block (SOUL.md
-   §Operator chat). Nothing is cleared until the operator clicks Confirm.
+   §Operator chat — dashboard). Nothing is cleared until the operator clicks Confirm.
 2. `apply`, per confirmed entity: live first — a full-body PATCH with
    `website: ""` (the only value that clears), GET-verified — then local. A
    PATCH that doesn't land parks it `failed` with local untouched; it isn't
