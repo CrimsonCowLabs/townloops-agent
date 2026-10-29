@@ -74,3 +74,12 @@ def test_remember_records_the_ref_live_carries(fresh_db):
     for table, _ in ingest_ref.TABLES.values():
         cols = {r[1] for r in fresh_db.execute(f"PRAGMA table_info({table})")}
         assert "ingest_ref" in cols, table
+
+
+def test_adopt_onto_the_survivor_our_merged_row_resolves_to_is_already():
+    """A row of ours merged into `riva` still holds the ref; TownLoops maps it
+    to the survivor, so the ref already resolves there."""
+    taken = TownloopsError(409, "ingest_ref_taken", "x", {"ingest_ref": "r", "slug": "riva"})
+    c = FakeClient(patch_error=taken)
+    assert ingest_ref.adopt(c, "venues", {"slug": "riva"}, "r").status == "already"
+    assert ingest_ref.adopt(c, "venues", {"slug": "other"}, "r").status == "taken"

@@ -178,6 +178,35 @@ class TestVerifyAndFlags:
         assert res.status == "missing" and api.creates() == []
         assert json.loads(row(conn)["extra_json"])["live_sync"]["status"] == "missing"
 
+    def test_renamed_live_is_found_by_its_ref_and_repointed(self, conn):
+        """A 404 naming no survivor is not "gone" until the Ingest Ref says
+        so: a row renamed on TownLoops is found by it and synced there."""
+        from engine.ingest_ref import ref_for
+        api = FakeAPI(venues=[live_venue("riva-renamed", id=8, ingest_ref=ref_for("v-uid"))])
+        self._enriched(conn)
+        res = entity_sync.sync_entity(api, conn, "venue", "v-uid")
+        assert res.status == "synced" and self._failures(conn) == []
+        r = row(conn)
+        assert r["townloops_slug"] == "riva-renamed" and r["ingest_ref"] == ref_for("v-uid")
+        assert json.loads(r["extra_json"])["live_id"] == 8
+        assert api.venues["riva-renamed"]["phone"] == "530-555-0100"
+        assert r["pushed_hash"] == r["content_hash"]
+
+    def test_renamed_between_read_and_patch_is_followed_by_ref(self, conn):
+        from engine.ingest_ref import ref_for
+        api = FakeAPI(venues=[live_venue(ingest_ref=ref_for("v-uid"))])
+        self._enriched(conn)
+        real_update = api.update
+
+        def renamed_meanwhile(resource, slug, payload):
+            if slug == "riva-grill":
+                api.rename("venues", "riva-grill", "riva-renamed")
+            return real_update(resource, slug, payload)
+        api.update = renamed_meanwhile
+        assert entity_sync.sync_entity(api, conn, "venue", "v-uid").status == "synced"
+        assert row(conn)["townloops_slug"] == "riva-renamed"
+        assert api.venues["riva-renamed"]["phone"] == "530-555-0100"
+
     def test_transient_error_is_retried_later_not_flagged(self, conn):
         api = FakeAPI(venues=[live_venue()])
         before = self._enriched(conn)

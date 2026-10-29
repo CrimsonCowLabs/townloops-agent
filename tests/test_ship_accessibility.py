@@ -24,7 +24,7 @@ class TestCreate:
         assert ship.main() == 0
         [created] = api.creates()
         assert created["accessibility_notes"] == NOTES
-        assert api.events[created["slug"]]["accessibility_notes"] == NOTES
+        assert api.events[api.created_slug()]["accessibility_notes"] == NOTES
 
     def test_no_notes_sends_no_key(self, ship, monkeypatch, conn):
         api = _use(monkeypatch, FakeAPI())

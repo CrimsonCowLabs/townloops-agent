@@ -1,11 +1,13 @@
 """Find a record already on TownLoops before creating one.
 
 Local staged rows drift from live: an event may already have been created
-(a retry, an earlier run, the CMO, an operator) under our slug or another
-one. So a create is only sent after a lookup comes back empty, and a 409 on
-create means "look again", not "fine".
+(a retry, an earlier run, the CMO, an operator), or renamed by a curator. So
+a create is only sent after a lookup comes back empty.
 
-The event list has no `source_url` filter, so an event is looked up by slug
+Every row the agent ships carries its Ingest Ref (engine/ingest_ref, townloops
+ADR 0011), so a lookup goes by ref first — one `?ingest_ref=` list read that
+survives a wiped local cache and a TownLoops-side rename. The rest is the
+fallback for rows shipped before refs: an event is looked up by slug
 (GET); then, when the Series it will join is known, by that Series'
 occurrences on the same town-local date (`?series=` + the day — the
 strongest "already live" signal: a second source's copy of one evening is
@@ -40,7 +42,7 @@ MAX_MERGE_HOPS = 3
 class LiveEventMatch:
     row: Optional[dict] = None                 # the one live event, when found
     ambiguous: list[dict] = field(default_factory=list)   # >1 candidates
-    matched_by: Optional[str] = None           # slug | series-day | source_url
+    matched_by: Optional[str] = None           # ingest_ref | slug | series-day | source_url
 
 
 def is_not_found(exc: Exception) -> bool:
@@ -52,7 +54,7 @@ def is_conflict(exc: Exception) -> bool:
     if status is not None:
         return status == 409
     msg = str(exc)
-    return "409" in msg or "slug_taken" in msg
+    return "409" in msg or "slug_taken" in msg or "ingest_ref_taken" in msg
 
 
 def merged_into(details) -> Optional[str]:
@@ -117,9 +119,15 @@ def get_live(client, resource: str, slug: str) -> dict:
     return result
 
 
-def find_live_entity(client, resource: str, slug: Optional[str]) -> Optional[dict]:
-    """The live row at `slug` — or its merge survivor (`get_live`) — or None
-    on 404. Other API errors raise."""
+def find_live_entity(client, resource: str, slug: Optional[str],
+                     ingest_ref: Optional[str] = None) -> Optional[dict]:
+    """The live row carrying `ingest_ref` (engine/ingest_ref.find_by_ref);
+    else the one at `slug` — or its merge survivor (`get_live`); else None on
+    404. Other API errors raise."""
+    from engine.ingest_ref import find_by_ref
+    row = find_by_ref(client, resource, ingest_ref)
+    if row:
+        return row
     if not slug:
         return None
     try:
@@ -132,12 +140,18 @@ def find_live_entity(client, resource: str, slug: Optional[str]) -> Optional[dic
 
 def find_live_event(client, *, slug: Optional[str], source_url: Optional[str],
                     start_at: Optional[str], series_slug: Optional[str] = None,
-                    tz: Optional[tzinfo] = None) -> LiveEventMatch:
-    """Live event by `slug`; else, given the Series it will join and the town
+                    tz: Optional[tzinfo] = None,
+                    ingest_ref: Optional[str] = None) -> LiveEventMatch:
+    """Live event carrying `ingest_ref`; else (rows shipped before refs) by
+    `slug`; else, given the Series it will join and the town
     timezone, that Series' occurrence on the same town-local date; else by
     `source_url` among events starting within 12h of `start_at` (UTC with
     offset). Two or more hits at a step are ambiguous. API errors other than
     a 404 raise — the caller must not create on an unanswered lookup."""
+    from engine.ingest_ref import find_by_ref
+    row = find_by_ref(client, "events", ingest_ref)
+    if row:
+        return LiveEventMatch(row=row, matched_by="ingest_ref")
     row = find_live_entity(client, "events", slug)
     if row:
         return LiveEventMatch(row=row, matched_by="slug")

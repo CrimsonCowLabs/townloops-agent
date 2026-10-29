@@ -2,8 +2,13 @@
 the one entity ship path, used by event-ship (an event's venue, hosts and
 people) and by business-discovery's promote (an operator-approved business).
 
-Nothing is created without first looking it up live (engine/live_lookup);
-a created or adopted row is then synced (engine/entity_sync).
+Nothing is created without first looking it up live (engine/live_lookup):
+by its Ingest Ref first (engine/ingest_ref — survives a wiped local cache and
+a TownLoops-side rename), then, for rows shipped before refs, by the cached
+slug. A create never proposes a slug — TownLoops derives it — and carries the
+ref; a `409 ingest_ref_taken` names the row that already holds it, which is
+bound with no second lookup. A created, bound or matched row is then synced
+(engine/entity_sync).
 """
 
 from __future__ import annotations
@@ -32,12 +37,6 @@ class AwaitingResearch(RuntimeError):
     def __init__(self, kind: str, status: Optional[str]):
         self.reason = f"awaiting research: {status or 'pending'}"
         super().__init__(f"{kind} {self.reason}")
-
-
-def slug_for(kind: str, entity_uid: str) -> str:
-    town = os.environ.get("TOWNLOOPS_TOWN_SLUG", "unknown")
-    return f"hermes-{town}-{entity_uid[:16]}"
-
 
 
 def _venue_payload(row) -> dict:
@@ -98,21 +97,26 @@ PAYLOAD_BUILDERS = {
 
 def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     """Make sure one entity exists live and reflects our local values.
-    Returns its TownLoops slug, or None if we couldn't ship it. A row
-    already live at its slug is adopted (live id recorded, nothing POSTed);
-    a 409 on create is resolved the same way — never assumed. Adopted,
-    created and since-enriched rows are then synced (engine/entity_sync):
-    live values kept, live blanks filled, GET-verified. A row we shipped
-    before that a curator merged into another is re-pointed at the survivor
-    (the lookup follows the 404's `merged_into_slug`); one otherwise gone
-    from live is flagged for the operator, not re-created. A create the
-    submission gate holds (autonomous mode) raises autonomy.SubmissionsHeld,
-    and a never-shipped bare performer/creator research hasn't verified
-    raises AwaitingResearch before any lookup — holds, not failures; the
-    caller decides."""
+    Returns its TownLoops slug, or None if we couldn't ship it.
+
+    Looked up by its Ingest Ref, else (shipped before refs) at its cached
+    slug — or, with none cached, the slug pre-ref creates proposed, which is
+    the ref's own string. A row found under another slug than cached (renamed
+    or merged on TownLoops) is re-pointed (`entity_sync.repoint`); one found
+    by slug without our ref is given it (`ingest_ref.adopt`, set-once PATCH).
+    Not found: created with the ref and no slug; a `409 ingest_ref_taken`
+    binds to the row it names, with no second lookup. A shipped row gone from
+    live (no ref match, cached slug 404s with no survivor) is flagged for the
+    operator, not re-created. The bound row is then synced
+    (engine/entity_sync): live values kept, live blanks filled, GET-verified.
+    A create the submission gate holds (autonomous mode) raises
+    autonomy.SubmissionsHeld, and a never-shipped bare performer/creator
+    research hasn't verified raises AwaitingResearch before any lookup —
+    holds, not failures; the caller decides."""
     from engine import entity_sync
     from engine.autonomy import SubmissionsHeld
-    from engine.live_lookup import find_live_entity, is_conflict
+    from engine.ingest_ref import ref_for, remember, taken_slug
+    from engine.live_lookup import find_live_entity
     from engine.performer_research import awaits_research
     table, resource = ENTITY_TABLES[kind]
     row = conn.execute(
@@ -129,38 +133,52 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         return row["townloops_slug"]
     if not row["pushed_at"] and awaits_research(kind, dict(row)):
         raise AwaitingResearch(kind, row["enrichment_status"])
-    proposed_slug = row["townloops_slug"] or slug_for(kind, entity_uid)
-    created = False
+    ref = ref_for(entity_uid)
+    cached = row["townloops_slug"]
+    created = bound = False
     try:
-        live = find_live_entity(client, resource, proposed_slug)
-        if live is None and row["pushed_at"] and row["townloops_slug"]:
+        live = find_live_entity(client, resource, cached or ref, ingest_ref=ref)
+        if live is None and row["pushed_at"] and cached:
             entity_sync.flag_for_operator(conn, kind, dict(row), "missing",
-                                          f"live {kind} {proposed_slug} not found (404) — not re-created")
+                                          f"live {kind} {cached} not found (404, "
+                                          f"no row carries {ref}) — not re-created")
             return None
         if live is None:
             payload = PAYLOAD_BUILDERS[kind](row)
-            payload["slug"] = proposed_slug
+            payload["ingest_ref"] = ref
             idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:{kind}:{entity_uid[:16]}"
             try:
                 live, created = client.create(resource, payload, idempotency_key=idem), True
             except Exception as e:
-                if not is_conflict(e):
+                taken = taken_slug(e)
+                if not taken:
                     raise
-                live = find_live_entity(client, resource, proposed_slug)
-                if live is None:
-                    raise RuntimeError(f"409 on create but no live {kind} at {proposed_slug}") from e
+                # Already shipped (a wiped cache, a lost response): bind to it.
+                live, bound = {"slug": taken}, True
     except SubmissionsHeld:
         raise
     except Exception as e:  # noqa: BLE001 — surfaced as a failed ship-<kind> activity
         print(f"  ship {kind} {entity_uid[:12]} failed: {str(e)[:120]}", file=sys.stderr)
         return None
     live = live if isinstance(live, dict) else {}
-    slug = live.get("slug") or proposed_slug
+    slug = live.get("slug")
+    if not slug:
+        print(f"  ship {kind} {entity_uid[:12]} failed: no slug in the answer", file=sys.stderr)
+        return None
     town = os.environ.get("TOWNLOOPS_TOWN_SLUG")
     # The server may file a new venue under another (ghost) town, e.g. a Reno
     # venue. Events resolve `venue_id` in-town only, so such an id would
     # silently unbind the event — leave it unrecorded and bind by name.
     in_town = live.get("town_slug") in (None, "", town)
+    if cached and slug != cached and in_town:
+        # Renamed (or merged) on TownLoops: the ref, or the merge, says where.
+        entity_sync.repoint(conn, kind, dict(row), live)
+        row = conn.execute(f"SELECT * FROM {table} WHERE entity_uid = ?",
+                           (entity_uid,)).fetchone()
+    if created or bound or live.get("ingest_ref") == ref:
+        remember(conn, kind, entity_uid, ref)
+    elif in_town and row["ingest_ref"] != ref:
+        _adopt_ref(client, conn, kind, entity_uid, resource, live, ref)
     _record_live_entity(conn, table, row, slug, live.get("id") if in_town else None,
                         None if in_town else live.get("town_slug"))
     if in_town:
@@ -168,6 +186,21 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         if res.status == "error":
             print(f"  sync {kind} {entity_uid[:12]} → {slug}: {res.detail}", file=sys.stderr)
     return slug
+
+
+def _adopt_ref(client, conn, kind: str, entity_uid: str, resource: str, live: dict,
+               ref: str) -> None:
+    """A row shipped before refs, found by slug: give it our ref (set-once
+    PATCH) and remember it. A failure is recorded and retried next ship."""
+    from engine.ingest_ref import adopt, remember
+    result = adopt(client, resource, live, ref)
+    if result.status in ("adopted", "already"):
+        remember(conn, kind, entity_uid, ref)
+    if result.status != "already":
+        record_activity(conn, "entity-sync", "adopt-ref", f"{kind}:{entity_uid}",
+                        detail=f"{live.get('slug')}: {result.status} {result.detail}".strip(),
+                        ok=result.status == "adopted",
+                        error=None if result.status == "adopted" else result.detail or result.status)
 
 
 def ship_released(client, conn, limit: int = 25,

@@ -125,7 +125,8 @@ class FakeClient:
 
     def create(self, resource, payload, idempotency_key=None):
         FakeClient.calls.append((resource, payload))
-        return {"slug": payload.get("slug")}
+        assert "slug" not in payload       # TownLoops derives it (#63)
+        return {"slug": f"{resource}-{len(FakeClient.calls)}"}
 
     def get(self, resource, slug):  # nothing is live yet
         from engine.townloops_api import TownloopsError

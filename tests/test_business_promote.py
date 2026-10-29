@@ -107,9 +107,9 @@ def test_approved_candidate_is_promoted_enriched_and_shipped(fresh_db, api):
     assert post["description"] == "Sourdough by the lake."   # enriched before shipping
     cand = _cand(fresh_db, uid)
     assert cand["status"] == "promoted"
-    assert cand["live_slug"] == post["slug"]
+    assert cand["live_slug"] == api.created_slug("businesses") and "slug" not in post
     biz = _business(fresh_db, cand["research_entity_uid"])
-    assert biz["townloops_slug"] == post["slug"]
+    assert biz["townloops_slug"] == api.created_slug("businesses")
     assert biz["pushed_hash"] == biz["content_hash"]
     assert json.loads(biz["extra_json"])["candidate_uid"] == uid
     assert enrich.calls == [cand["research_entity_uid"]]

@@ -344,7 +344,9 @@ class GatedClient:
             raise SubmissionsHeld(gate.reason, gate.evidence)
         result = self._client.create(resource, payload, idempotency_key=idempotency_key)
         row = result if isinstance(result, dict) else {}
-        slug = row.get("slug") or payload.get("slug")
+        # TownLoops derives the slug (the agent sends an ingest_ref, never a
+        # slug): the answer's is the only one. None leaves no submissions row.
+        slug = row.get("slug")
         status = row.get("status")
         unreviewed = status != "pending"
         ctx = dict(self.context)
@@ -357,6 +359,7 @@ class GatedClient:
         if unreviewed:
             open_circuit(self._conn, "published-without-review",
                          {"resource": resource, "slug": slug, "status": status,
+                          "ingest_ref": payload.get("ingest_ref"),
                           "note": "the API key can publish — switch the town to an "
                                   "api_ingest key without publish permission"},
                          self._alert)

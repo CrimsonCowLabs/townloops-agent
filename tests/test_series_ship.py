@@ -73,7 +73,7 @@ class TestJoiningTheRightSeries:
         assert ship.main() == 0
         [created] = api.creates()
         assert created["title"] == "Trivia Thursday"
-        assert api.events[created["slug"]]["series_slug"] == "trivia-thursday"
+        assert api.events[api.created_slug()]["series_slug"] == "trivia-thursday"
         row = _row(conn, uid)
         assert (row["series_slug"], row["series_id"]) == ("trivia-thursday", 11)
         assert row["title"] == "Trivia Thursday – Week 3"          # local title unchanged
@@ -88,7 +88,7 @@ class TestJoiningTheRightSeries:
         assert ship.main() == 0
         [created] = api.creates()
         assert created["title"] == "Trivia Thursday – Week 3"
-        assert api.events[created["slug"]]["series_slug"] is None
+        assert api.events[api.created_slug()]["series_slug"] is None
         assert _row(conn, uid)["series_slug"] is None
 
     def test_performer_title_matching_a_series_elsewhere_names_the_venue(
@@ -101,12 +101,12 @@ class TestJoiningTheRightSeries:
         assert ship.main() == 0
         [created] = event_creates(api)
         assert created["title"] == "Jon Sills at The Loft"
-        assert api.events[created["slug"]]["series_slug"] is None
+        assert api.events[api.created_slug()]["series_slug"] is None
 
         # A re-ship finds the live row by slug and never touches its title.
         assert ship.main() == 0
         assert len(event_creates(api)) == 1
-        assert api.events[created["slug"]]["title"] == "Jon Sills at The Loft"
+        assert api.events[api.created_slug()]["title"] == "Jon Sills at The Loft"
         assert all(p.get("title") in (None, "Jon Sills at The Loft") for p in api.patches())
 
     def test_archived_series_groups_but_is_never_linked(self, ship, monkeypatch, conn):
@@ -165,7 +165,7 @@ class TestSeriesSharedEnrichment:
                  categories=[], tags=[])
         assert ship.main() == 0
         [created] = api.creates()
-        new = api.events[created["slug"]]
+        new = api.events[api.created_slug()]
         assert new["description"] == "Six rounds, prizes."
         assert new["category_slugs"] == ["nightlife"]
         assert new["tags"] == ["trivia"]
@@ -182,7 +182,7 @@ class TestSeriesSharedEnrichment:
                          "source_url": "https://another-calendar.example/e/5"})
         assert ship.main() == 0
         [created] = api.creates()
-        assert api.events[created["slug"]]["venue_id"] is None
+        assert api.events[api.created_slug()]["venue_id"] is None
         assert _row(conn, uid)["series_slug"] == "trivia-thursday"
 
     def test_venue_is_copied_for_a_single_venue_series(self, ship, monkeypatch, conn):
@@ -192,5 +192,5 @@ class TestSeriesSharedEnrichment:
                    "source_url": "https://another-calendar.example/e/5"})
         assert ship.main() == 0
         [created] = api.creates()
-        assert api.events[created["slug"]]["venue_id"] == LOFT
+        assert api.events[api.created_slug()]["venue_id"] == LOFT
 

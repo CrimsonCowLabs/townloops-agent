@@ -212,7 +212,7 @@ class TestEstablishedSeries:
         town.listing(ARENA, [concert("Trivia Night", days=d) for d in (3, 10, 17)])
         town.run()
         for p in town.submitted_events():
-            town.api.approve("events", p["slug"])
+            town.api.approve("events", town.api.posted_slug("events", p))
         town.poll()
 
         # A bare listing — no venue or location — that only the AI pass could settle.

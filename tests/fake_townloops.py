@@ -13,6 +13,18 @@ create drop `tags`). A `venue_name` naming several in-town venues fails the
 way the server's `scalar_one_or_none` does ("Multiple rows were found").
 A missing slug (or another town's) GETs as a 404; `list("events")` honours `from`/`to`.
 
+Ingest Ref (townloops ADR 0011, #63): a create must not carry a `slug` (the
+agent never proposes one — asserted here, for events and the five kinds); the
+server derives it from the title/name, unique in the table. A create whose
+`ingest_ref` a row in the town already holds — a deleted/merged one included —
+is a `409 ingest_ref_taken` with `details = {ingest_ref, slug}` (the merge
+survivor's slug when merged). `list(..., ingest_ref=…)` filters on it (deleted
+and merged rows excluded). A PATCH may set `ingest_ref` once: a different ref
+on a row that has one is a 422, a ref another row holds a 409. An event
+create's `venue_ingest_ref` binds the venue after `venue_id`, before
+`venue_name`. `rename` moves a row to a new slug (the old one 404s, no
+survivor named).
+
 Series (ADR 0007, townloops `app/services/series.py` + the ingest API's
 `series` routes): every event carries `series_slug`/`series_id` (null for a
 singleton); `create` auto-links to an *active* Series in the town whose title
@@ -76,6 +88,7 @@ class FakeAPI:
         self.entity_status = entity_status
         self.deleted: dict[tuple[str, str], dict] = {}
         self.merged_into: dict[tuple[str, str], str] = {}
+        self.created: list[tuple[str, str]] = []   # (resource, slug) of each successful create
 
     def verify_town(self, *a, **k):
         return {"town_slug": "slt"}
@@ -104,6 +117,8 @@ class FakeAPI:
             rows = [r for r in rows if s and s["town"] == "slt" and r.get("series_slug") == s["slug"]]
         if params.get("status"):
             rows = [r for r in rows if r.get("status", "published") == params["status"]]
+        if "ingest_ref" in params:
+            rows = [r for r in rows if r.get("ingest_ref") == params["ingest_ref"]]
         rows = sorted(rows, key=lambda r: r["start_at"]) if resource == "events" else rows
         lo, hi = _instant(params.get("from")), _instant(params.get("to"))
         if lo or hi:
@@ -123,35 +138,92 @@ class FakeAPI:
     def create(self, resource, payload, idempotency_key=None):
         self.calls.append(("POST", resource, copy.deepcopy(payload)))
         _no_series_writes(resource)
+        assert "slug" not in payload, f"a {resource} create proposed a slug: {payload['slug']!r}"
         table = self.tables.setdefault(resource, {})
-        if payload["slug"] in table:
-            raise TownloopsError(409, "slug_taken", f"slug {payload['slug']!r} taken")
+        ref = payload.get("ingest_ref")
+        holder = self.ref_holder(resource, ref)
+        if holder:
+            raise TownloopsError(409, "ingest_ref_taken", f"ingest_ref {ref!r} taken",
+                                 {"ingest_ref": ref, "slug": holder})
+        slug = self._new_slug(resource, payload.get("title") or payload.get("name"))
+        self.created.append((resource, slug))
         if resource != "events":
-            row = {**copy.deepcopy(payload), "id": 1000 + len(table)}
+            row = {**copy.deepcopy(payload), "slug": slug, "id": 1000 + len(table)}
             if self.entity_status:
                 row["status"] = self.entity_status
-            table[row["slug"]] = row
+            table[slug] = row
             return copy.deepcopy(row)
-        row = {"id": len(self.events) + 1, "slug": payload["slug"], "town_slug": "slt",
+        row = {"id": len(self.events) + 1, "slug": slug, "town_slug": "slt",
                "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": [],
-               "status": self.event_status, "series_slug": None, "series_id": None}
+               "status": self.event_status, "series_slug": None, "series_id": None,
+               "ingest_ref": ref}
         for k in EVENT_PATCH_FIELDS - {"venue_id", "venue_name"}:
             if k in payload and k not in self.create_drops:
                 row[k] = payload[k]
-        self._bind_venue(row, payload.get("venue_id"), payload.get("venue_name"))
+        self._bind_venue(row, payload.get("venue_id"), payload.get("venue_name"),
+                         payload.get("venue_ingest_ref"))
         row["category_slugs"] = sorted(row["category_slugs"])
         row["tags"] = sorted(_slug(t) for t in row["tags"])
         self._auto_link(row)
         self.events[row["slug"]] = row
         return copy.deepcopy(row)
 
-    def _bind_venue(self, row, venue_id, venue_name):
-        if venue_id is None and not venue_name:
+    def ref_holder(self, resource, ref):
+        """Slug of the row holding `ref` in the town (a merged-away row's
+        survivor; a deleted row's own slug), else None."""
+        if not ref:
+            return None
+        for slug, r in self.tables.get(resource, {}).items():
+            if r.get("ingest_ref") == ref:
+                return slug
+        for (res, slug), r in self.deleted.items():
+            if res == resource and r.get("ingest_ref") == ref:
+                return self.merged_into.get((res, slug)) or slug
+        return None
+
+    def _new_slug(self, resource, title):
+        base = _slug(title or "") or resource
+        taken = set(self.tables.get(resource, {})) | {s for r, s in self.deleted if r == resource}
+        slug, n = base, 2
+        while slug in taken:
+            slug, n = f"{base}-{n}", n + 1
+        return slug
+
+    def rename(self, resource, old, new):
+        """A curator renames a live row: the old slug 404s, naming no survivor."""
+        table = self.tables[resource]
+        row = table.pop(old)
+        row["slug"] = new
+        table[new] = row
+        if resource == "venues":
+            for e in self.events.values():
+                if e.get("venue_slug") == old:
+                    e["venue_slug"] = new
+
+    def _set_ref(self, resource, slug, row, ref):
+        """The set-once PATCH of `ingest_ref`."""
+        if ref is None:
+            return
+        if row.get("ingest_ref") and row["ingest_ref"] != ref:
+            raise TownloopsError(422, "validation_error", "ingest_ref is set once")
+        holder = self.ref_holder(resource, ref)
+        if holder and holder != slug:
+            raise TownloopsError(409, "ingest_ref_taken", f"ingest_ref {ref!r} taken",
+                                 {"ingest_ref": ref, "slug": holder})
+        row["ingest_ref"] = ref
+
+    def _bind_venue(self, row, venue_id, venue_name, venue_ref=None):
+        if venue_id is None and not venue_name and not venue_ref:
             return
         town = row.get("town_slug", "slt")
+        v = None
         if venue_id is not None:
             v = next((v for v in self.venues.values()
                       if v["id"] == venue_id and v.get("town", "slt") == town), None)
+        elif venue_ref and any(x.get("ingest_ref") == venue_ref for x in self.venues.values()):
+            v = next(x for x in self.venues.values() if x.get("ingest_ref") == venue_ref)
+        elif not venue_name:
+            pass
         else:
             in_town = [v for v in self.venues.values()
                        if v["name"].lower() == venue_name.lower() and v.get("town", "slt") == town]
@@ -185,6 +257,7 @@ class FakeAPI:
         if slug not in self.events:
             self._not_found(resource, slug)
         row = self.events[slug]
+        self._set_ref(resource, slug, row, payload.get("ingest_ref"))
         if "title" in payload and payload["title"] is not None and len(payload["title"]) < 3:
             raise RuntimeError("[422 validation_error] title too short")
         body = {k: v for k, v in payload.items()
@@ -202,8 +275,9 @@ class FakeAPI:
         if slug not in table or table[slug].get("town", "slt") != "slt":
             self._not_found(resource, slug)
         row = table[slug]
+        self._set_ref(resource, slug, row, payload.get("ingest_ref"))
         for k, v in payload.items():
-            if v is None or k in self.ignore or (k == "name" and v == ""):
+            if k == "ingest_ref" or v is None or k in self.ignore or (k == "name" and v == ""):
                 continue
             if k == "category_slug" and self.categories is not None and v not in self.categories:
                 v = None
@@ -235,7 +309,24 @@ class FakeAPI:
         self.deleted[(resource, slug)] = self.tables[resource].pop(slug)
 
     def patches(self):
-        return [c[3] for c in self.calls if c[0] == "PATCH"]
+        """Content PATCH bodies — an Ingest Ref adoption (`ref_patches`) aside."""
+        return [c[3] for c in self.calls if c[0] == "PATCH" and set(c[3]) != {"ingest_ref"}]
+
+    def ref_patches(self):
+        """(resource, slug, ref) of each set-once ref PATCH (adoption)."""
+        return [(c[1], c[2], c[3]["ingest_ref"]) for c in self.calls
+                if c[0] == "PATCH" and set(c[3]) == {"ingest_ref"}]
+
+    def created_slug(self, resource="events", i=-1):
+        """The slug TownLoops derived for the `i`th create of `resource`."""
+        return [s for r, s in self.created if r == resource][i]
+
+    def posted_slug(self, resource, payload):
+        """The slug of the row a create `payload` made (found by its ingest_ref)."""
+        return self.ref_holder(resource, payload["ingest_ref"])
+
+    def ref_of(self, resource, slug):
+        return self.tables[resource][slug].get("ingest_ref")
 
     def creates(self):
         return [c[2] for c in self.calls if c[0] == "POST"]

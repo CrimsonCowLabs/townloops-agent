@@ -306,7 +306,7 @@ class TestTown:
         town.seed("Arena", ARENA)
         town.listing(ARENA, [concert(source_url=JAZZ_PAGE), concert("Later", days=30)])
         town.run()
-        town.api.approve("events", next(p["slug"] for p in town.submitted_events()
+        town.api.approve("events", next(town.api.posted_slug("events", p) for p in town.submitted_events()
                                         if p["title"] == "Jazz Night"))
         town.listing(ARENA, [concert("CANCELLED: Jazz Night", source_url=JAZZ_PAGE),
                              concert("Later", days=30)])

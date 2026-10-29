@@ -160,7 +160,7 @@ class TestReleasedOnTheNextPass:
         assert (created["name"], created["website"]) == ("Mountain Ramblers",
                                                          "https://ramblers.example")
         row = conn.execute("SELECT * FROM performers WHERE entity_uid = ?", (perf,)).fetchone()
-        assert row["townloops_slug"] == created["slug"] and row["pushed_at"]
+        assert row["townloops_slug"] == api.created_slug("performers") and row["pushed_at"]
         assert row["pushed_hash"] == row["content_hash"]          # synced + verified
         [shipped] = activity(conn, "entity-sync", "ship-performer")
         assert shipped["target"] == f"performer:{perf}"

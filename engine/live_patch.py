@@ -35,6 +35,9 @@ _ROUND_TRIP = {
 }
 _SETS = ("category_slugs", "tags")
 _TIMES = ("start_at", "end_at")
+# Never in a PATCH body: the Ingest Ref is set once, by engine/ingest_ref.adopt
+# alone (a re-point is a 422), and isn't round-tripped.
+_NEVER_SENT = ("ingest_ref", "venue_ingest_ref")
 
 
 @dataclass
@@ -52,7 +55,7 @@ def build_event_patch(current: dict, overrides: dict) -> dict[str, Any]:
     override without a UTC offset (the API would read it as town-local)."""
     if not current.get("slug"):
         raise ValueError("no live row to build a PATCH from")
-    changes = {k: v for k, v in overrides.items() if v is not None}
+    changes = {k: v for k, v in overrides.items() if v is not None and k not in _NEVER_SENT}
     for k in _TIMES:
         if k in changes and not _has_offset(changes[k]):
             raise ValueError(f"{k} {changes[k]!r} has no UTC offset")

@@ -1,8 +1,10 @@
-"""event-ship looks for a record on TownLoops before creating one: an event
-by slug, then by source_url at the same time; an entity by slug. A record
-already live is updated (events) or adopted (entities) instead of POSTed,
-and a 409 means "go find the live row", not "fine". Events point at their
-venue by id, so the server's name lookup can't hit duplicate venue names."""
+"""event-ship looks for a record on TownLoops before creating one: by its
+Ingest Ref first, then (rows shipped before refs) an event by slug, then by
+source_url at the same time; an entity by slug. A record already live is
+updated (events) or adopted (entities) instead of POSTed — and given our ref
+when a fallback found it. A create carries the ref, never a slug; its 409
+`ingest_ref_taken` binds to the slug it names. Events point at their venue by
+id, so the server's name lookup can't hit duplicate venue names."""
 
 from __future__ import annotations
 
@@ -13,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from engine import ingest_ref
 from engine.derive_helpers import insert_entity, link_event_to_entity
 from engine.event_extract import event_uid, upsert_event
 from engine.live_lookup import find_live_entity, find_live_event
@@ -92,6 +95,34 @@ class TestFindLiveEvent:
             find_live_event(api, slug="hermes-jazz", source_url=SRC, start_at=START)
 
 
+class TestFindByIngestRef:
+    def test_ref_wins_over_every_fallback(self):
+        api = FakeAPI([live_event("by-slug", source_url=None),
+                       live_event("by-url"),
+                       live_event("renamed", source_url=None, ingest_ref="hermes-slt-r")])
+        m = find_live_event(api, ingest_ref="hermes-slt-r", slug="by-slug", source_url=SRC,
+                            start_at=START)
+        assert m.row["slug"] == "renamed" and m.matched_by == "ingest_ref"
+        assert [c[0] for c in api.calls] == ["LIST"]          # one read, nothing else
+
+    def test_no_ref_match_falls_back_to_slug_then_source_url(self):
+        api = FakeAPI([live_event("by-url")])
+        m = find_live_event(api, ingest_ref="hermes-slt-r", slug="gone", source_url=SRC,
+                            start_at=START)
+        assert m.row["slug"] == "by-url" and m.matched_by == "source_url"
+
+    def test_entity_ref_first_then_cached_slug(self):
+        api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill"},
+                              {"id": 8, "slug": "riva-new", "name": "Riva", "ingest_ref": "r"}])
+        assert find_live_entity(api, "venues", "riva-grill", ingest_ref="r")["id"] == 8
+        assert find_live_entity(api, "venues", "riva-grill", ingest_ref="other")["id"] == 7
+
+    def test_ingest_ref_taken_is_a_conflict(self):
+        from engine.live_lookup import is_conflict
+        assert is_conflict(TownloopsError(409, "ingest_ref_taken", "x", {"slug": "a"}))
+        assert is_conflict(RuntimeError("[409 ingest_ref_taken] taken"))
+
+
 class TestFindLiveEntity:
     def test_found_and_not_found(self):
         api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill"}])
@@ -162,7 +193,12 @@ class TestShipEventLookup:
         assert ship.main() == 0
         [payload] = api.creates()
         assert payload["source_url"] == SRC
-        assert _row(conn, uid)["townloops_slug"] == payload["slug"]
+        assert "slug" not in payload                         # TownLoops derives it
+        assert payload["ingest_ref"] == ingest_ref.ref_for(uid)
+        [live] = api.events.values()
+        row = _row(conn, uid)
+        assert row["townloops_slug"] == live["slug"] == "jazz-night"
+        assert row["ingest_ref"] == payload["ingest_ref"]
 
     def test_live_by_source_url_is_patched_not_created(self, ship, monkeypatch, conn):
         api = _use(monkeypatch, FakeAPI([live_event("jazz-live", category_slugs=["arts"])]))
@@ -194,14 +230,18 @@ class TestShipEventLookup:
         assert api.events["jazz-live"]["title"] == "Jazz Night w/ The Trio"
 
     def test_live_by_own_slug_is_patched_not_created(self, ship, monkeypatch, conn):
+        """A pre-ref row created under the slug the agent proposed then (the
+        ref's own string) is found there and given the ref."""
         api = FakeAPI()
         _use(monkeypatch, api)
         uid = _stage(ship, monkeypatch, conn)
-        slug = ship._slug_for("event", uid)
+        slug = ingest_ref.ref_for(uid)
         api.events[slug] = live_event(slug, source_url=None)
         assert ship.main() == 0
         assert api.creates() == []
         assert api.patches()[0]["source_url"] == SRC
+        assert api.ref_patches() == [("events", slug, slug)]
+        assert _row(conn, uid)["ingest_ref"] == slug
 
     def test_multiple_live_rows_park_the_event(self, ship, monkeypatch, conn):
         from engine import workqueue
@@ -221,24 +261,40 @@ class TestShipEventLookup:
         uid = _stage(ship, monkeypatch, conn)
 
         def conflict(*a, **k):
-            raise TownloopsError(409, "slug_taken", "slug taken")
+            raise TownloopsError(409, "conflict", "something else")
         api.create = conflict
         assert ship.main() != 0
         assert _row(conn, uid)["pushed_at"] is None
 
-    def test_409_reconciles_to_the_live_row(self, ship, monkeypatch, conn):
-        """A row that appears between lookup and POST (another worker)."""
+    def test_ingest_ref_taken_binds_with_no_second_request(self, ship, monkeypatch, conn):
+        """A row that appears between lookup and POST (another worker): the
+        409 names it — bound, nothing read or patched after."""
         api = _use(monkeypatch, FakeAPI())
         uid = _stage(ship, monkeypatch, conn)
         real_create = api.create
 
         def racing_create(resource, payload, idempotency_key=None):
-            api.events[payload["slug"]] = live_event(payload["slug"])
+            api.events["jazz-raced"] = live_event("jazz-raced", ingest_ref=payload["ingest_ref"])
             return real_create(resource, payload, idempotency_key)
         api.create = racing_create
         assert ship.main() == 0
-        assert _row(conn, uid)["townloops_slug"] == ship._slug_for("event", uid)
-        assert api.patches()[0]["description"] == "Weekly jazz in the lounge."
+        row = _row(conn, uid)
+        assert row["townloops_slug"] == "jazz-raced" and row["pushed_at"]
+        assert row["ingest_ref"] == ingest_ref.ref_for(uid)
+        assert api.calls[-1][0] == "POST"        # no GET, no PATCH after the 409
+        assert list(api.events) == ["jazz-raced"]
+
+    def test_found_by_ref_under_a_renamed_slug(self, ship, monkeypatch, conn):
+        api = _use(monkeypatch, FakeAPI())
+        uid = _stage(ship, monkeypatch, conn)
+        conn.execute("UPDATE events SET townloops_slug = 'jazz-old', pushed_at = '2026-10-01' "
+                     "WHERE event_uid = ?", (uid,))
+        api.events["jazz-new"] = live_event("jazz-new", source_url=None,
+                                            ingest_ref=ingest_ref.ref_for(uid))
+        assert ship.main() == 0
+        assert api.creates() == [] and api.ref_patches() == []
+        assert _row(conn, uid)["townloops_slug"] == "jazz-new"
+        assert ("GET", "events", "jazz-old") not in api.calls
 
     def test_lookup_error_is_a_retry_not_a_create(self, ship, monkeypatch, conn):
         api = _use(monkeypatch, FakeAPI())
@@ -272,7 +328,9 @@ class TestEventVenueById:
         _stage(ship, monkeypatch, conn, venue={"address": "1 Main St"})
         assert ship.main() == 0
         venue_post, event_post = api.creates()
-        assert event_post["venue_id"] == api.venues[venue_post["slug"]]["id"]
+        [venue] = api.venues.values()
+        assert event_post["venue_id"] == venue["id"]
+        assert event_post["venue_ingest_ref"] == venue_post["ingest_ref"] == venue["ingest_ref"]
 
     def test_venue_filed_under_another_town_binds_by_name(self, ship, monkeypatch, conn):
         api = _use(monkeypatch, FakeAPI())
@@ -391,32 +449,62 @@ class TestShipEntityLookup:
         self._venue(conn)
         slug = ship._ship_entity(api, conn, "venue", "v-uid")
         [payload] = api.creates()
-        assert slug == payload["slug"]
+        assert "slug" not in payload and payload["ingest_ref"] == ingest_ref.ref_for("v-uid")
+        assert slug == "riva-grill"
         row = self._venue_row(conn)
         assert json.loads(row["extra_json"])["live_id"] == api.venues[slug]["id"]
         assert row["pushed_hash"] == row["content_hash"]
+        assert row["ingest_ref"] == payload["ingest_ref"]
 
-    def test_409_without_a_live_row_is_a_failure(self, ship, conn):
+    def test_other_409_is_a_failure(self, ship, conn):
         api = FakeAPI()
         self._venue(conn)
 
         def conflict(*a, **k):
-            raise TownloopsError(409, "slug_taken", "slug taken")
+            raise TownloopsError(409, "conflict", "something else")
         api.create = conflict
         assert ship._ship_entity(api, conn, "venue", "v-uid") is None
         assert self._venue_row(conn)["townloops_slug"] is None
 
-    def test_409_reconciles_to_the_live_row(self, ship, conn):
-        api = FakeAPI()
-        self._venue(conn)
-        real_create = api.create
+    def test_ingest_ref_taken_binds_to_the_slug_it_names(self, ship, conn, monkeypatch):
+        """The lookup misses (a stale read); the create's 409 names the row —
+        bound with no second lookup, then synced."""
+        ref = ingest_ref.ref_for("v-uid")
+        api = FakeAPI(venues=[{"id": 42, "slug": "riva", "name": "Riva Grill", "ingest_ref": ref}])
+        real_list = api.list
+        monkeypatch.setattr(api, "list", lambda r, **p: [] if "ingest_ref" in p else real_list(r, **p))
+        self._venue(conn, phone="530-555-0100")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") == "riva"
+        row = self._venue_row(conn)
+        assert row["townloops_slug"] == "riva" and row["ingest_ref"] == ref
+        assert json.loads(row["extra_json"])["live_id"] == 42      # from the sync's read
+        assert api.venues["riva"]["phone"] == "530-555-0100"
+        post = next(i for i, c in enumerate(api.calls) if c[0] == "POST")
+        assert api.calls[post - 1] == ("GET", "venues", ref)     # the lookup, before it
 
-        def racing_create(resource, payload, idempotency_key=None):
-            api.venues[payload["slug"]] = {"id": 42, "slug": payload["slug"], "name": "Riva Grill"}
-            return real_create(resource, payload, idempotency_key)
-        api.create = racing_create
-        assert ship._ship_entity(api, conn, "venue", "v-uid")
-        assert json.loads(self._venue_row(conn)["extra_json"])["live_id"] == 42
+    def test_found_by_ref_under_a_renamed_slug_is_repointed(self, ship, conn):
+        ref = ingest_ref.ref_for("v-uid")
+        api = FakeAPI(venues=[{"id": 7, "slug": "riva-renamed", "name": "Riva Grill",
+                               "ingest_ref": ref}])
+        self._venue(conn, townloops_slug="riva-grill", pushed_at="2026-10-01T00:00:00+00:00")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") == "riva-renamed"
+        row = self._venue_row(conn)
+        assert row["townloops_slug"] == "riva-renamed"
+        assert "live_sync" not in json.loads(row["extra_json"])
+        assert api.creates() == [] and ("GET", "venues", "riva-grill") not in api.calls
+
+    def test_pre_ref_row_found_by_slug_is_given_the_ref_once(self, ship, conn):
+        from engine import entity_enrich
+        api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill"}])
+        self._venue(conn, townloops_slug="riva-grill", pushed_at="2026-10-01T00:00:00+00:00")
+        ref = ingest_ref.ref_for("v-uid")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") == "riva-grill"
+        assert api.ref_patches() == [("venues", "riva-grill", ref)]
+        assert self._venue_row(conn)["ingest_ref"] == ref
+        entity_enrich.fill_blanks(conn, "venue", "v-uid", {"phone": "530-555-0100"}, "enriched")
+        assert ship._ship_entity(api, conn, "venue", "v-uid") == "riva-grill"
+        assert len(api.ref_patches()) == 1                      # found by ref now
+        assert api.venues["riva-grill"]["phone"] == "530-555-0100"
 
     def test_lookup_error_is_a_failure_not_a_create(self, ship, conn):
         api = FakeAPI()
@@ -548,7 +636,7 @@ class TestShipMergedRecords:
 
         assert api.creates() == []
         assert api.tables[table]["riva-grill"]["website"] == "https://riva.example"
-        assert {c[2] for c in api.calls} == {"riva-grill"}     # no detour via the old slug
+        assert {c[2] for c in api.calls if c[0] != "LIST"} == {"riva-grill"}  # no old-slug detour
         row = conn.execute(f"SELECT * FROM {table} WHERE entity_uid = 'e-uid'").fetchone()
         assert row["townloops_slug"] == "riva-grill"
         assert row["pushed_hash"] == row["content_hash"]

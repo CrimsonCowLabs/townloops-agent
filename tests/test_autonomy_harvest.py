@@ -120,7 +120,7 @@ class TestOrganisations:
         assert [p["name"] for p in posts(town, "businesses")] == ["New Cafe"]
         [community] = posts(town, "communities")
         assert (community["name"], community["kind"]) == ("Friends of the Lake", "nonprofit")
-        assert town.api.tables["businesses"][posts(town, "businesses")[0]["slug"]]["status"] \
+        assert town.api.tables["businesses"][town.api.created_slug("businesses", 0)]["status"] \
             == "pending"
         assert {d["reason"] for d in town.decisions("candidate")} == {"verified-on-own-site"}
 
@@ -136,7 +136,7 @@ class TestOrganisations:
         discovery(town, "harvest")
         discovery(town, "promote", "--limit", "5")
         [sent] = posts(town, "businesses")
-        town.api.merge("businesses", sent["slug"], into="nouveau", fields=("website",))
+        town.api.merge("businesses", town.api.posted_slug("businesses", sent), into="nouveau", fields=("website",))
         out = town.poll()
         assert (out["merged"], out["gone"]) == (1, 0)
         assert town.conn.execute("SELECT townloops_slug FROM businesses WHERE name = 'New Cafe'"
@@ -158,7 +158,7 @@ class TestOrganisations:
         discovery(town, "harvest")
         discovery(town, "promote")
         [sent] = posts(town, "businesses")
-        town.api.reject("businesses", sent["slug"])
+        town.api.reject("businesses", town.api.posted_slug("businesses", sent))
         town.poll()
 
         results["coffee shops"] = [{"url": "https://newcafe-tahoe.example/", "title": "New Cafe"}]
@@ -314,7 +314,7 @@ class TestCancellations:
         town.listing(ARENA, [concert("Later", days=30)])
         for _ in range(4):
             town.find()
-        town.api.approve("events", next(p["slug"] for p in town.submitted_events()
+        town.api.approve("events", next(town.api.posted_slug("events", p) for p in town.submitted_events()
                                         if p["title"] == title))
 
     def test_a_cancellation_is_submitted_only_with_explicit_page_evidence(self, town):
@@ -329,6 +329,31 @@ class TestCancellations:
         assert sent[0]["title"] == "Cancelled: Jazz Night" and "cancelled" in sent[0]["tags"]
         assert town.api.patches() == [] or all(
             "title" not in p for p in town.api.patches())
+
+    def test_a_cancellation_carries_its_own_ref_and_binds_a_409(self, town):
+        from engine.ingest_ref import cancel_ref_for
+        town.seed("Arena", ARENA)
+        self._vanish(town, "Jazz Night", "https://arena.example/jazz")
+        uid = town.conn.execute("SELECT event_uid FROM events WHERE title = 'Jazz Night'"
+                                ).fetchone()[0]
+        town.pages["https://arena.example/jazz"] = page_text(
+            "Jazz Night", "This event has been cancelled due to weather.")
+        real_create = town.api.create
+        sent = []
+
+        def submitted_before(resource, payload, idempotency_key=None):
+            sent.append(payload)
+            town.api.deleted[("events", "cancel-earlier")] = {
+                "slug": "cancel-earlier", "ingest_ref": payload["ingest_ref"]}
+            return real_create(resource, payload, idempotency_key)
+        town.mp.setattr(town.api, "create", submitted_before)
+        cancellations(town, "apply")
+        [payload] = sent
+        assert "slug" not in payload and payload["ingest_ref"] == cancel_ref_for(uid)
+        [d] = [d for d in town.decisions("cancellation") if d["verdict"] == "submit"]
+        assert d["evidence"]["pending_slug"] == "cancel-earlier"
+        assert town.conn.execute("SELECT cancel_status FROM events WHERE event_uid = ?",
+                                 (uid,)).fetchone()[0] == "submitted"
 
     def test_a_vanished_event_without_a_statement_is_only_listed(self, town):
         town.seed("Arena", ARENA)
@@ -351,9 +376,9 @@ class TestDigest:
         town.listing(ARENA, [concert("Jazz Night"), concert("Old Show", days=-2),
                              concert("Blues Night", days=9)])
         town.run()
-        town.api.reject("events", next(p["slug"] for p in town.submitted_events()
+        town.api.reject("events", next(town.api.posted_slug("events", p) for p in town.submitted_events()
                                        if p["title"] == "Blues Night"))
-        town.api.approve("events", next(p["slug"] for p in town.submitted_events()
+        town.api.approve("events", next(town.api.posted_slug("events", p) for p in town.submitted_events()
                                         if p["title"] == "Jazz Night"))
         town.poll()
         # The weekly Series-candidates run saw a Cluster with no Series.
