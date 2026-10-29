@@ -70,6 +70,24 @@ def find_by_ref(client, resource: str, ref: Optional[str]) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+# Local table and uid column per kind ("event" + engine/entity_ship's five).
+TABLES = {
+    "event": ("events", "event_uid"),
+    "venue": ("venues", "entity_uid"),
+    "business": ("businesses", "entity_uid"),
+    "community": ("communities", "entity_uid"),
+    "performer": ("performers", "entity_uid"),
+    "creator": ("creators", "entity_uid"),
+}
+
+
+def remember(conn, kind: str, uid: str, ref: str) -> None:
+    """Record that the live row of local `kind` `uid` carries `ref`
+    (the local `ingest_ref` column, migration 029). No commit."""
+    table, col = TABLES[kind]
+    conn.execute(f"UPDATE {table} SET ingest_ref = ? WHERE {col} = ?", (ref, uid))
+
+
 @dataclass
 class Adoption:
     status: str            # adopted | already | other-ref | taken | error

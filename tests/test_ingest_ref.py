@@ -63,3 +63,14 @@ def test_adopt_reports_conflicts_without_raising():
     assert ingest_ref.adopt(FakeClient(patch_error=refused), "events", {"slug": "a"}, "r").status == "other-ref"
     assert ingest_ref.adopt(FakeClient(patch_error=RuntimeError("boom")), "events",
                             {"slug": "a"}, "r").status == "error"
+
+
+def test_remember_records_the_ref_live_carries(fresh_db):
+    fresh_db.execute(
+        "INSERT INTO venues (entity_uid, source, source_kind, name, first_seen_at, last_seen_at,"
+        " content_hash, last_modified_at) VALUES ('v1', 's', 'mined', 'The Mill', 't', 't', 'h', 't')")
+    ingest_ref.remember(fresh_db, "venue", "v1", "hermes-slt-v1")
+    assert fresh_db.execute("SELECT ingest_ref FROM venues").fetchone()[0] == "hermes-slt-v1"
+    for table, _ in ingest_ref.TABLES.values():
+        cols = {r[1] for r in fresh_db.execute(f"PRAGMA table_info({table})")}
+        assert "ingest_ref" in cols, table
