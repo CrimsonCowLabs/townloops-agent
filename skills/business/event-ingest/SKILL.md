@@ -46,7 +46,7 @@ $PYTHON $HERMES_HOME/skills/business/event-ingest/ingest.py <subcommand> [flags]
 | `ship` | POST new + PATCH changed events + mined entities. Batches (100/req). |
 | `ship --dry-run` | print payloads, don't POST. Use for smoke tests. |
 | `ship --only-kind venue,performer` | limit ship to those kinds. |
-| `resync` | reconcile local `townloops_slug` with the remote. Cures slug drift. |
+| `resync` | reconcile local `townloops_slug` with the remote: by `ingest_ref` first, name + date only for live rows without one (then adopts our ref on it, set-once PATCH). Cures slug drift. |
 | `resync --delete-orphans` | Destructive remote deletion mode. Out of scope for this agent; do not run. |
 | `kinds` | print row counts + unpushed counts per kind. Sanity check. |
 | `list --limit 50` | dump upcoming events from local SQLite. |
@@ -66,16 +66,18 @@ $PYTHON $HERMES_HOME/skills/business/event-ingest/ingest.py ingest \
 
 Do not use that chain as the default town event job. The active event-first scheduler runs seed discovery, `event-find`, operator review, workqueue derivation/enrichment, and `event-ship`. Legacy `ingest` writes legacy-owned rows into `state/townloops.db`; legacy `ship` reads and publishes their deltas.
 
-## Content-hash + slug capture
+## Content-hash, ingest ref + slug capture
 
 Every row carries `content_hash` (input to dedupe) and `townloops_slug` (captured from the POST response). PATCH paths use the captured slug so remote renames don't strand rows. When slug drift is suspected (rare), run `resync` to reconcile.
+
+Every create (bulk, events and the five entity kinds) carries the row's **`ingest_ref`** (`hermes-<town>-<uid16>`, `engine/ingest_ref.ref_for`) and **never a `slug`** — TownLoops derives the slug (#63, townloops ADR 0011). An event also carries `venue_ingest_ref` when its venue's local row exists (`venue_name` is always sent too). A per-item `409 ingest_ref_taken` is "already shipped": the row binds to `error.details.slug` with no second request, and the rest of the batch proceeds. Local `ingest_ref` (migration 029) records a live row known to carry the ref. A PATCH with no captured slug, or one that 404s, first re-reads the row by ref (`?ingest_ref=`) — a TownLoops rename never strands it or causes a re-POST duplicate.
 
 ## When it goes wrong
 
 - **Remote TownLoops already has a live catalog but local event-state rows are missing** — `resync` is not a catalog importer; it only reconciles slugs for rows already present locally. Use `event-reconcile/references/adopt-live-catalog.md` to mirror remote events as terminal `approved` + `shipped` rows without reposting them.
 - **`FATAL: TOWNLOOPS_TOWN_SLUG env-var is required`** — `.env` didn't load. Confirm the container has `env_file: .env` and that the file exists.
 - **All sources return 0 events** — check `sources.yaml` freshness (`state/sources.yaml`); calendars change URLs seasonally.
-- **PATCH 404s** — the remote entity was deleted. Run `resync` to clear the stale `townloops_slug`, then re-ship.
+- **PATCH 404s** — ship already re-reads the row by `ingest_ref`; a 404 that survives that means the remote row was deleted (or predates refs and was renamed). Run `resync` to rebind by ref / name + date, then re-ship.
 
 ## Depends on
 

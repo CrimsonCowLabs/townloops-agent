@@ -59,6 +59,17 @@ def taken_slug(exc: Exception) -> Optional[str]:
     return slug if isinstance(slug, str) and slug else None
 
 
+def taken_slug_in(error) -> Optional[str]:
+    """`taken_slug` for an `error` object as a dict — an `/entries/bulk`
+    per-item failure (`{"code", "message", "details"}`) or a raw response's
+    `error` — for callers that read responses without the client."""
+    if not isinstance(error, dict) or error.get("code") != TAKEN:
+        return None
+    details = error.get("details")
+    slug = details.get("slug") if isinstance(details, dict) else None
+    return slug if isinstance(slug, str) and slug else None
+
+
 def find_by_ref(client, resource: str, ref: Optional[str]) -> Optional[dict]:
     """The live row of `resource` carrying `ref`, else None. At most one row
     in a town carries a ref; the list read excludes deleted events, so None
