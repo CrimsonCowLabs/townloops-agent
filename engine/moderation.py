@@ -53,15 +53,19 @@ def poll(client, conn: sqlite3.Connection, s: autonomy.Settings, *, limit: int =
                            "ORDER BY checked_at IS NOT NULL, checked_at, id LIMIT ?", (limit,)):
         out["checked"] += 1
         try:
-            live = client.get(sub["resource"], sub["slug"]) or {}
+            live, tracked = _read(client, conn, sub)
         except Exception as e:  # noqa: BLE001
             if not is_not_found(e):
                 out["errors"].append(f"{sub['resource']}/{sub['slug']}: {str(e)[:200]}")
                 continue
             outcome, survivor = _after_404(client, conn, sub, e)
         else:
-            outcome = live.get("status") or ("published" if sub["resource"] != "events" else None)
-            survivor = None
+            if tracked:   # its ref is on a published row now: merged there
+                outcome, survivor = "merged", tracked
+            else:
+                outcome = live.get("status") or ("published" if sub["resource"] != "events"
+                                                  else None)
+                survivor = None
         if outcome not in ("published", "rejected", "merged", "gone"):
             conn.execute("UPDATE submissions SET checked_at = ? WHERE id = ?",
                          (iso_utc_now(), sub["id"]))
@@ -79,6 +83,37 @@ def poll(client, conn: sqlite3.Connection, s: autonomy.Settings, *, limit: int =
     if breaker:
         out["circuit_opened"] = breaker
     return out
+
+
+def _read(client, conn: sqlite3.Connection, sub: dict) -> tuple[dict, Optional[str]]:
+    """GET the submission's live row, and the slug it merged into if the
+    answer says so. An event we created (not a change or cancellation —
+    their refs are per change, not derivable here) whose slug 404s is looked
+    up by its Ingest Ref (`live_lookup.get_live_event`). The row carrying it
+    under another slug is either our row renamed or a merge survivor our ref
+    moved to (ADR 0011 §Merge) — an event's 404 doesn't say which. A merge
+    folds a pending row into a published one, so a published (or already
+    tracked) row reads as merged there; otherwise it is our row renamed: the
+    submission and the local event follow it to its current slug. Errors
+    raise (a 404 nothing answers included)."""
+    from engine.ingest_ref import ref_for
+    from engine.live_lookup import get_live_event
+    if sub["resource"] != "events" or not sub.get("local_uid") \
+            or sub.get("kind") in ("change", "cancellation"):
+        return client.get(sub["resource"], sub["slug"]) or {}, None
+    old = sub["slug"]
+    live = get_live_event(client, old, ref_for(sub["local_uid"])) or {}
+    new = live.get("slug")
+    if not new or new == old:
+        return live, None
+    if live.get("status") == "published" or conn.execute(
+            "SELECT 1 FROM submissions WHERE resource = 'events' AND slug = ?", (new,)).fetchone():
+        return live, new
+    conn.execute("UPDATE submissions SET slug = ? WHERE id = ?", (new, sub["id"]))
+    conn.execute("UPDATE events SET townloops_slug = ? WHERE event_uid = ? AND townloops_slug = ?",
+                 (new, sub["local_uid"], old))
+    sub["slug"] = new
+    return live, None
 
 
 def _decide(conn: sqlite3.Connection, sub: dict, outcome: str, survivor: Optional[str]) -> None:

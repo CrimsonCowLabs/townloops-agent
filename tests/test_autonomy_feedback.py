@@ -114,7 +114,8 @@ class TestMerges:
         assert sent["start_at"] == utc_times(new, None)[0]
         assert town.api.events["jazz-live"]["start_at"] == old_utc   # untouched until merged
         uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
-        assert "slug" not in sent and sent["ingest_ref"] == change_ref_for(uid)
+        assert "slug" not in sent
+        assert sent["ingest_ref"] == change_ref_for(uid, {"start_at": utc_times(new, None)[0]})
 
         town.api.merge("events", town.api.posted_slug("events", sent), into="jazz-live")
         town.poll()
@@ -139,7 +140,8 @@ class TestMerges:
         upsert_event(town.conn, "Arena", moved)
         uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
         town.api.deleted[("events", "jazz-change-earlier")] = {
-            "slug": "jazz-change-earlier", "ingest_ref": change_ref_for(uid)}
+            "slug": "jazz-change-earlier",
+            "ingest_ref": change_ref_for(uid, {"start_at": utc_times(new, None)[0]})}
         town.conn.execute("UPDATE events SET extra_json = ?",
                           (json.dumps({"reconcile": {"kind": "changed", "live_slug": "jazz-live",
                                                      "changes": {"start_at": [old, new]}}}),))
@@ -263,6 +265,71 @@ class TestChanges:
         assert set(change_decisions(town)["submit"]["evidence"]["fields"]) >= {
             "description", "tags", "start_at"}
 
+    def test_a_later_different_change_is_a_new_submission(self, town):
+        """The change ref is per change: a second, different change to the
+        same event is a new pending row, never read as "already submitted"."""
+        stage_change(town, {"title": {"live": "Jazz Nite", "source": "Jazz Night"}},
+                     {"title": "Jazz Nite", "venue_id": 5, "venue_slug": "old-hall"})
+        town.run()
+        [first] = town.submitted_events()
+        uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        town.conn.execute(
+            "UPDATE events SET extra_json = json_set(extra_json, '$.reconcile.changes', json(?))",
+            (json.dumps({"venue": {"live": "Old Hall", "live_slug": "old-hall",
+                                   "source": "Lake Tahoe Arena"}}),))
+        town.conn.commit()
+
+        rc, _, err = town._invoke("event-ship", "ship.py", uid)
+
+        assert rc == 0, err
+        first_sent, second = town.submitted_events()
+        assert second["venue_id"] == 6 and second["ingest_ref"] != first["ingest_ref"]
+        assert len([s for r, s in town.api.created if r == "events"]) == 2
+        extra = json.loads(town.conn.execute("SELECT extra_json FROM events").fetchone()[0])
+        assert extra["change_submission"]["pending_slug"] == town.api.created_slug("events")
+
+    def test_our_own_ref_is_adopted_before_a_change_is_submitted(self, town):
+        """The live row is ours, shipped before refs. Its ref goes on first —
+        else the merge would move the change's ref onto it, for good."""
+        stage_change(town, {"title": {"live": "Jazz Nite", "source": "Jazz Night"}},
+                     {"title": "Jazz Nite"})
+        uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        town.conn.execute("UPDATE events SET townloops_slug = 'jazz-live', pushed_at = 'x'")
+        town.conn.commit()
+        town.run()
+        from engine.ingest_ref import ref_for
+        assert town.api.ref_of("events", "jazz-live") == ref_for(uid)
+        assert town.conn.execute("SELECT ingest_ref FROM events").fetchone()[0] == ref_for(uid)
+        [sent] = town.submitted_events()
+        town.api.merge("events", town.api.posted_slug("events", sent), into="jazz-live",
+                       fields=("title",))
+        assert town.api.ref_of("events", "jazz-live") == ref_for(uid)
+
+    def test_a_change_to_someone_elses_live_event_adopts_nothing(self, town):
+        stage_change(town, {"title": {"live": "Jazz Nite", "source": "Jazz Night"}},
+                     {"title": "Jazz Nite"})
+        town.run()
+        assert town.api.ref_patches() == []
+        assert town.api.ref_of("events", "jazz-live") is None
+
+    def test_a_change_to_a_renamed_live_event_finds_it_by_ref(self, town):
+        stage_change(town, {"title": {"live": "Jazz Nite", "source": "Jazz Night"}},
+                     {"title": "Jazz Nite"})
+        from engine.ingest_ref import ref_for
+        uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        town.api.events["jazz-live"]["ingest_ref"] = ref_for(uid)
+        town.conn.execute("UPDATE events SET townloops_slug = 'jazz-live', pushed_at = 'x', "
+                          "ingest_ref = ?", (ref_for(uid),))
+        town.conn.commit()
+        town.api.rename("events", "jazz-live", "jazz-night-at-the-arena")
+        town.run()
+        [sent] = town.submitted_events()
+        assert sent["title"] == "Jazz Night"
+        d = change_decisions(town)["submit"]
+        assert d["evidence"]["target_slug"] == "jazz-night-at-the-arena"
+        [sub] = [r for r in town.conn.execute("SELECT * FROM submissions WHERE kind = 'change'")]
+        assert sub["target_slug"] == "jazz-night-at-the-arena"
+
     def test_a_deleted_venue_change_reads_as_gone_not_merged(self, town):
         # The date never changed, so the target "showing our start time" is no
         # evidence of a merge.
@@ -274,6 +341,49 @@ class TestChanges:
         town.api.delete("events", town.api.posted_slug("events", sent))
         out = town.poll()
         assert (out["merged"], out["gone"]) == (0, 1)
+
+
+class TestRefsAndModeration:
+    def test_a_renamed_submission_is_followed_by_its_ref_not_gone(self, town):
+        town.seed("Arena", ARENA)
+        town.listing(ARENA, [concert("Jazz Night")])
+        town.run()
+        [mine] = slugs(town)
+        town.api.rename("events", mine, "jazz-night-renamed")
+        out = town.poll()
+        assert out["gone"] == 0
+        assert [r["slug"] for r in town.conn.execute(
+            "SELECT slug FROM submissions WHERE resource = 'events'")] == ["jazz-night-renamed"]
+        assert town.conn.execute("SELECT townloops_slug FROM events WHERE title = 'Jazz Night'"
+                                 ).fetchone()[0] == "jazz-night-renamed"
+        town.api.approve("events", "jazz-night-renamed")
+        assert town.poll()["published"] == 1
+
+    def test_a_create_bound_by_its_409_is_followed_by_moderation(self, town):
+        """The cache was wiped and the list read can't see the row: the
+        create's 409 binds it, and the bound row is tracked like a submission."""
+        town.seed("Arena", ARENA)
+        town.listing(ARENA, [concert("Jazz Night")])
+        town.run()
+        [mine] = slugs(town)
+        uid = town.conn.execute("SELECT event_uid FROM events WHERE title = 'Jazz Night'"
+                                ).fetchone()[0]
+        town.conn.execute("DELETE FROM submissions")
+        town.conn.execute("UPDATE events SET townloops_slug = NULL, pushed_at = NULL, "
+                          "ingest_ref = NULL")
+        town.conn.commit()
+        real_list = town.api.list
+        town.mp.setattr(town.api, "list", lambda resource, **p: [] if "ingest_ref" in p
+                        else real_list(resource, **p))
+
+        rc, _, err = town._invoke("event-ship", "ship.py", uid)
+
+        assert rc == 0, err
+        assert len([s for r, s in town.api.created if r == "events"]) == 1
+        [sub] = [dict(r) for r in town.conn.execute(
+            "SELECT * FROM submissions WHERE resource = 'events'")]
+        assert (sub["slug"], sub["local_uid"], sub["status"]) == (mine, uid, "pending")
+        assert sub["seed"] == "Arena"
 
 
 class TestCircuitBreaker:

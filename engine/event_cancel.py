@@ -322,8 +322,11 @@ def cancelled_overrides(live: dict) -> dict:
 
 
 def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> dict:
-    """Mark operator-confirmed cancellations on TownLoops. An event already
-    gone from TownLoops counts as cancelled."""
+    """Mark operator-confirmed cancellations on TownLoops. One renamed there
+    is found by its Ingest Ref (`ingest_ref.read_live_event`, the local slug
+    re-pointed); an event gone from TownLoops — its slug 404s and nothing
+    carries its ref — counts as cancelled."""
+    from engine.ingest_ref import read_live_event
     from engine.live_lookup import is_not_found
     from engine.live_patch import apply_event_patch
     out = {"cancelled": 0, "failed": 0, "errors": []}
@@ -339,7 +342,7 @@ def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> dict:
     for row in rows:
         uid, slug = row["event_uid"], row["townloops_slug"]
         try:
-            live = client.get("events", slug) or {}
+            live = read_live_event(client, conn, slug, worker="event-cancellations") or {}
         except Exception as e:  # noqa: BLE001
             if is_not_found(e):
                 _set(conn, uid, "cancelled", f"live event {slug} not on TownLoops any more")
@@ -347,6 +350,7 @@ def apply_confirmed(conn: sqlite3.Connection, client, limit: int = 20) -> dict:
             else:  # transient: stays confirmed for the next run
                 out["errors"].append(f"{slug}: {str(e)[:200]}")
             continue
+        slug = live.get("slug") or slug
         overrides = cancelled_overrides(live)
         try:
             mismatches = (apply_event_patch(client, slug, overrides, current=live).mismatches
@@ -377,7 +381,9 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
     import os
     from datetime import timedelta
     from engine import autonomy, event_detail
-    from engine.ingest_ref import cancel_ref_for, taken_slug
+    from engine.ingest_ref import (
+        adopt_before_submission, cancel_ref_for, read_live_event, taken_slug,
+    )
     now = now or datetime.now(timezone.utc)
     out = {"checked": 0, "submitted": 0, "no_statement": 0, "errors": []}
     cutoff = (now - timedelta(hours=RECHECK_HOURS)).isoformat(timespec="seconds")
@@ -402,7 +408,12 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
             conn.commit()
             continue
         try:
-            live = client.get("events", slug) or {}
+            live = read_live_event(client, conn, slug, worker="event-cancellations") or {}
+            slug = live.get("slug") or slug
+            # Ours, shipped before refs: its own ref first, or the merge would
+            # move the cancellation's ref onto it.
+            adopt_before_submission(client, conn, {**row, "townloops_slug": slug}, live,
+                                    worker="event-cancellations")
             payload = {k: live[k] for k in ("title", "description", "start_at", "end_at",
                                             "venue_id", "source_url", "category_slugs", "tags",
                                             "accessibility_notes") if live.get(k) is not None}
@@ -416,10 +427,11 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
             out["errors"].append(f"{slug}: held ({e.reason})")
             break
         except Exception as e:  # noqa: BLE001 — stays flagged; re-checked tomorrow
-            if not taken_slug(e):
+            taken = taken_slug(e)
+            if not taken:
                 out["errors"].append(f"{slug}: {str(e)[:200]}")
                 continue
-            created = {"slug": taken_slug(e)}   # submitted before: the 409 names it
+            created = {"slug": taken}   # submitted before: the 409 names it
         d.evidence.update(target_slug=slug, pending_slug=(created or {}).get("slug"))
         autonomy.record(conn, "cancellation", uid, d)
         _set(conn, uid, "submitted", f"cancellation submitted for merge into {slug}: "

@@ -293,14 +293,18 @@ class FakeAPI:
         self.tables[resource][slug]["status"] = "rejected"
 
     def merge(self, resource, slug, into, fields=("start_at", "end_at", "venue_id", "venue_slug")):
-        """Apply `fields` of pending `slug` onto published `into`, then
+        """Apply `fields` of pending `slug` onto published `into`, move its
+        `ingest_ref` there when `into` has none (ADR 0011 §Merge), then
         soft-delete `slug` (townloops `merge_event`). A merged entity's 404
         names the survivor (`merged_into_slug`, townloops ADR 0009); an
         event's doesn't. GET and PATCH 404 alike."""
         source = self.tables[resource][slug]
+        survivor = self.tables[resource][into]
         for f in fields:
             if f in source:
-                self.tables[resource][into][f] = copy.deepcopy(source[f])
+                survivor[f] = copy.deepcopy(source[f])
+        if source.get("ingest_ref") and not survivor.get("ingest_ref"):
+            survivor["ingest_ref"] = source.pop("ingest_ref")   # moved, not copied
         self.delete(resource, slug)
         if resource != "events":
             self.merged_into[(resource, slug)] = into

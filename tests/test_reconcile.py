@@ -556,6 +556,21 @@ class TestDownstream:
         live = client.events["jazz"]
         assert live["title"] == "Jazz Night" and live["venue_slug"] == "tipsy-putt"
 
+    def test_ship_patch_finds_a_renamed_live_event_by_ref(self, skill):
+        from engine.ingest_ref import ref_for
+        conn, uid = self._staged_change(skill)
+        conn.execute("UPDATE events SET townloops_slug = 'jazz', pushed_at = 'x' "
+                     "WHERE event_uid = ?", (uid,))
+        client = self._api()
+        client.events["jazz"]["ingest_ref"] = ref_for(uid)
+        client.rename("events", "jazz", "jazz-at-the-tavern")
+        payload = self._patch(conn, uid, client=client)
+        assert payload["start_at"] == "2026-10-17T03:00:00+00:00"
+        assert client.events["jazz-at-the-tavern"]["start_at"] == "2026-10-17T03:00:00+00:00"
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uid,)).fetchone()
+        assert row["townloops_slug"] == "jazz-at-the-tavern"
+        assert json.loads(row["extra_json"])["reconcile"]["live_slug"] == "jazz-at-the-tavern"
+
     def test_ship_patch_fills_blank_live_accessibility_notes(self, skill):
         conn, uid = self._staged_change(skill)
         conn.execute("UPDATE events SET accessibility_notes = 'Wheelchair seating up front.' "

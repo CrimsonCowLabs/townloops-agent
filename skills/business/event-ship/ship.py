@@ -324,6 +324,11 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
             remember(conn, "event", event_uid, ref)
             record_activity(conn, _WORKER, "bound-by-ref", event_uid,
                             detail=f"{ref} already live as {taken}")
+            if isinstance(client, autonomy.GatedClient):
+                # Followed like our own submission (moderation decides it).
+                autonomy.record_submission(conn, "events", taken,
+                                           **{**client.context, "local_uid": event_uid,
+                                              "series_slug": decision.series_slug})
             return _BoundByRef(taken)
         if is_conflict(e):
             # Some other conflict: look again, by ref (created since the lookup).
@@ -380,13 +385,14 @@ def _submit_change(client, conn, event: dict, meta: dict,
     live slug."""
     from engine.live_patch import apply_event_patch, shows
     changes = meta.get("changes") or {}
-    live_slug = meta["live_slug"]
     uid = event["event_uid"]
-    try:
-        current = client.get("events", live_slug) or {}
-    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
-        print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+    current = _read_live_target(client, conn, event, meta)
+    if current is None:
         return None
+    live_slug = meta["live_slug"]
+    # Ours, shipped before refs: its own ref first, or the merge would move
+    # the change's ref onto it.
+    ingest_ref.adopt_before_submission(client, conn, event, current, worker=_WORKER)
     payload = _event_payload(event)
     _bind_venue(client, conn, event, payload, venue_slug)
     fill = _reconcile_fill_overrides(event, current)
@@ -425,9 +431,12 @@ def _submit_change(client, conn, event: dict, meta: dict,
     payload.update(submit)
     if "start_at" in submit and not submit.get("end_at"):
         payload.pop("end_at", None)   # never an end that may fall before the new start
-    payload["ingest_ref"] = change_ref_for(uid)   # its own row, never the event's ref
+    # Its own row, never the event's ref — one per change (the values it
+    # submits): a retry 409s and binds, a later, different change is new.
+    payload["ingest_ref"] = change_ref = change_ref_for(uid, submit)
     client.context.update(kind="change", target_slug=live_slug, local_uid=uid)
-    idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{uid[:16]}"
+    idem = (f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{uid[:16]}:"
+            f"{change_ref.rsplit('-', 1)[1]}")
     try:
         result = client.create("events", payload, idempotency_key=idem)
     except autonomy.SubmissionsHeld:
@@ -452,6 +461,32 @@ def _submit_change(client, conn, event: dict, meta: dict,
         {"changes": submitted_keys, "fields": sorted(submit), "target_slug": live_slug,
          "pending_slug": slug}))
     return slug
+
+
+def _read_live_target(client, conn, event: dict, meta: dict) -> Optional[dict]:
+    """The live event a reconcile-staged change targets (`meta["live_slug"]`).
+    Renamed on TownLoops: found by the ref of our local event bound to it
+    (`ingest_ref.read_live_event`, which re-points the local rows) and
+    `meta["live_slug"]` — also the stored reconcile metadata — updated to its
+    current slug. None (→ rc 1, retried) when it can't be read."""
+    import json
+    live_slug = meta["live_slug"]
+    try:
+        current = ingest_ref.read_live_event(client, conn, live_slug, worker=_WORKER) or {}
+    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
+        print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return None
+    if current.get("slug") and current["slug"] != live_slug:
+        meta["live_slug"] = current["slug"]
+        if event.get("townloops_slug") == live_slug:
+            event["townloops_slug"] = current["slug"]
+        extra = parse_extra_json(event.get("extra_json"))
+        if isinstance(extra.get("reconcile"), dict):
+            extra["reconcile"]["live_slug"] = current["slug"]
+            event["extra_json"] = json.dumps(extra, ensure_ascii=False)
+            conn.execute("UPDATE events SET extra_json = ? WHERE event_uid = ?",
+                         (event["extra_json"], event["event_uid"]))
+    return current
 
 
 def _change_values(key: str, event: dict, payload: dict, current: dict) -> dict[str, Any]:
@@ -694,15 +729,13 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     didn't land as sent (then the event is flagged stuck)."""
     from engine.live_patch import apply_event_patch
     changes = meta.get("changes") or {}
-    live_slug = meta["live_slug"]
     if not ({"start_at", "venue"} & changes.keys()) and not (
             event.get("accessibility_notes") or _ticket_line(event) or event.get("price")):
-        return live_slug
-    try:
-        current = client.get("events", live_slug) or {}
-    except Exception as e:  # noqa: BLE001 — surfaced via rc=1 → workqueue retry
-        print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
+        return meta["live_slug"]
+    current = _read_live_target(client, conn, event, meta)
+    if current is None:
         return None
+    live_slug = meta["live_slug"]
     overrides = _reconcile_fill_overrides(event, current)
     if "start_at" in changes:
         overrides["start_at"] = event["date_utc"]

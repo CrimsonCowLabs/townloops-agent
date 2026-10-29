@@ -355,6 +355,41 @@ class TestCancellations:
         assert town.conn.execute("SELECT cancel_status FROM events WHERE event_uid = ?",
                                  (uid,)).fetchone()[0] == "submitted"
 
+    def test_our_own_ref_is_adopted_before_a_cancellation_is_submitted(self, town):
+        from engine.ingest_ref import ref_for
+        town.seed("Arena", ARENA)
+        self._vanish(town, "Jazz Night", "https://arena.example/jazz")
+        uid, slug = town.conn.execute("SELECT event_uid, townloops_slug FROM events "
+                                      "WHERE title = 'Jazz Night'").fetchone()
+        town.api.events[slug].pop("ingest_ref")            # shipped before refs
+        town.conn.execute("UPDATE events SET ingest_ref = NULL")
+        town.conn.commit()
+        town.pages["https://arena.example/jazz"] = page_text(
+            "Jazz Night", "This event has been cancelled due to weather.")
+        before = len(town.submitted_events())
+        cancellations(town, "apply")
+        [sent] = town.submitted_events()[before:]
+        assert town.api.ref_of("events", slug) == ref_for(uid)
+        town.api.merge("events", town.api.posted_slug("events", sent), into=slug,
+                       fields=("title", "tags"))
+        assert town.api.ref_of("events", slug) == ref_for(uid)
+
+    def test_a_cancellation_finds_a_renamed_live_event_by_ref(self, town):
+        town.seed("Arena", ARENA)
+        self._vanish(town, "Jazz Night", "https://arena.example/jazz")
+        uid, slug = town.conn.execute("SELECT event_uid, townloops_slug FROM events "
+                                      "WHERE title = 'Jazz Night'").fetchone()
+        town.api.rename("events", slug, "jazz-night-renamed")
+        town.pages["https://arena.example/jazz"] = page_text(
+            "Jazz Night", "This event has been cancelled due to weather.")
+        before = len(town.submitted_events())
+        cancellations(town, "apply")
+        assert len(town.submitted_events()[before:]) == 1
+        [d] = [d for d in town.decisions("cancellation") if d["verdict"] == "submit"]
+        assert d["evidence"]["target_slug"] == "jazz-night-renamed"
+        assert town.conn.execute("SELECT townloops_slug FROM events WHERE event_uid = ?",
+                                 (uid,)).fetchone()[0] == "jazz-night-renamed"
+
     def test_a_vanished_event_without_a_statement_is_only_listed(self, town):
         town.seed("Arena", ARENA)
         self._vanish(town, "Jazz Night", "https://arena.example/jazz")

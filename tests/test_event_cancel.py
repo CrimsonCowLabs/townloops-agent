@@ -188,6 +188,18 @@ class TestOperatorConfirmation:
         assert api.patches() == []
         assert "not on TownLoops" in _row(conn, flagged)["cancel_note"]
 
+    def test_a_renamed_live_event_is_found_by_ref_and_cancelled(self, conn, flagged):
+        from engine.ingest_ref import ref_for
+        api = FakeAPI(events=[_live(ingest_ref=ref_for(flagged))])
+        api.rename("events", "jazz-night", "jazz-night-at-riva")
+        ec.confirm(conn, [flagged])
+        out = ec.apply_confirmed(conn, api)
+        assert out["cancelled"] == 1
+        assert api.events["jazz-night-at-riva"]["title"] == "Cancelled: Jazz Night"
+        row = _row(conn, flagged)
+        assert row["townloops_slug"] == "jazz-night-at-riva"
+        assert row["cancel_status"] == "cancelled" and "jazz-night-at-riva" in row["cancel_note"]
+
     def test_patch_that_does_not_land_is_parked(self, conn, flagged):
         api = FakeAPI(events=[_live()], ignore={"tags"})
         ec.confirm(conn, [flagged])
