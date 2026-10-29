@@ -96,7 +96,8 @@ Nothing a sweep finds reaches TownLoops until the operator approves it
      `tiktok` for a social page) and the verified address/phone;
    - enriches it (`engine/entity_enrich`, fill-blanks);
    - ships it through `engine/entity_ship.ship_entity` — the same path
-     event-ship uses: live lookup by slug, create, 409 → re-lookup, then
+     event-ship uses: live lookup by Ingest Ref (then slug), create with the
+     ref and no slug, 409 `ingest_ref_taken` → bind the slug it names, then
      `entity_sync` fill + GET verify.
    Shipped → `promoted` (`research_entity_uid`, `live_slug`). A failed ship or
    an enrichment that couldn't read the site leaves it `approved` for the next
