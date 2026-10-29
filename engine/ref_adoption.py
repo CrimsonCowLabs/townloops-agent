@@ -20,16 +20,17 @@ ref is `other-ref` and left alone.
 
 Each row: GET its live row (`live_lookup.get_live`, following merges — a
 survivor re-points the local row: entities via `entity_sync.repoint`, events
-their `townloops_slug`), then `ingest_ref.adopt`:
+their `townloops_slug`), then `ingest_ref.adopt_and_remember` — the one
+sequence event-ship, entity_ship and event-ingest's resync use too:
 - adopted / already → `ingest_ref.remember` (the local column);
-- other-ref → nothing remembered; marked `extra_json.ref_adoption` and one
-  `other-ref` activity, never tried again;
+- other-ref → nothing remembered; stamped `extra_json.ref_adoption` (FINAL)
+  and one `adopt-ref` activity, never tried again — here or by a ship;
 - taken → another live row holds our ref: a duplicate for the operator.
-  Marked, one failed `ref-taken` activity, never tried again;
+  Stamped (FINAL), one failed `adopt-ref` activity, never tried again;
 - a 404 naming no survivor → `unbound`, stamped to go behind the rest and
   retried; event-ingest's name + date `resync` is that row's fallback, so it
   is not flagged here;
-- any other error → stamped, retried next run.
+- any other error → stamped (a failed `adopt-ref`), retried next run.
 Never-tried rows go first, then the oldest-shipped; stamped rows after.
 Fill-blank PATCH, so autonomous mode allows it: the plain client.
 """
@@ -41,14 +42,12 @@ import sqlite3
 from collections import Counter
 
 from engine import entity_sync, ingest_ref
-from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
+from engine.derive_helpers import record_activity
 from engine.live_lookup import get_live, is_not_found
 
 
 _WORKER = "ref-adoption"
-MARK = "ref_adoption"
-FINAL = ("other-ref", "taken")         # marked statuses never retried
-RESOURCES = {"event": "events", **entity_sync.RESOURCES}
+RESOURCES = ingest_ref.RESOURCES
 
 
 def _json_path(path: str) -> str:
@@ -56,35 +55,21 @@ def _json_path(path: str) -> str:
 
 
 def _candidates(conn: sqlite3.Connection, kind: str, limit: int) -> list[dict]:
-    table, uid_col = ingest_ref.TABLES[kind]
+    table, uid_col = RESOURCES[kind], ingest_ref.uid_column(kind)
     extra = ("AND COALESCE(status, '') NOT IN ('duplicate', 'superseded') "
              if kind == "event" else "")
-    tried = f"COALESCE({_json_path('$.' + MARK + '.at')}, '')"
+    mark = "$." + ingest_ref.MARK
+    final = ", ".join(f"'{s}'" for s in ingest_ref.FINAL)
+    tried = f"COALESCE({_json_path(mark + '.at')}, '')"
     return [dict(r) for r in conn.execute(
         f"SELECT *, {uid_col} AS uid, {tried} AS tried_at FROM {table} "
         "WHERE townloops_slug IS NOT NULL AND pushed_at IS NOT NULL AND ingest_ref IS NULL "
         "  AND COALESCE(source_kind, '') != 'live' "
         f"  AND {_json_path('$.cross_town')} IS NULL "
         f"  AND {_json_path('$.live_sync')} IS NULL "
-        f"  AND COALESCE({_json_path('$.' + MARK + '.status')}, '') NOT IN ('other-ref', 'taken') "
+        f"  AND COALESCE({_json_path(mark + '.status')}, '') NOT IN ({final}) "
         f"  {extra}"
         f"ORDER BY tried_at, pushed_at, {uid_col} LIMIT ?", (limit,))]
-
-
-def _mark(conn: sqlite3.Connection, kind: str, uid: str, status: str, detail: str = "") -> None:
-    table, col = ingest_ref.TABLES[kind]
-    r = conn.execute(f"SELECT extra_json FROM {table} WHERE {col} = ?", (uid,)).fetchone()
-    extra = parse_extra_json(r[0] if r else None)
-    extra[MARK] = {"status": status, "at": iso_utc_now(), "detail": detail[:500]}
-    conn.execute(f"UPDATE {table} SET extra_json = ? WHERE {col} = ?", (json.dumps(extra), uid))
-
-
-def _clear_mark(conn: sqlite3.Connection, kind: str, row: dict) -> None:
-    extra = parse_extra_json(row.get("extra_json"))
-    if extra.pop(MARK, None) is not None:
-        table, col = ingest_ref.TABLES[kind]
-        conn.execute(f"UPDATE {table} SET extra_json = ? WHERE {col} = ?",
-                     (json.dumps(extra) if extra else None, row["uid"]))
 
 
 def _repoint(conn: sqlite3.Connection, kind: str, row: dict, live: dict) -> None:
@@ -102,35 +87,15 @@ def adopt_row(client, conn: sqlite3.Connection, kind: str, row: dict) -> str:
     """Adopt one candidate row (see module doc). Returns the outcome:
     adopted | already | other-ref | taken | unbound | error. No commit."""
     resource, uid = RESOURCES[kind], row["uid"]
-    target = f"{kind}:{uid}"
-    ref = ingest_ref.ref_for(uid)
     try:
         live = get_live(client, resource, row["townloops_slug"])
     except Exception as e:  # noqa: BLE001 — stamped, retried next run
         status = "unbound" if is_not_found(e) else "error"
-        _mark(conn, kind, uid, status, str(e)[:200])
+        ingest_ref.mark(conn, kind, uid, status, str(e)[:200])
         return status
     if live.get("slug") and live["slug"] != row["townloops_slug"]:
         _repoint(conn, kind, row, live)
-    result = ingest_ref.adopt(client, resource, live, ref)
-    if result.status in ("adopted", "already"):
-        ingest_ref.remember(conn, kind, uid, ref)
-        _clear_mark(conn, kind, row)
-        if result.status == "adopted":
-            record_activity(conn, _WORKER, "adopted", target,
-                            detail=f"{row['townloops_slug']} ← {ref}")
-    elif result.status == "other-ref":
-        _mark(conn, kind, uid, result.status, result.detail)
-        record_activity(conn, _WORKER, "other-ref", target,
-                        detail=f"{row['townloops_slug']}: {result.detail}")
-    elif result.status == "taken":
-        _mark(conn, kind, uid, result.status, result.detail)
-        record_activity(conn, _WORKER, "ref-taken", target, ok=False,
-                        error=f"live {kind} {row['townloops_slug']}: {result.detail} "
-                              "— a duplicate on TownLoops")
-    else:
-        _mark(conn, kind, uid, "error", result.detail)
-    return result.status
+    return ingest_ref.adopt_and_remember(client, conn, kind, uid, live, worker=_WORKER).status
 
 
 def adopt_shipped(client, conn: sqlite3.Connection, limit: int = 25,

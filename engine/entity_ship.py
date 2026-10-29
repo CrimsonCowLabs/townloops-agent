@@ -103,7 +103,8 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     slug — or, with none cached, the slug pre-ref creates proposed, which is
     the ref's own string. A row found under another slug than cached (renamed
     or merged on TownLoops) is re-pointed (`entity_sync.repoint`); one found
-    by slug without our ref is given it (`ingest_ref.adopt`, set-once PATCH).
+    by slug without our ref is given it (`ingest_ref.adopt_and_remember`,
+    set-once PATCH; a final `other-ref`/`taken` is stamped, never retried).
     Not found: created with the ref and no slug; a `409 ingest_ref_taken`
     binds to the row it names, with no second lookup. A shipped row gone from
     live (no ref match, cached slug 404s with no survivor) is flagged for the
@@ -115,7 +116,9 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     holds, not failures; the caller decides."""
     from engine import entity_sync
     from engine.autonomy import SubmissionsHeld
-    from engine.ingest_ref import ref_for, remember, taken_slug
+    from engine.ingest_ref import (
+        adopt_and_remember, ref_for, remember, taken_slug, wants_adoption,
+    )
     from engine.live_lookup import find_live_entity
     from engine.performer_research import awaits_research
     table, resource = ENTITY_TABLES[kind]
@@ -177,8 +180,12 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
                            (entity_uid,)).fetchone()
     if created or bound or live.get("ingest_ref") == ref:
         remember(conn, kind, entity_uid, ref)
-    elif in_town and row["ingest_ref"] != ref:
-        _adopt_ref(client, conn, kind, entity_uid, resource, live, ref)
+    elif in_town and wants_adoption(kind, row):
+        # Shipped before refs, found by slug: give it ours (set-once PATCH).
+        # A final outcome (other-ref / taken) is stamped and not retried.
+        adopt_and_remember(client, conn, kind, entity_uid, live, worker="entity-sync", ref=ref)
+        row = conn.execute(f"SELECT * FROM {table} WHERE entity_uid = ?",
+                           (entity_uid,)).fetchone()   # its stamp, kept below
     _record_live_entity(conn, table, row, slug, live.get("id") if in_town else None,
                         None if in_town else live.get("town_slug"))
     if in_town:
@@ -186,21 +193,6 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         if res.status == "error":
             print(f"  sync {kind} {entity_uid[:12]} → {slug}: {res.detail}", file=sys.stderr)
     return slug
-
-
-def _adopt_ref(client, conn, kind: str, entity_uid: str, resource: str, live: dict,
-               ref: str) -> None:
-    """A row shipped before refs, found by slug: give it our ref (set-once
-    PATCH) and remember it. A failure is recorded and retried next ship."""
-    from engine.ingest_ref import adopt, remember
-    result = adopt(client, resource, live, ref)
-    if result.status in ("adopted", "already"):
-        remember(conn, kind, entity_uid, ref)
-    if result.status != "already":
-        record_activity(conn, "entity-sync", "adopt-ref", f"{kind}:{entity_uid}",
-                        detail=f"{live.get('slug')}: {result.status} {result.detail}".strip(),
-                        ok=result.status == "adopted",
-                        error=None if result.status == "adopted" else result.detail or result.status)
 
 
 def ship_released(client, conn, limit: int = 25,

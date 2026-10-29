@@ -40,13 +40,14 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Literal
 
+from engine import ingest_ref
 from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
 from engine.live_patch import ENTITY_FIELDS, apply_entity_patch, sendable
 
 
 _WORKER = "entity-sync"
-RESOURCES = {"venue": "venues", "business": "businesses", "community": "communities",
-             "performer": "performers", "creator": "creators"}
+# Entity kind → TownLoops resource (= local table): engine/ingest_ref's one map.
+RESOURCES = {k: v for k, v in ingest_ref.RESOURCES.items() if k != "event"}
 
 
 @dataclass

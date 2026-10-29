@@ -47,7 +47,8 @@ from engine.derive_helpers import (
     seed_name_of,
 )
 from engine.entity_ship import AwaitingResearch, ship_entity as _ship_entity
-from engine.ingest_ref import adopt, change_ref_for, ref_for, remember, taken_slug
+from engine import ingest_ref
+from engine.ingest_ref import change_ref_for, ref_for, remember, taken_slug
 from engine.event_extract import has_clock_time, town_tz_name, utc_times
 from engine.workqueue import RC_DEFERRED
 
@@ -242,18 +243,15 @@ def _bind_venue(client, conn, event: dict, payload: dict, venue_slug: Optional[s
         payload["venue_ingest_ref"] = vref
 
 
-def _bind_ref(client, conn, event_uid: str, live: dict, ref: str) -> None:
-    """The event is bound to `live`: remember its ref — given to it first
-    (set-once PATCH) when a pre-ref fallback found it. A failed adoption is
-    recorded and retried on the next ship."""
-    result = adopt(client, "events", live, ref)
-    if result.status in ("adopted", "already"):
-        remember(conn, "event", event_uid, ref)
-    if result.status != "already":
-        record_activity(conn, _WORKER, "adopt-ref", event_uid,
-                        detail=f"{live.get('slug')}: {result.status} {result.detail}".strip(),
-                        ok=result.status == "adopted",
-                        error=None if result.status == "adopted" else result.detail or result.status)
+def _bind_ref(client, conn, event: dict, live: dict) -> None:
+    """The event is bound to `live`: give it the event's ref when a pre-ref
+    fallback found it (`ingest_ref.adopt_and_remember` — set-once PATCH,
+    remembered; a failure recorded). A final outcome stamped on the event
+    (other-ref / taken) is never retried."""
+    if live.get("ingest_ref") == ref_for(event["event_uid"]) or ingest_ref.wants_adoption(
+            "event", event):
+        ingest_ref.adopt_and_remember(client, conn, "event", event["event_uid"], live,
+                                      worker=_WORKER)
 
 
 def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optional[str]:
@@ -300,7 +298,7 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
             and found.row.get("status") == "rejected":
         return _decline_rejected(conn, event_uid, found)
     if found.row:
-        _bind_ref(client, conn, event_uid, found.row, ref)
+        _bind_ref(client, conn, event, found.row)
         if isinstance(client, autonomy.GatedClient) and found.row.get("status") == "pending":
             # Adopting a pending record (ours from an earlier run, or another
             # submitter's): follow it like our own submission.
@@ -336,7 +334,7 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
                 print(f"read live event {ref} failed: {str(e2)[:200]}", file=sys.stderr)
                 return None
             if found.row:
-                _bind_ref(client, conn, event_uid, found.row, ref)
+                _bind_ref(client, conn, event, found.row)
                 return _fill_live_event(client, conn, event, found.row, payload)
             msg = f"409 on create but no live event carries {ref}: {msg}"
         elif "Multiple rows were found" in msg and "venue_id" not in payload:

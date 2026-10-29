@@ -119,6 +119,24 @@ def get_live(client, resource: str, slug: str) -> dict:
     return result
 
 
+def get_live_event(client, slug: str, ref: Optional[str]) -> dict:
+    """The live event at `slug` (`get_live`). A 404 naming no survivor — an
+    event's never does; renamed on TownLoops, or merged with our ref moved to
+    the survivor (ADR 0011) — is answered by `ref` (`ingest_ref.find_by_ref`):
+    the row returned, whose `slug` is its current one. No ref, or no row
+    carrying it: the 404 raises, as do other API errors."""
+    from engine.ingest_ref import find_by_ref
+    try:
+        return get_live(client, "events", slug)
+    except Exception as e:
+        if not ref or not is_not_found(e) or merged_into_slug(e):
+            raise
+        row = find_by_ref(client, "events", ref)
+        if not row or not row.get("slug"):
+            raise
+        return row
+
+
 def find_live_entity(client, resource: str, slug: Optional[str],
                      ingest_ref: Optional[str] = None) -> Optional[dict]:
     """The live row carrying `ingest_ref` (engine/ingest_ref.find_by_ref);

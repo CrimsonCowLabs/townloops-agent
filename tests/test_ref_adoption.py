@@ -92,10 +92,11 @@ def local(conn, table, uid):
     return dict(conn.execute(f"SELECT * FROM {table} WHERE {col} = ?", (uid,)).fetchone())
 
 
-def activities(conn, action=None):
+def activities(conn, action=None, status=None):
     rows = [dict(r) for r in conn.execute(
         "SELECT * FROM agent_activity WHERE worker = 'ref-adoption' ORDER BY id")]
-    return [r for r in rows if action is None or r["action"] == action]
+    return [r for r in rows if (action is None or r["action"] == action)
+            and (status is None or f": {status}" in r["detail"])]
 
 
 def test_pre_ref_event_and_venue_are_adopted(conn):
@@ -143,7 +144,7 @@ def test_another_ref_is_not_repointed_and_recorded_once(conn):
     api.calls.clear()
     assert ref_adoption.adopt_shipped(api, conn).get("other-ref", 0) == 0
     assert api.calls == []
-    assert len(activities(conn, "other-ref")) == 1
+    assert len(activities(conn, "adopt-ref", "other-ref")) == 1
 
 
 def test_a_taken_ref_is_flagged_once_and_not_retried(conn):
@@ -155,13 +156,13 @@ def test_a_taken_ref_is_flagged_once_and_not_retried(conn):
     assert local(conn, "events", "e" * 24)["ingest_ref"] is None
     flag = json.loads(local(conn, "events", "e" * 24)["extra_json"])["ref_adoption"]
     assert flag["status"] == "taken" and "jazz-night-2" in flag["detail"]
-    [act] = activities(conn, "ref-taken")
+    [act] = activities(conn, "adopt-ref", "taken")
     assert act["ok"] == 0 and "jazz-night-2" in act["error"]
 
     api.calls.clear()
     ref_adoption.adopt_shipped(api, conn)
     assert api.calls == []
-    assert len(activities(conn, "ref-taken")) == 1
+    assert len(activities(conn, "adopt-ref")) == 1
 
 
 def test_a_404_with_no_survivor_is_unbound_and_not_flagged(conn):
@@ -279,3 +280,45 @@ def test_entity_live_sync_run_adopts_refs(conn, monkeypatch, capsys):
     assert mod.main() == 0
     assert seen["call"] == ("client", 7)
     assert json.loads(capsys.readouterr().out.strip().splitlines()[-1])["refs"] == {"adopted": 3}
+
+
+class TestAgainstTheSharedFake:
+    """The same sweep against tests/fake_townloops.py — the fake the ship
+    tests run on — so the test-local RefAPI can't drift from it unseen."""
+
+    def test_adopted_already_taken_and_merged(self, conn):
+        from tests.fake_townloops import FakeAPI
+        shipped_event(conn, uid="a" * 24, slug="jazz-night")
+        shipped_event(conn, uid="b" * 24, slug="open-mic")
+        shipped_event(conn, uid="c" * 24, slug="trivia")
+        shipped_venue(conn, slug="hermes-slt-old")
+        start = "2026-11-01T03:00:00+00:00"
+        api = FakeAPI(
+            events=[{"slug": "jazz-night", "title": "Jazz Night", "start_at": start},
+                    {"slug": "open-mic", "title": "Open Mic", "start_at": start,
+                     "ingest_ref": ingest_ref.ref_for("b" * 24)},
+                    {"slug": "trivia", "title": "Trivia", "start_at": start},
+                    {"slug": "trivia-2", "title": "Trivia", "start_at": start,
+                     "ingest_ref": ingest_ref.ref_for("c" * 24)}],
+            entities={"venues": [{"id": 9, "slug": "the-mill", "name": "The Mill"},
+                                 {"id": 8, "slug": "hermes-slt-old", "name": "The Mill"}]})
+        api.merge("venues", "hermes-slt-old", into="the-mill")
+
+        counts = ref_adoption.adopt_shipped(api, conn)
+
+        assert counts == {"adopted": 2, "already": 1, "taken": 1}
+        assert api.ref_of("events", "jazz-night") == ingest_ref.ref_for("a" * 24)
+        assert api.ref_of("events", "trivia") is None
+        assert api.ref_of("venues", "the-mill") == ingest_ref.ref_for("v" * 24)
+        assert local(conn, "venues", "v" * 24)["townloops_slug"] == "the-mill"
+        assert local(conn, "events", "b" * 24)["ingest_ref"] == ingest_ref.ref_for("b" * 24)
+        assert ingest_ref.final(local(conn, "events", "c" * 24)) == "taken"
+        assert ref_adoption.adopt_shipped(api, conn) == {}
+
+    def test_another_ref_is_left_alone(self, conn):
+        from tests.fake_townloops import FakeAPI
+        shipped_venue(conn)
+        api = FakeAPI(entities={"venues": [{"id": 9, "slug": "the-mill", "name": "The Mill",
+                                            "ingest_ref": "cmo-the-mill"}]})
+        assert ref_adoption.adopt_shipped(api, conn) == {"other-ref": 1}
+        assert api.ref_patches() == [] and api.ref_of("venues", "the-mill") == "cmo-the-mill"

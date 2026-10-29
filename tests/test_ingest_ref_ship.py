@@ -257,3 +257,32 @@ class TestShippedBeforeRefs:
         assert api.ref_of("events", slug) is None
         [(worker, action, error)] = failures(conn)
         assert action == "adopt-ref" and "old-copy" in error
+
+        # Final: marked on the row, and the next ship doesn't try again.
+        row = conn.execute("SELECT * FROM events WHERE event_uid = ?", (uids[0],)).fetchone()
+        assert ingest_ref.final(row) == "taken"
+        attempts = len(api.ref_patches())
+        assert ship.main() == 0
+        assert len(api.ref_patches()) == attempts
+        assert len(failures(conn)) == 1
+
+    def test_an_entity_whose_ref_is_taken_is_not_retried_every_ship(
+            self, ship, monkeypatch, conn):  # noqa: F811
+        api = _use(monkeypatch, FakeAPI())
+        uids = derive(conn)
+        ship_all(ship, monkeypatch, uids)
+        venue_uid = ENTITIES[0][2]
+        vslug = local_slugs(conn)[venue_uid]
+        api.venues[vslug].pop("ingest_ref")
+        api.deleted[("venues", "old-venue")] = {"slug": "old-venue",
+                                                "ingest_ref": ingest_ref.ref_for(venue_uid)}
+        conn.execute("UPDATE venues SET ingest_ref = NULL")
+
+        ship_all(ship, monkeypatch, uids)                  # two events, one venue
+
+        assert [p for p in api.ref_patches() if p[0] == "venues"] == [
+            ("venues", vslug, ingest_ref.ref_for(venue_uid))]
+        row = conn.execute("SELECT * FROM venues WHERE entity_uid = ?", (venue_uid,)).fetchone()
+        assert ingest_ref.final(row) == "taken" and row["ingest_ref"] is None
+        [(worker, action, error)] = failures(conn)
+        assert action == "adopt-ref" and "old-venue" in error
