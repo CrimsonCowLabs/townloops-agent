@@ -109,8 +109,9 @@ def adopt(client, resource: str, live: dict, ref: str) -> Adoption:
     """Give a live row we shipped before refs existed our ref, through the
     set-once PATCH. A row already carrying it is `already`; one carrying a
     different ref is `other-ref` (never re-pointed — TownLoops refuses with a
-    422); a ref another row holds is `taken` (a duplicate, for the operator).
-    Never raises."""
+    422); a ref another row holds is `taken` (a duplicate, for the operator)
+    — unless the 409 names this very row: a row of ours merged into it holds
+    the ref, which already resolves here (`already`). Never raises."""
     current = live.get("ingest_ref")
     if current == ref:
         return Adoption("already")
@@ -120,6 +121,8 @@ def adopt(client, resource: str, live: dict, ref: str) -> Adoption:
         client.update(resource, live["slug"], {"ingest_ref": ref})
     except Exception as e:  # noqa: BLE001 — reported, retried by the next sweep
         other = taken_slug(e)
+        if other and other == live.get("slug"):
+            return Adoption("already", f"{ref} resolves to {other} (merged)")
         if other:
             return Adoption("taken", f"{ref} already identifies {other}")
         if getattr(e, "status", None) == 422:

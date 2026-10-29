@@ -377,6 +377,7 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
     import os
     from datetime import timedelta
     from engine import autonomy, event_detail
+    from engine.ingest_ref import cancel_ref_for, taken_slug
     now = now or datetime.now(timezone.utc)
     out = {"checked": 0, "submitted": 0, "no_statement": 0, "errors": []}
     cutoff = (now - timedelta(hours=RECHECK_HOURS)).isoformat(timespec="seconds")
@@ -406,7 +407,8 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
                                             "venue_id", "source_url", "category_slugs", "tags",
                                             "accessibility_notes") if live.get(k) is not None}
             payload.update(cancelled_overrides(live))
-            payload["slug"] = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG', 'unknown')}-cancel-{uid[:12]}"
+            # Its own row (never the event's ref); TownLoops derives the slug.
+            payload["ingest_ref"] = cancel_ref_for(uid)
             client.context.update(kind="cancellation", target_slug=slug, local_uid=uid)
             created = client.create("events", payload,
                                     idempotency_key=f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG', '?')}:cancel:event:{uid[:16]}")
@@ -414,8 +416,10 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
             out["errors"].append(f"{slug}: held ({e.reason})")
             break
         except Exception as e:  # noqa: BLE001 — stays flagged; re-checked tomorrow
-            out["errors"].append(f"{slug}: {str(e)[:200]}")
-            continue
+            if not taken_slug(e):
+                out["errors"].append(f"{slug}: {str(e)[:200]}")
+                continue
+            created = {"slug": taken_slug(e)}   # submitted before: the 409 names it
         d.evidence.update(target_slug=slug, pending_slug=(created or {}).get("slug"))
         autonomy.record(conn, "cancellation", uid, d)
         _set(conn, uid, "submitted", f"cancellation submitted for merge into {slug}: "

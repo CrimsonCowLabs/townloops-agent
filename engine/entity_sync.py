@@ -18,8 +18,11 @@ entity is synced:
 A live row a curator merged into another (its 404 names the survivor,
 `merged_into_slug`) is re-pointed: `townloops_slug` and `live_id` move to the
 survivor, which is synced from step 1 — a 404 on PATCH re-reads it, so its
-blanks are decided on its own values. A live row that is otherwise gone
-(404 on GET or PATCH, or a merge chain past `live_lookup.MAX_MERGE_HOPS`) or
+blanks are decided on its own values. A 404 naming no survivor is looked up
+by the entity's Ingest Ref (engine/ingest_ref) before anything is flagged: a
+row renamed on TownLoops is found under its new slug and re-pointed the same
+way. A live row that is otherwise gone (404 on GET or PATCH and no row
+carries the ref, or a merge chain past `live_lookup.MAX_MERGE_HOPS`) or
 that doesn't show what was sent is flagged for the operator
 (`extra_json.live_sync`, a failed `entity-sync` activity) and left alone
 until cleared — never re-created. Never synced: live mirrors
@@ -121,11 +124,22 @@ def _sync(client, conn: sqlite3.Connection, kind: str, entity_uid: str,
     try:
         live = get_live(client, resource, slug)
     except Exception as e:  # noqa: BLE001
-        if is_not_found(e):
-            return flag_for_operator(conn, kind, row, "missing", f"live {kind} {slug} not found (404)")
-        return _error(conn, kind, row, f"read live {kind} {slug} failed: {str(e)[:200]}")
-    if live.get("slug") and (live["slug"] != slug or hops):
-        # A survivor (on a hop, re-read for its id after a PATCH 404).
+        if not is_not_found(e):
+            return _error(conn, kind, row, f"read live {kind} {slug} failed: {str(e)[:200]}")
+        try:
+            live = _by_ref(client, conn, kind, entity_uid)
+        except Exception as e2:  # noqa: BLE001
+            return _error(conn, kind, row, f"look up live {kind} by ref failed: {str(e2)[:200]}")
+        if not live:
+            return flag_for_operator(conn, kind, row, "missing",
+                                     f"live {kind} {slug} not found (404, no row carries "
+                                     f"its ingest_ref)")
+    if live.get("slug") and (live["slug"] != slug or hops
+                             or (live.get("id") is not None
+                                 and parse_extra_json(row.get("extra_json")).get("live_id")
+                                 != live["id"])):
+        # A survivor or a renamed row (on a hop, re-read for its id after a
+        # PATCH 404), or a row bound without its id (a 409 binding).
         repoint(conn, kind, row, live)
         slug = row["townloops_slug"]
 
@@ -144,8 +158,14 @@ def _sync(client, conn: sqlite3.Connection, kind: str, entity_uid: str,
             result = apply_entity_patch(client, resource, slug, fill, current=live)
         except Exception as e:  # noqa: BLE001
             survivor = merged_into_slug(e)
+            if not survivor and is_not_found(e) and hops < MAX_MERGE_HOPS:
+                try:   # renamed since the read?
+                    survivor = (_by_ref(client, conn, kind, entity_uid) or {}).get("slug")
+                except Exception:  # noqa: BLE001 — flagged below like any 404
+                    survivor = None
+                survivor = survivor if survivor != slug else None
             if survivor and hops < MAX_MERGE_HOPS:
-                # Merged since the read: start over on the survivor's own row.
+                # Merged or renamed since the read: start over on its own row.
                 repoint(conn, kind, row, {"slug": survivor})
                 return _sync(client, conn, kind, entity_uid, hops + 1)
             _save_pulled(conn, kind, row, pulled)
@@ -173,9 +193,21 @@ def _sync(client, conn: sqlite3.Connection, kind: str, entity_uid: str,
     return SyncResult("synced", pulled, sorted(fill), detail)
 
 
+def _by_ref(client, conn: sqlite3.Connection, kind: str, entity_uid: str) -> dict | None:
+    """The live row carrying the entity's Ingest Ref, if any — remembered
+    locally when found. API errors raise."""
+    from engine.ingest_ref import find_by_ref, ref_for, remember
+    ref = ref_for(entity_uid)
+    live = find_by_ref(client, RESOURCES[kind], ref)
+    if live:
+        remember(conn, kind, entity_uid, ref)
+    return live
+
+
 def repoint(conn: sqlite3.Connection, kind: str, row: dict, survivor: dict) -> None:
-    """A curator merged the entity's live row into `survivor` (a live row,
-    or just its {slug}): record it as the entity's live row from now on —
+    """The entity's live row is now `survivor` (a live row, or just its
+    {slug}) — a curator merged it there, or renamed it (found by its Ingest
+    Ref): record it as the entity's live row from now on —
     `townloops_slug`, and `extra_json.live_id` when its id is known (event-
     ship binds venues by it). Local bookkeeping only; `row` is updated too."""
     old = row["townloops_slug"]
@@ -191,7 +223,7 @@ def repoint(conn: sqlite3.Connection, kind: str, row: dict, survivor: dict) -> N
                                           row["entity_uid"]))
     if old != survivor["slug"]:
         record_activity(conn, _WORKER, "repointed", f"{kind}:{row['entity_uid']}",
-                        detail=f"{old} merged into {survivor['slug']}")
+                        detail=f"{old} → {survivor['slug']} (merged or renamed live)")
 
 
 def _save_pulled(conn: sqlite3.Connection, kind: str, row: dict, pulled: list[str]) -> None:

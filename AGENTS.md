@@ -109,10 +109,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `sameAs`, profile paths only, one per platform) fill blank socials; ambiguous → `needs-review`;
     driven by the `performer-research` skill, ≤3 per 20-min cron run),
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
-    `entity-live-sync`; a 404 naming a merge survivor re-points instead of flagging), `live_patch.py`
-    (full-body PATCH + GET verify for events and entities),
-    `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote),
-    `live_lookup.py` (find a live record before creating one; the one parser of a merged entity's 404
+    `entity-live-sync`; a 404 naming a merge survivor re-points instead of flagging, one naming none is looked
+    up by Ingest Ref first — a TownLoops rename re-points too), `live_patch.py`
+    (full-body PATCH + GET verify for events and entities; never sends `ingest_ref`),
+    `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote. Creates
+    send `ingest_ref` (`engine/ingest_ref.ref_for`), never a slug; `409 ingest_ref_taken` binds `details.slug`
+    with no second lookup; a pre-ref row found by slug is `adopt`ed (set-once PATCH); bound refs `remember`ed),
+    `live_lookup.py` (find a live record before creating one — by Ingest Ref first (`?ingest_ref=`), the old
+    slug / series-day / source_url matches only as the fallback for pre-ref rows; the one parser of a merged entity's 404
     survivor, `merged_into`/`merged_into_slug`, and `follow_merges` — ≤`MAX_MERGE_HOPS`, under `get_live`
     and event-ingest's PATCH. Entity reads by cached slug go through it and re-point via
     `entity_sync.repoint` (slug + `live_id` together): a 404 *with* a survivor re-points, only one without
@@ -333,7 +337,7 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   `entity_ship.ship_entity`): the event ships without it, and `entity-live-sync` ships it once released.
 - **Series are read-only; `series_slug` is the recurrence key.** Membership comes only from TownLoops'
   auto-link at create (title key vs active Series) or a curator, so the agent controls only the title it
-  ships (`series.decide_title`). Live lookup order is slug → same-town-local-date occurrence of the predicted
+  ships (`series.decide_title`). Live lookup order is Ingest Ref → slug → same-town-local-date occurrence of the predicted
   Series (`?series=`) → `source_url` ±12h. Reconcile treats a live row with a `series_slug` as recurring (a new
   date is `new`, never a reschedule). `events.series_slug/series_id` are written only from TownLoops responses.
 - **One canonical event per real event; cancellations are operator-gated.** `event_uid` is per seed;

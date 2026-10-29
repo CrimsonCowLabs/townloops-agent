@@ -25,16 +25,28 @@ Exit codes:
 
 Each POST uses `Idempotency-Key: hermes-{town_slug}:ship:{entity_kind}:{entity_uid}`.
 Replaying the same request (same key) is safe — TownLoops returns 200 with
-the existing record. A *different* request that hits a taken slug gets a 409,
-which is handled below.
+the existing record.
+
+Every create carries the row's **Ingest Ref** (`engine/ingest_ref.ref_for`:
+`hermes-<town>-<uid16>`, townloops ADR 0011) and **never a `slug`** —
+TownLoops derives the slug, the ref is the identity (unique per town per kind,
+set once). A create whose ref TownLoops already holds is `409
+ingest_ref_taken`, handled below. Once a row is bound, its ref is recorded on
+the local `ingest_ref` column ("live is known to carry it").
 
 ## Look up live before creating
 
 Nothing is POSTed until a lookup says it isn't live yet
 (`engine/live_lookup.py`). A lookup error is rc 1 (retry), never a blind create.
+Every lookup goes **by Ingest Ref first** (`?ingest_ref=`) — that survives a
+wiped local cache and a TownLoops-side rename (a row found under a new slug is
+re-pointed, never flagged or re-created). The matches below are the fallback
+for rows shipped before refs; a row they find without our ref is given it
+(`ingest_ref.adopt`, the set-once PATCH; a failure is a failed `adopt-ref`
+activity, retried next ship).
 
-- **Entities**: GET by slug (the row's `townloops_slug`, else the proposed
-  `hermes-<town>-…` slug). Found → adopted: `townloops_slug` and
+- **Entities**: by ref, else GET by slug (the row's `townloops_slug`, else the
+  slug pre-ref creates proposed — the ref's own string). Found → adopted: `townloops_slug` and
   `extra_json.live_id` recorded, nothing POSTed. Created → the live id
   from the create response is recorded the same way. Either way (and for a
   row shipped earlier whose content changed since, e.g. by enrichment) the
@@ -43,7 +55,7 @@ Nothing is POSTed until a lookup says it isn't live yet
   by a full-body PATCH, GET-verified before `pushed_hash` moves. A row we
   shipped before that now 404s is flagged for the operator
   (`extra_json.live_sync`), never re-created.
-- **Events**: GET by slug; then, when the event will join a TownLoops Series
+- **Events**: by ref; else GET by slug (as for entities); then, when the event will join a TownLoops Series
   (see "Series" below), that Series' occurrences on the same town-local date
   (`?series=<slug>&from=<day start>&to=<day end>`) — one is this event (a
   second source's copy of one evening, whatever its source_url or start), two
@@ -56,8 +68,13 @@ Nothing is POSTed until a lookup says it isn't live yet
   (`engine.live_patch.apply_event_patch`), nothing sent when there's nothing
   to add. Several live rows for one event → a failed `find-live-event`
   activity listing their slugs, the event parked `stuck-` for the operator.
-- **409 `slug_taken` is not success**: ship looks the row up again and
-  continues as "found"; if it still isn't there, rc 1.
+- **409 `ingest_ref_taken` means "already shipped"** (a lookup miss — e.g. a
+  soft-deleted row the list excludes — or a lost create answer): the row is
+  bound to `error.details.slug` with no second request (a `bound-by-ref`
+  activity; no post-ship Series re-read). Any other 409 is looked up again by
+  ref; if nothing is there, rc 1.
+- The event payload names its venue by `venue_id`, then `venue_ingest_ref`
+  (the derived venue's ref), then `venue_name` — TownLoops' resolution order.
 
 ## Series (ADR 0007)
 
@@ -217,7 +234,9 @@ The client is an `engine/autonomy.GatedClient`:
 - **Changes to a published event**: every change event-reconcile staged
   lands somewhere. One to a value the live row already has (date, venue, any
   other field) is submitted as a pending event carrying the same
-  `source_url`, for the TownLoops merge flow — never PATCHed. One that only
+  `source_url`, for the TownLoops merge flow — never PATCHed. It carries its
+  own ref (`ingest_ref.change_ref_for`), never the event's; a 409 binds the
+  submission the error names. One that only
   fills a blank live field (e.g. a venue on a venue-less event), plus the
   accessibility-notes / ticket-line / `free` fills, is PATCHed live and
   GET-verified. A venue with no live id goes in the submission by name. Each

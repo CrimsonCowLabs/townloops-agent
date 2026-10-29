@@ -141,6 +141,12 @@ class TestVenues:
         town.listing(ARENA, [concert("Jazz Night")])
         town.run()
         assert [c[1] for c in town.api.calls if c[0] == "POST"] == ["venues", "events"]
+        venue, event = (c[2] for c in town.api.calls if c[0] == "POST")
+        assert "slug" not in venue and "slug" not in event
+        assert event["venue_ingest_ref"] == venue["ingest_ref"]
+        # Followed by the slug TownLoops derived, not one the agent proposed.
+        subs = {r[0] for r in town.conn.execute("SELECT slug FROM submissions")}
+        assert subs == {town.api.posted_slug("venues", venue), town.api.posted_slug("events", event)}
 
 
 class TestTheGate:
@@ -183,7 +189,7 @@ class TestTheGate:
         town.listing(ARENA, [concert("Jazz Night", source_url="https://arena.example/jazz")])
         town.run()
         [sent] = town.submitted_events()
-        town.api.reject("events", sent["slug"])
+        town.api.reject("events", town.api.posted_slug("events", sent))
         # The same event turns up again from a second seed.
         other = "https://visit.example/calendar"
         town.seed("Visitor Bureau", other, kind="tourism")

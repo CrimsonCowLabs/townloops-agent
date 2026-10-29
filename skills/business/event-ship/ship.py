@@ -3,8 +3,13 @@
 
 Per plan adversarial pass #19: entities go first (venue, host, people),
 then the event. The event references its venue by live `venue_id`, so the
-venue must exist before the event references it. Nothing is created
-without first looking it up live (`engine/live_lookup.py`). An event whose
+venue must exist before the event references it (and by the venue's Ingest
+Ref, `venue_ingest_ref`, next). Nothing is created without first looking it
+up live (`engine/live_lookup.py`), by the event's Ingest Ref first
+(engine/ingest_ref). A create never proposes a slug — TownLoops derives it —
+and carries the ref; a `409 ingest_ref_taken` means "already shipped": the
+event is bound to the slug it names, with no second request. A row found by
+the pre-ref fallbacks is given the ref (set-once PATCH). An event whose
 times are implausible (engine/time_plausibility) and not accepted by the
 operator is held for review instead — nothing is sent.
 
@@ -41,9 +46,8 @@ from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
     seed_name_of,
 )
-from engine.entity_ship import (
-    AwaitingResearch, ship_entity as _ship_entity, slug_for as _slug_for,
-)
+from engine.entity_ship import AwaitingResearch, ship_entity as _ship_entity
+from engine.ingest_ref import adopt, change_ref_for, ref_for, remember, taken_slug
 from engine.event_extract import has_clock_time, town_tz_name, utc_times
 from engine.workqueue import RC_DEFERRED
 
@@ -51,6 +55,11 @@ from engine.workqueue import RC_DEFERRED
 _WORKER = "event-ship"
 # _ship_event's answer when TownLoops already rejected this event.
 _DECLINED = object()
+
+
+class _BoundByRef(str):
+    """_ship_event's answer when the create's `409 ingest_ref_taken` named the
+    live row: its slug, bound with no further request (no re-read after)."""
 
 # Ordering matters — venue first, then hosts, then people. Event last.
 _SHIP_ORDER = ("venue", "business", "community", "performer", "creator")
@@ -203,29 +212,75 @@ def _seed_url(conn, event: dict) -> Optional[str]:
     return r["url"] if r else None
 
 
-def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optional[str]:
-    """Create the event live — unless it is already there (by slug, as an
-    occurrence of its Series on the same town-local date, or by source_url
-    at the same time), in which case the live row is filled in instead.
-    Several live rows for it park the event for the operator."""
-    from engine.live_lookup import find_live_event, is_conflict
-    payload = _event_payload(event)
+def _venue_ref(conn, event: dict) -> Optional[str]:
+    """The derived venue's Ingest Ref (sent as `venue_ingest_ref`): the one
+    its live row is known to carry, else its own unless it is a live mirror
+    (a row we didn't ship carries no ref of ours). None without one."""
+    vuid = event.get("derived_venue_uid")
+    if not vuid:
+        return None
+    v = conn.execute("SELECT source_kind, ingest_ref FROM venues WHERE entity_uid = ?",
+                     (vuid,)).fetchone()
+    if not v:
+        return None
+    if v["ingest_ref"]:
+        return v["ingest_ref"]
+    return None if v["source_kind"] == "live" else ref_for(vuid)
+
+
+def _bind_venue(client, conn, event: dict, payload: dict, venue_slug: Optional[str]) -> None:
+    """venue_id, then venue_ingest_ref, then the payload's venue_name —
+    TownLoops resolves them in that order."""
     venue_id = _resolve_venue_id(client, conn, event, venue_slug)
     if venue_id:
         # By id: the server's name lookup fails outright on duplicate names.
         # The name rides along — unused when the id resolves, kept as the
         # curator's hint when it doesn't.
         payload["venue_id"] = venue_id
+    vref = _venue_ref(conn, event)
+    if vref:
+        payload["venue_ingest_ref"] = vref
+
+
+def _bind_ref(client, conn, event_uid: str, live: dict, ref: str) -> None:
+    """The event is bound to `live`: remember its ref — given to it first
+    (set-once PATCH) when a pre-ref fallback found it. A failed adoption is
+    recorded and retried on the next ship."""
+    result = adopt(client, "events", live, ref)
+    if result.status in ("adopted", "already"):
+        remember(conn, "event", event_uid, ref)
+    if result.status != "already":
+        record_activity(conn, _WORKER, "adopt-ref", event_uid,
+                        detail=f"{live.get('slug')}: {result.status} {result.detail}".strip(),
+                        ok=result.status == "adopted",
+                        error=None if result.status == "adopted" else result.detail or result.status)
+
+
+def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optional[str]:
+    """Create the event live — unless it is already there (by its Ingest Ref;
+    for rows shipped before refs by slug, as an occurrence of its Series on
+    the same town-local date, or by source_url at the same time), in which
+    case the live row is given the ref and filled in instead. Several live
+    rows for it park the event for the operator. A create carries the ref and
+    no slug; its `409 ingest_ref_taken` binds the slug it names
+    (`_BoundByRef`)."""
+    from engine.live_lookup import find_live_event, is_conflict
+    payload = _event_payload(event)
+    _bind_venue(client, conn, event, payload, venue_slug)
     event_uid = event["event_uid"]
-    proposed_slug = event.get("townloops_slug") or _slug_for("event", event_uid)
-    payload["slug"] = proposed_slug
+    ref = ref_for(event_uid)
+    payload["ingest_ref"] = ref
+    # Pre-ref rows: the cached slug, or (none cached) the slug pre-ref creates
+    # proposed — the ref's own string.
+    legacy_slug = event.get("townloops_slug") or ref
     try:
         source_title = payload["title"]
         decision = _title_decision(client, conn, event, payload)
         payload["title"] = decision.title
         record_activity(conn, _WORKER, "series-title", event_uid,
                         detail=decision.summary(source_title))
-        found = find_live_event(client, slug=proposed_slug, source_url=payload.get("source_url"),
+        found = find_live_event(client, ingest_ref=ref, slug=legacy_slug,
+                                source_url=payload.get("source_url"),
                                 start_at=payload["start_at"], series_slug=decision.series_slug,
                                 tz=_town_tz())
     except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry; never create blind
@@ -245,6 +300,7 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
             and found.row.get("status") == "rejected":
         return _decline_rejected(conn, event_uid, found)
     if found.row:
+        _bind_ref(client, conn, event_uid, found.row, ref)
         if isinstance(client, autonomy.GatedClient) and found.row.get("status") == "pending":
             # Adopting a pending record (ours from an earlier run, or another
             # submitter's): follow it like our own submission.
@@ -263,24 +319,39 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         if isinstance(e, autonomy.SubmissionsHeld):
             raise
         msg = str(e)
+        taken = taken_slug(e)
+        if taken:
+            # Already shipped (a wiped cache, a row the list read can't see):
+            # the 409 names it — bind, no second request.
+            remember(conn, "event", event_uid, ref)
+            record_activity(conn, _WORKER, "bound-by-ref", event_uid,
+                            detail=f"{ref} already live as {taken}")
+            return _BoundByRef(taken)
         if is_conflict(e):
-            # Created since the lookup (another worker): reconcile to it.
+            # Some other conflict: look again, by ref (created since the lookup).
             try:
-                found = find_live_event(client, slug=proposed_slug, source_url=None, start_at=None)
+                found = find_live_event(client, ingest_ref=ref, slug=event.get("townloops_slug"),
+                                        source_url=None, start_at=None)
             except Exception as e2:  # noqa: BLE001
-                print(f"read live event {proposed_slug} failed: {str(e2)[:200]}", file=sys.stderr)
+                print(f"read live event {ref} failed: {str(e2)[:200]}", file=sys.stderr)
                 return None
             if found.row:
+                _bind_ref(client, conn, event_uid, found.row, ref)
                 return _fill_live_event(client, conn, event, found.row, payload)
-            msg = f"409 on create but no live event at {proposed_slug}: {msg}"
+            msg = f"409 on create but no live event carries {ref}: {msg}"
         elif "Multiple rows were found" in msg and "venue_id" not in payload:
             msg = (f"venue name {payload['venue_name']!r} matches several live venues — "
                    "derive/link the venue so the event can reference it by id")
         record_activity(conn, _WORKER, "ship-event", event_uid, ok=False, error=msg[:1000])
         print(f"ship event {event_uid[:12]} failed: {msg[:200]}", file=sys.stderr)
         return None
-    slug = (result or {}).get("slug", proposed_slug) if isinstance(result, dict) else proposed_slug
-    if isinstance(result, dict) and not _repair_dropped_fields(client, conn, event, slug, payload, result):
+    slug = result.get("slug") if isinstance(result, dict) else None
+    if not slug:
+        record_activity(conn, _WORKER, "ship-event", event_uid, ok=False,
+                        error=f"create answered no slug: {str(result)[:200]}")
+        return None
+    remember(conn, "event", event_uid, ref)
+    if not _repair_dropped_fields(client, conn, event, slug, payload, result):
         return None
     return slug
 
@@ -319,9 +390,7 @@ def _submit_change(client, conn, event: dict, meta: dict,
         print(f"read live event {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
         return None
     payload = _event_payload(event)
-    venue_id = _resolve_venue_id(client, conn, event, venue_slug)
-    if venue_id:
-        payload["venue_id"] = venue_id
+    _bind_venue(client, conn, event, payload, venue_slug)
     fill = _reconcile_fill_overrides(event, current)
     # A ticket line atop a published description, or `free` dropped from
     # published tags, rewrites a published value: merge flow, not a PATCH.
@@ -358,7 +427,7 @@ def _submit_change(client, conn, event: dict, meta: dict,
     payload.update(submit)
     if "start_at" in submit and not submit.get("end_at"):
         payload.pop("end_at", None)   # never an end that may fall before the new start
-    payload["slug"] = _slug_for("event", uid)
+    payload["ingest_ref"] = change_ref_for(uid)   # its own row, never the event's ref
     client.context.update(kind="change", target_slug=live_slug, local_uid=uid)
     idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{uid[:16]}"
     try:
@@ -366,13 +435,17 @@ def _submit_change(client, conn, event: dict, meta: dict,
     except autonomy.SubmissionsHeld:
         raise
     except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry
-        from engine.live_lookup import is_conflict
-        if not is_conflict(e):
+        taken = taken_slug(e)
+        if not taken:
             record_activity(conn, _WORKER, "submit-change", uid, ok=False, error=str(e)[:1000])
             print(f"submit change for {live_slug} failed: {str(e)[:200]}", file=sys.stderr)
             return None
-        result = {"slug": payload["slug"]}
-    slug = (result or {}).get("slug") or payload["slug"]
+        result = {"slug": taken}   # submitted before: the 409 names it
+    slug = result.get("slug") if isinstance(result, dict) else None
+    if not slug:
+        record_activity(conn, _WORKER, "submit-change", uid, ok=False,
+                        error=f"create answered no slug: {str(result)[:200]}")
+        return None
     _remember_change_submission(conn, uid, slug, live_slug, submit)
     if "start_at" in submitted_keys:   # the merge may keep the published end
         _note_unclearable_end(conn, event, live_slug, current.get("end_at"))
@@ -785,8 +858,10 @@ def main() -> int:
         # drain's optimistic advance (from entities-enriched) is a no-op.
         return 0
 
+    # API not configured: marked shipped locally only, its ref as the
+    # placeholder slug (a later ship looks it up by ref first anyway).
     if not _tl_configured():
-        _mark_shipped(conn, event_uid, _slug_for("event", event_uid), disabled=True)
+        _mark_shipped(conn, event_uid, ref_for(event_uid), disabled=True)
         print(f"TOWNLOOPS_API_KEY unset — event {event_uid[:12]} marked shipped locally only")
         return 0
 
@@ -795,7 +870,7 @@ def main() -> int:
         client = Client()
     except KeyError as e:
         # env var missing — treat as disabled
-        _mark_shipped(conn, event_uid, _slug_for("event", event_uid), disabled=True)
+        _mark_shipped(conn, event_uid, ref_for(event_uid), disabled=True)
         print(f"TownLoops env incomplete ({e}); marked local-only", file=sys.stderr)
         return 0
 
@@ -868,7 +943,9 @@ def _ship(client, conn, event: dict) -> int:
         return 1
 
     _mark_shipped(conn, event_uid, event_slug, disabled=False)
-    _after_ship_series(client, conn, event_uid, event_slug)
+    if not isinstance(event_slug, _BoundByRef):
+        # Bound by a 409: no second request; entity-live-sync mirrors its Series.
+        _after_ship_series(client, conn, event_uid, event_slug)
     event_detail.drop_cached_page(event_uid)
     print(f"shipped event {event_uid[:12]} → {event_slug}")
     return 0

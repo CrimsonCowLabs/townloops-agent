@@ -12,6 +12,7 @@ import sqlite3
 import pytest
 
 from engine.event_extract import upsert_event, utc_times
+from engine.ingest_ref import change_ref_for
 from tests.autonomy_town import PROFILE, Town, soon
 
 ARENA = "https://arena.example/events"
@@ -30,7 +31,7 @@ def concert(title="Jazz Night", days=7, **kw):
 
 
 def slugs(town):
-    return [p["slug"] for p in town.submitted_events()]
+    return [town.api.posted_slug("events", p) for p in town.submitted_events()]
 
 
 class TestSeedTrust:
@@ -112,13 +113,41 @@ class TestMerges:
         assert sent["source_url"] == "https://arena.example/jazz"
         assert sent["start_at"] == utc_times(new, None)[0]
         assert town.api.events["jazz-live"]["start_at"] == old_utc   # untouched until merged
+        uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        assert "slug" not in sent and sent["ingest_ref"] == change_ref_for(uid)
 
-        town.api.merge("events", sent["slug"], into="jazz-live")
+        town.api.merge("events", town.api.posted_slug("events", sent), into="jazz-live")
         town.poll()
         assert town.api.events["jazz-live"]["start_at"] == utc_times(new, None)[0]
         row = town.conn.execute("SELECT townloops_slug FROM events WHERE status = 'active'"
                                 ).fetchone()
         assert row[0] == "jazz-live"
+
+
+    def test_a_change_submitted_before_is_bound_by_its_409(self, town):
+        """The change's own ref is already held (an earlier run's submission
+        whose answer was lost): bound to the slug the 409 names."""
+        old, new = soon(7), soon(9)
+        old_utc, _ = utc_times(old, None)
+        town.api.events["jazz-live"] = {
+            "id": 50, "slug": "jazz-live", "title": "Jazz Night", "start_at": old_utc,
+            "status": "published", "source_url": "https://arena.example/jazz",
+            "venue_id": None, "series_slug": None, "tags": [], "category_slugs": []}
+        town.seed("Arena", ARENA)
+        moved = concert("Jazz Night", date=new, source_url="https://arena.example/jazz")
+        town.listing(ARENA, [moved])
+        upsert_event(town.conn, "Arena", moved)
+        uid = town.conn.execute("SELECT event_uid FROM events").fetchone()[0]
+        town.api.deleted[("events", "jazz-change-earlier")] = {
+            "slug": "jazz-change-earlier", "ingest_ref": change_ref_for(uid)}
+        town.conn.execute("UPDATE events SET extra_json = ?",
+                          (json.dumps({"reconcile": {"kind": "changed", "live_slug": "jazz-live",
+                                                     "changes": {"start_at": [old, new]}}}),))
+        town.conn.commit()
+        town.run()
+        assert [s for r, s in town.api.created if r == "events"] == []
+        extra = json.loads(town.conn.execute("SELECT extra_json FROM events").fetchone()[0])
+        assert extra["change_submission"]["pending_slug"] == "jazz-change-earlier"
 
 
 JAZZ_URL = "https://arena.example/jazz"
@@ -167,7 +196,7 @@ class TestChanges:
         assert sent["venue_id"] == 6 and sent["source_url"] == JAZZ_URL
         assert town.api.events["jazz-live"]["venue_id"] == 5     # untouched until merged
 
-        town.api.merge("events", sent["slug"], into="jazz-live", fields=("venue_id", "venue_slug"))
+        town.api.merge("events", town.api.posted_slug("events", sent), into="jazz-live", fields=("venue_id", "venue_slug"))
         out = town.poll()
         assert (out["merged"], out["gone"]) == (1, 0)
         row = town.conn.execute("SELECT townloops_slug FROM events WHERE status = 'active'"
@@ -195,7 +224,7 @@ class TestChanges:
         d = change_decisions(town)["submit"]
         assert d["evidence"]["changes"] == ["title"]
 
-        town.api.merge("events", sent["slug"], into="jazz-live", fields=("title",))
+        town.api.merge("events", town.api.posted_slug("events", sent), into="jazz-live", fields=("title",))
         out = town.poll()
         assert (out["merged"], out["gone"]) == (1, 0)
 
@@ -242,7 +271,7 @@ class TestChanges:
                      {"venue_id": 5, "venue_slug": "old-hall"})
         town.run()
         [sent] = town.submitted_events()
-        town.api.delete("events", sent["slug"])
+        town.api.delete("events", town.api.posted_slug("events", sent))
         out = town.poll()
         assert (out["merged"], out["gone"]) == (0, 1)
 

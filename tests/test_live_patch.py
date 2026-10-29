@@ -27,6 +27,17 @@ VENUES = [
 
 
 class TestApplyEventPatch:
+    def test_the_ingest_ref_is_never_in_a_patch_body(self):
+        """Set once, by engine/ingest_ref.adopt alone — never round-tripped."""
+        from engine.live_patch import build_entity_patch, build_event_patch
+        live = {**LIVE, "ingest_ref": "hermes-slt-0123456789abcdef"}
+        body = build_event_patch(live, {"ingest_ref": "hermes-slt-x", "venue_ingest_ref": "v",
+                                        "description": "New."})
+        assert "ingest_ref" not in body and "venue_ingest_ref" not in body
+        assert body["description"] == "New."
+        venue = {"slug": "riva", "name": "Riva", "ingest_ref": "hermes-slt-0123456789abcdef"}
+        assert "ingest_ref" not in build_entity_patch("venues", venue, {"ingest_ref": "x"})
+
     def test_unchanged_fields_survive_a_start_time_change(self):
         api = FakeAPI([LIVE], VENUES)
         result = apply_event_patch(api, "jazz", {"start_at": "2026-10-10T04:00:00+00:00"})
