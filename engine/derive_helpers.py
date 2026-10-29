@@ -263,11 +263,16 @@ def match_live_venue(name: str, live_venues: Iterable[dict]) -> LiveVenueMatch:
     return LiveVenueMatch("review", candidates=sorted(rows, key=lambda v: str(v.get("slug"))))
 
 
-LIVE_VENUE_CACHE = _DB_PATH.parent / "cache" / "live-venues.json"
 LIVE_VENUE_TTL_SECONDS = 600
 
 
-def load_live_venues(fetch, cache_path: Path = LIVE_VENUE_CACHE,
+def live_venue_cache() -> Path:
+    """Where the live venue list is cached: beside the DB, resolved per call
+    so a redirected `_DB_PATH` (tests) takes its cache with it."""
+    return _DB_PATH.parent / "cache" / "live-venues.json"
+
+
+def load_live_venues(fetch, cache_path: Optional[Path] = None,
                      ttl_seconds: int = LIVE_VENUE_TTL_SECONDS,
                      now: Optional[float] = None) -> list[dict]:
     """The live TownLoops venue list, fetched at most once per `ttl_seconds`.
@@ -275,6 +280,7 @@ def load_live_venues(fetch, cache_path: Path = LIVE_VENUE_CACHE,
     the TTL spans a workqueue drain. `fetch` raising propagates — the caller
     must not fall back to creating a shell it couldn't check."""
     now = time.time() if now is None else now
+    cache_path = cache_path or live_venue_cache()
     try:
         cached = json.loads(cache_path.read_text())
         if now - float(cached["fetched_at"]) < ttl_seconds:
@@ -292,11 +298,11 @@ def load_live_venues(fetch, cache_path: Path = LIVE_VENUE_CACHE,
     return venues
 
 
-def cached_live_venues(cache_path: Path = LIVE_VENUE_CACHE) -> list[dict]:
+def cached_live_venues(cache_path: Optional[Path] = None) -> list[dict]:
     """The live venue list event-derive-venue last cached, whatever its age;
     [] when there is none. Never fetches — for informational checks only."""
     try:
-        return list(json.loads(cache_path.read_text())["venues"])
+        return list(json.loads((cache_path or live_venue_cache()).read_text())["venues"])
     except (OSError, ValueError, KeyError, TypeError):
         return []
 

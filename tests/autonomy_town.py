@@ -98,6 +98,8 @@ class Town:
         monkeypatch.setattr("engine.event_detail.firecrawl_markdown", self._fetch_detail)
         monkeypatch.setattr("engine.event_detail.codex_exec", self._codex)
         monkeypatch.setattr("engine.event_people.codex_exec", self._codex)
+        # Enrichment's page fields (entity_classify.codex_llm) resolve it lazily.
+        monkeypatch.setattr("engine.event_extract.codex_exec", self._codex)
         self.people: dict[str, dict] = {}   # event title → host/people AI answer
         monkeypatch.setattr("engine.orchestrator._invoke_skill", self._invoke)
         (tmp_state_dir / "categories.json").write_text(json.dumps(

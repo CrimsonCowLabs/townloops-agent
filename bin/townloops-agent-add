@@ -243,7 +243,9 @@ if [[ "$RERENDER" == 1 ]]; then
     echo "$COMPOSE is up to date with the template"
     exit 0
   fi
-  if command -v docker >/dev/null 2>&1 \
+  # Validate only where `docker compose` itself works — a docker CLI without
+  # the compose plugin would reject every file.
+  if docker compose version >/dev/null 2>&1 \
       && ! docker compose -f "$new" --project-directory "$TARGET" config -q; then
     echo "refusing to re-render: the rendered compose doesn't validate (above); $COMPOSE unchanged" >&2
     exit 8

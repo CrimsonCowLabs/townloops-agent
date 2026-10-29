@@ -761,6 +761,10 @@ class TestEnrichEntitiesSkill:
         mod = _load_skill()
         monkeypatch.setattr(mod, "open_db", lambda: conn)
         monkeypatch.setattr(mod, "parse_event_uid_arg", lambda: uid)
+        # Hermetic: the page-field read gets an answer ("nothing quotable"),
+        # never the real Codex CLI, whose failure would defer the entity.
+        from engine import event_extract
+        monkeypatch.setattr(event_extract, "codex_exec", lambda prompt, timeout_s=120: (True, "{}", ""))
         monkeypatch.setenv("TOWN_PROFILE_PATH", "/nonexistent/town-profile.yaml")
         if budget is not None:
             monkeypatch.setenv("TOWNLOOPS_ENRICH_MAX_LOOKUPS", str(budget))
