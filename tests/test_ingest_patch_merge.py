@@ -2,7 +2,7 @@
 may have merged that record into a published one: the 404 then names the
 survivor (`merged_into_slug`, townloops ADR 0009). The row is re-pointed at
 the survivor (persisted) and the same PATCH retried there — not reset to a
-re-POST that would only hit `409 slug_taken` and never converge. A 404
+re-POST that would only hit `409 ingest_ref_taken` and never converge. A 404
 without a survivor still resets the row for a re-POST."""
 
 from __future__ import annotations
@@ -29,6 +29,12 @@ def _load_ingest():
 @pytest.fixture(scope="module")
 def ingest():
     return _load_ingest()
+
+
+@pytest.fixture(autouse=True)
+def no_row_carries_the_ref(ingest, monkeypatch):
+    """A 404 re-reads the row by ingest_ref (#63); here no live row has it."""
+    monkeypatch.setattr(ingest.requests, "get", lambda url, **kw: _Resp(200, {"data": []}))
 
 
 @pytest.fixture
@@ -217,5 +223,5 @@ def test_merge_loop_is_followed_a_bounded_number_of_times(ingest, conn, monkeypa
 
     assert (shipped, failed) == (0, 1)
     assert len(server.calls) <= MAX_MERGE_HOPS + 1
-    # Merged, so not reset for a re-POST that could only hit slug_taken.
+    # Merged, so not reset for a re-POST that could only hit ingest_ref_taken.
     assert _row(conn, "venue", col, uid)["townloops_slug"] is not None

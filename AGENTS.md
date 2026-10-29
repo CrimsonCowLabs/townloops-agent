@@ -303,7 +303,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   (`~/.hermes/skills/business/south-lake-tahoe-events/events.py`). The deterministic town-scoped
   `Idempotency-Key` (a PATCH's names its target slug — TownLoops replays on key + body, not path),
   `agent` metadata `hermes/{slug}-events`, env-driven path constants, `AGENT_TZ` reads, and merge-survivor
-  re-pointing via `engine/live_lookup.follow_merges` + `entity_sync.repoint` are deliberate edits that MUST be re-applied on any re-fork. Shared logic belongs in
+  re-pointing via `engine/live_lookup.follow_merges` + `entity_sync.repoint`, and the Ingest Ref (#63: creates send
+  `ingest_ref` + `venue_ingest_ref`, never `slug`; a bulk item's `ingest_ref_taken` binds to `details.slug`; PATCH
+  re-reads by ref when slugless or 404; resync by ref first, name + date fallback adopts the ref) are deliberate edits
+  that MUST be re-applied on any re-fork. Shared logic belongs in
   `engine/ingest_core.py`, not the fork.
 - **`verify_town()` is a hard cross-town guard.** Never write to a town other than `$TOWNLOOPS_TOWN_SLUG`.
   It fails closed if the bearer's scope or the `categories.json` snapshot drifts. Called at the top of
