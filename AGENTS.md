@@ -234,7 +234,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     supervised mode returns `await-operator`. `GatedClient` wraps creates: submission gate
     (pause / circuit / pending cap → `SubmissionsHeld`) and the fail-closed `pending` check;
     records `submissions`), `moderation.py` (the hourly poll: published / rejected / merged
-    (re-point) / gone, seed trust, rejection-rate breaker, remembered org rejections; the digest's
+    (re-point) / gone — a created event's 404 looked up by its ref first: a pending row = renamed, followed; a
+    published one = merged there (change/cancel refs are per change, not derivable: not looked up), seed trust, rejection-rate breaker, remembered org rejections; the digest's
     autonomous section, built and formatted there), `event_people.py` (host + performers/creators from one quote-checked
     Codex pass over the event's own text, cached on the event; derive-hosts/-people use it),
     `upcoming_audit.py` (read-only next-N-town-local-days audit for the `operator-audit-upcoming`
