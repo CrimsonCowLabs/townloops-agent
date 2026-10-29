@@ -117,6 +117,12 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     and event-ingest's PATCH. Entity reads by cached slug go through it and re-point via
     `entity_sync.repoint` (slug + `live_id` together): a 404 *with* a survivor re-points, only one without
     means gone/re-POST. Only entity 404s name a survivor (townloops ADR 0009) — an event's never does),
+    `ingest_ref.py` (the agent's identity key on TownLoops, ADR 0011: `ref_for`, `taken_slug`, `find_by_ref`,
+    `adopt`, `remember`; local `ingest_ref` NULL on a shipped row = pre-ref, not adopted yet),
+    `ref_adoption.py` (`adopt_shipped`, entity-live-sync's daily pass: pre-ref rows bound live by us — not
+    live mirrors, cross-town, `live_sync`-flagged or duplicate/superseded events — get their ref by the set-once
+    PATCH, merges followed + re-pointed first; `taken` = a live duplicate, one failed activity; `other-ref`
+    recorded once; both marked `extra_json.ref_adoption`, never retried; a survivor-less 404 is `unbound`, retried),
     `event_dedup.py` (cross-seed dedup: `canonical_event_uid` on every new event via `upsert_event`;
     one copy stays pending, the rest are declined `status='duplicate'`; primary beats syndicator seeds),
     `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`, and still-listed events the

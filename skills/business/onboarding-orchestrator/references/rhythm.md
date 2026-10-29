@@ -9,7 +9,7 @@ What runs when for a town (the schedule itself is `cron/jobs.json`; trust it ove
 | Every 20 min | Performer/creator research (`performer-research`, ≤3) | no |
 | Every 30 min | Mark operator-confirmed cancellations on TownLoops (autonomous: submit page-evidenced ones for merge) | no |
 | 06:00 & 18:00 daily | Event-find over approved seeds | yes |
-| 03:30 daily | Entity live sync (resync, fill live blanks, verify) | no |
+| 03:30 daily | Entity live sync (resync, fill live blanks, verify; adopt Ingest Refs on pre-ref rows) | no |
 | 04:15 daily | TownLoops API snapshot + breaking-change check | no |
 | 04:30 daily | Feed probe on never-probed seeds | no |
 | 04:45 daily | Seed review — autonomous: assign feed-matched adapters, trial proposed seeds, classify, retire/relocate; supervised: only propose adapters | yes |

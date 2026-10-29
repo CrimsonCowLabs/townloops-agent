@@ -111,7 +111,7 @@
     },
     {
       "id": "entity-live-sync",
-      "name": "Daily entity live sync (resync shipped venues/hosts/people from TownLoops, PATCH enrichment into live blanks, GET-verify; re-read event Series + fill Series-shared blanks)",
+      "name": "Daily entity live sync (resync shipped venues/hosts/people from TownLoops, PATCH enrichment into live blanks, GET-verify; set Ingest Refs on rows shipped before refs; re-read event Series + fill Series-shared blanks)",
       "schedule": "30 3 * * *",
       "skills": ["entity-live-sync"],
       "deliver": "local",

@@ -57,6 +57,25 @@ a `ship-performer`/`ship-creator` activity naming its live events. A failed
 one is stamped `sync_error_at` and retried after the rest; `--kind` narrows
 the pass like the sweep (no performer/creator kind → no release pass).
 
+## Ref adoption pass
+
+After the release pass (`engine/ref_adoption.adopt_shipped`, up to `--limit`
+rows; `--kind` narrows it to those entity kinds): events and entities shipped
+before Ingest Refs (townloops ADR 0011) get theirs — `hermes-<town>-<uid16>` —
+through the set-once PATCH, so recovery finds every row by ref. Ours = bound
+live by us (`townloops_slug` + `pushed_at`, local `ingest_ref` NULL); never a
+live mirror, a cross-town or `live_sync`-flagged row, or a `duplicate`/
+`superseded` event copy. A merged-away row is re-pointed at its survivor
+first. Outcomes (`ref-adoption` activities, one `sweep` summary):
+- **adopted / already** — the local `ingest_ref` is set.
+- **other-ref** — live carries another ref: never re-pointed, recorded once.
+- **taken** — another live row holds our ref, a duplicate on TownLoops: a
+  failed `ref-taken` activity for the operator, never retried.
+- **unbound** (404, no survivor) / transient errors — stamped, retried after
+  the rest; event-ingest's name + date `resync` is an unbound row's fallback.
+
+Each marks `extra_json.ref_adoption = {status, at, detail}`.
+
 ## Series pass
 
 After the entity sweep, under the same lock (`engine/series_sync.py`):

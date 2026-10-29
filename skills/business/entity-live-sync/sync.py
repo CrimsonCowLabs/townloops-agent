@@ -6,14 +6,17 @@ Then the release pass (engine/entity_ship.ship_released): performers/creators
 event-ship held back for research that research or the operator has since
 released are created live when one of their events is already live.
 
+Then the ref adoption pass (engine/ref_adoption.py): events and entities
+shipped before Ingest Refs existed get theirs through the set-once PATCH.
+
 Then the Series pass (engine/series_sync.py): re-read which TownLoops Series
 each shipped event is in, and fill blank Series-shared fields on the upcoming
 occurrences this agent shipped from their siblings.
 
 Subcommands:
   run [--limit N] [--kind K ...]   sync entities whose content changed since
-                                   live was last verified, then the Series
-                                   pass (cron, daily)
+                                   live was last verified, then the release,
+                                   ref adoption and Series passes (cron, daily)
   list                             pending + operator-flagged entities (read-only)
   clear --kind K --entity-uid UID  operator: unflag after looking at it
 """
@@ -25,7 +28,7 @@ import json
 import os
 import sys
 
-from engine import autonomy, entity_ship, entity_sync, series_sync
+from engine import autonomy, entity_ship, entity_sync, ref_adoption, series_sync
 from engine import lock as _lock
 from engine.derive_helpers import open_db
 
@@ -51,13 +54,18 @@ def _run(args) -> int:
                                                  limit=args.limit,
                                                  kinds=tuple(args.kind or entity_sync.RESOURCES))
             conn.commit()
+            # Rows shipped before Ingest Refs: set ours once (fill-blank
+            # PATCH — the plain client, in either mode).
+            # --kind narrows it to those entity kinds (events: no --kind).
+            refs = ref_adoption.adopt_shipped(client, conn, limit=args.limit,
+                                              kinds=tuple(args.kind or ref_adoption.RESOURCES))
             series_counts = series_sync.sweep(client, conn, limit=args.limit)
     except _lock.LockHeld:
         print("workqueue drain running — sync skipped this time")
         return 0
     conn.commit()
     print(json.dumps({**(counts or {"synced": 0}), "released": released,
-                      "series": series_counts}))
+                      "refs": refs, "series": series_counts}))
     return 0
 
 
