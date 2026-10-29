@@ -42,8 +42,9 @@ Every lookup goes **by Ingest Ref first** (`?ingest_ref=`) — that survives a
 wiped local cache and a TownLoops-side rename (a row found under a new slug is
 re-pointed, never flagged or re-created). The matches below are the fallback
 for rows shipped before refs; a row they find without our ref is given it
-(`ingest_ref.adopt`, the set-once PATCH; a failure is a failed `adopt-ref`
-activity, retried next ship).
+(`ingest_ref.adopt_and_remember`, the set-once PATCH; a failure is a failed
+`adopt-ref` activity — a transient one retried next ship, a final `other-ref`
+/ `taken` stamped on the row and never retried).
 
 - **Entities**: by ref, else GET by slug (the row's `townloops_slug`, else the
   slug pre-ref creates proposed — the ref's own string). Found → adopted: `townloops_slug` and
@@ -235,8 +236,13 @@ The client is an `engine/autonomy.GatedClient`:
   lands somewhere. One to a value the live row already has (date, venue, any
   other field) is submitted as a pending event carrying the same
   `source_url`, for the TownLoops merge flow — never PATCHed. It carries its
-  own ref (`ingest_ref.change_ref_for`), never the event's; a 409 binds the
-  submission the error names. One that only
+  own ref, one per change (`ingest_ref.change_ref_for` — a hash of the
+  submitted values), never the event's: a retried identical change 409s and
+  binds the submission the error names, a later, different change is a new
+  one. When the live row is the event's own (its `townloops_slug`), it is
+  given the event's ref first, so the merge can't move the change's ref onto
+  it. A live row renamed on TownLoops is found by ref and the local slug
+  re-pointed (also for the supervised PATCH). One that only
   fills a blank live field (e.g. a venue on a venue-less event), plus the
   accessibility-notes / ticket-line / `free` fills, is PATCHed live and
   GET-verified. A venue with no live id goes in the submission by name. Each

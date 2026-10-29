@@ -16,9 +16,13 @@ Fork changes:
     defaults under HERMES_HOME/state/.
   * Timezone reads from AGENT_TZ.
   * Ingest Ref (#63): creates send `ingest_ref` (+ an event's
-    `venue_ingest_ref`), never `slug`; a bulk item's `409 ingest_ref_taken`
-    binds to its `details.slug`; PATCH re-reads by ref when it has no slug or
-    404s; resync matches by ref first and adopts it on a name + date match.
+    `venue_ingest_ref`, `ingest_ref.own_ref` — none for a live mirror), never
+    `slug`; a bulk item's `409 ingest_ref_taken` binds to its `details.slug`;
+    PATCH re-reads by ref (`ingest_ref.find_by_ref` over
+    `engine.ingest_core.RefClient`) when it has no slug or 404s — an
+    unanswered lookup fails the row, never a miss; resync matches by ref
+    first and, on a name + date match, adopts it via
+    `ingest_ref.adopt_and_remember` — never onto a live mirror's row.
 """
 from __future__ import annotations
 
@@ -86,7 +90,7 @@ from engine.live_lookup import error_details, follow_merges, merged_into  # noqa
 # The Ingest Ref (#63, townloops ADR 0011): every create carries the row's ref
 # and no slug; a 409 ingest_ref_taken binds to the row it names.
 from engine import ingest_ref  # noqa: E402
-from engine.townloops_api import TownloopsError  # noqa: E402
+from engine.ingest_core import RefClient  # noqa: E402
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
@@ -675,15 +679,17 @@ def _row_to_event_payload(row: sqlite3.Row) -> dict:
 
 def _venue_ref(conn: sqlite3.Connection | None, row: sqlite3.Row) -> str | None:
     """The ref of the event's venue when its local row is known (the venue
-    uid this fork mines from the same name). TownLoops resolves `venue_id` →
-    `venue_ingest_ref` → `venue_name`, and a ref that resolves to nothing
-    falls through to the name — so `venue_name` is always sent too."""
+    uid this fork mines from the same name): event-ship's rule,
+    `ingest_ref.own_ref` — the ref its live row is known to carry, else ours;
+    none for a live mirror (someone else's row). TownLoops resolves
+    `venue_id` → `venue_ingest_ref` → `venue_name`, and a ref that resolves to
+    nothing falls through to the name — so `venue_name` is always sent too."""
     venue = row["venue_name"] or _venue_from_location(row["location"] or "")
     if conn is None or not venue:
         return None
-    uid = _entity_uid("venue", venue)
-    known = conn.execute("SELECT 1 FROM venues WHERE entity_uid = ?", (uid,)).fetchone()
-    return ingest_ref.ref_for(uid) if known else None
+    v = conn.execute("SELECT entity_uid, ingest_ref, source_kind FROM venues WHERE entity_uid = ?",
+                     (_entity_uid("venue", venue),)).fetchone()
+    return ingest_ref.own_ref("venue", v) if v else None
 
 
 def _row_to_townloops_entry(row: sqlite3.Row, conn: sqlite3.Connection | None = None) -> dict:
@@ -749,23 +755,18 @@ def _patch_target_slug(row: sqlite3.Row, kind: str) -> str:
     return _captured_slug(row) or _slug_for_kind(row, kind)
 
 
-def _find_live_by_ref(base: str, town: str, kind: str, ref: str, api_key: str) -> dict | None:
-    """The live row carrying `ref` (one `?ingest_ref=` list read), else None —
-    also on any error: callers fall back to what they did before refs."""
+def _ref_client(base: str, town: str, api_key: str) -> RefClient:
+    """engine/ingest_ref's calls (the ref lookup, the set-once PATCH) over
+    this fork's raw requests — `engine.ingest_core.RefClient`."""
+    return RefClient(base, town, api_key, f"hermes-{TOWNLOOPS_TOWN_SLUG}")
+
+
+def _find_live_by_ref(client: RefClient, kind: str, ref: str | None) -> dict | None:
+    """The live row carrying `ref` (`ingest_ref.find_by_ref`), else None. An
+    unanswered lookup raises — never a miss."""
     seg = "events" if kind == "event" else ENTITY_REG[kind]["endpoint"]
-    try:
-        r = requests.get(
-            f"{base}/towns/{town}/{seg}",
-            params={"ingest_ref": ref, "limit": 2},
-            headers={"Authorization": f"Bearer {api_key}"},
-            timeout=15,
-        )
-        if r.status_code != 200:
-            return None
-        rows = r.json().get("data") or []
-    except (requests.RequestException, ValueError):
-        return None
-    return rows[0] if rows and rows[0].get("slug") else None
+    found = ingest_ref.find_by_ref(client, seg, ref)
+    return found if found and found.get("slug") else None
 
 
 def _capture_townloops_slug(
@@ -924,6 +925,11 @@ def _bulk_post(
     return shipped, failed, failures
 
 
+class _LookupFailed(Exception):
+    """An ingest_ref lookup went unanswered: the PATCH is not sent (and the
+    row not unbound) on a guess — it fails and ships next run."""
+
+
 def _patch_one(
     conn: sqlite3.Connection, kind: str, row: sqlite3.Row,
     base: str, town_slug: str, api_key: str, dry_run: bool,
@@ -942,10 +948,15 @@ def _patch_one(
         print(json.dumps(payload, indent=2))
         return 1, 0, []
     ref = _ref_for_row(row, kind)
+    refs = _ref_client(base, town_slug, api_key)
 
     def bind_by_ref(current: str | None) -> str | None:
-        """Re-read the row by ref; bind and return its slug when it differs."""
-        found = _find_live_by_ref(base, town_slug, kind, ref, api_key)
+        """Re-read the row by ref; bind and return its slug when it differs.
+        An unanswered lookup raises (`_LookupFailed`): never a miss."""
+        try:
+            found = _find_live_by_ref(refs, kind, ref)
+        except Exception as exc:  # noqa: BLE001 — the row stays to ship next run
+            raise _LookupFailed(exc) from exc
         if not found or found["slug"] == current:
             return None
         _capture_townloops_slug(conn, kind, uid_col, row[uid_col], found["slug"])
@@ -953,8 +964,17 @@ def _patch_one(
             ingest_ref.remember(conn, kind, row[uid_col], ref)
         return found["slug"]
 
+    def lookup_failed(exc: Exception):
+        print(f"[fail] PATCH {kind} {row[name_col][:50]} — ingest_ref lookup failed: "
+              f"{str(exc)[:200]}", file=sys.stderr)
+        return 0, 1, [{"kind": kind, "uid": row[uid_col], "name": row[name_col],
+                       "error": f"ingest_ref lookup failed: {str(exc)[:200]}"}]
+
     if not _captured_slug(row):
-        item_slug = bind_by_ref(None) or item_slug
+        try:
+            item_slug = bind_by_ref(None) or item_slug
+        except _LookupFailed as exc:
+            return lookup_failed(exc.__cause__)
     # Deterministic on target slug + content_hash: retries dedupe server-side.
     # Ship logic upstream only PATCHes when content_hash changed, so a
     # different key naturally means a distinct edit. The slug is in the key
@@ -997,6 +1017,8 @@ def _patch_one(
                       file=sys.stderr)
                 item_slug = first_slug = moved
                 resp, _ = attempt(moved)
+    except _LookupFailed as exc:
+        return lookup_failed(exc.__cause__)
     except requests.RequestException as exc:
         return 0, 1, [{"kind": kind, "uid": row[uid_col], "error": str(exc)}]
     if unfollowed:
@@ -1617,36 +1639,6 @@ def _delete_townloops_row(base: str, town: str, kind: str, slug: str, api_key: s
         return 0
 
 
-class _AdoptClient:
-    """The one call `engine.ingest_ref.adopt` makes (`update`), over this
-    fork's raw requests: a set-once `ingest_ref` PATCH. Errors raise as
-    `TownloopsError` so `adopt` reads a 409/422 the way it does the client's."""
-
-    def __init__(self, base: str, town: str, api_key: str):
-        self.base, self.town, self.api_key = base, town, api_key
-
-    def update(self, resource: str, slug: str, body: dict) -> dict:
-        r = requests.patch(
-            f"{self.base}/towns/{self.town}/{resource}/{slug}",
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-                "Idempotency-Key":
-                    f"hermes-{TOWNLOOPS_TOWN_SLUG}:{resource}:adopt-ref:{slug}:{body.get('ingest_ref')}",
-            },
-            json=body,
-            timeout=30,
-        )
-        if r.status_code in (200, 201):
-            return (r.json().get("data") or {}) if r.content else {}
-        try:
-            err = (r.json() or {}).get("error") or {}
-        except ValueError:
-            err = {}
-        raise TownloopsError(r.status_code, err.get("code", ""), err.get("message", r.text[:200]),
-                             err.get("details"))
-
-
 def _resync_kind(
     conn: sqlite3.Connection, kind: str, base: str, town: str, api_key: str,
     dry_run: bool, delete_orphans: bool = False,
@@ -1654,16 +1646,19 @@ def _resync_kind(
     """Pull Townloops state for one kind, match to local rows, write
     townloops_slug + reconcile pushed_at/pushed_hash. Returns counts.
 
-    Matching (#63): a live row carrying the local row's `ingest_ref` is the
-    row, whatever its name or slug became. Name + (town-local day for
-    events) is only the fallback, and only over live rows carrying no ref —
-    rows shipped before refs; the row it binds is given our ref through the
-    set-once PATCH (`ingest_ref.adopt`) so the next resync matches by ref."""
+    Matching (#63): a live row carrying the local row's ref
+    (`ingest_ref.own_ref`) is the row, whatever its name or slug became.
+    Name + (town-local day for events) is only the fallback, and only over
+    live rows carrying no ref — rows shipped before refs; the row it binds is
+    given our ref (`ingest_ref.adopt_and_remember`, set-once PATCH) so the
+    next resync matches by ref. Never onto a live mirror's row
+    (`source_kind='live'`, someone else's — bound by slug only), and never
+    again after a final outcome (other-ref / taken) stamped on the row."""
     endpoint = "events" if kind == "event" else ENTITY_REG[kind]["endpoint"]
     table = _ship_table_for_kind(kind)
     uid_col = "event_uid" if kind == "event" else "entity_uid"
     remote = _townloops_paginate(base, town, endpoint, api_key)
-    adopter = _AdoptClient(base, town, api_key)
+    adopter = _ref_client(base, town, api_key)
 
     def local_key(row) -> tuple:
         if kind == "event":
@@ -1691,8 +1686,8 @@ def _resync_kind(
     adopt_failures: list[dict] = []
     matched_remote_ids: set = set()
     for row in local_rows:
-        ref = _ref_for_row(row, kind)
-        chosen = by_ref.get(ref)
+        ref = ingest_ref.own_ref(kind, row)    # None for a live mirror
+        chosen = by_ref.get(ref) if ref else None
         if chosen is not None:
             matched_by_ref += 1
         else:
@@ -1706,8 +1701,9 @@ def _resync_kind(
             matched_by_name += 1
         matched += 1
         matched_remote_ids.add(chosen.get("id"))
+        adoptable = ingest_ref.wants_adoption(kind, row)
         if dry_run:
-            if chosen.get("ingest_ref") != ref:
+            if adoptable and chosen.get("ingest_ref") != ref:
                 print(f"  [would-adopt-ref] {kind} {chosen['slug']} <- {ref}")
             if _captured_slug(row) != chosen["slug"]:
                 print(f"  [would-bind] {kind} '{row['name'][:50]}' -> {chosen['slug']}")
@@ -1715,23 +1711,21 @@ def _resync_kind(
             else:
                 already_slugged += 1
             continue
-        carries = chosen.get("ingest_ref") == ref
-        if not carries:
-            # Shipped before refs: give it ours, set once. A failure leaves
-            # the slug binding in place; the next resync retries.
-            adoption = ingest_ref.adopt(adopter, endpoint, chosen, ref)
-            carries = adoption.status in ("adopted", "already")
+        if adoptable or (ref and chosen.get("ingest_ref") == ref and row["ingest_ref"] != ref):
+            # Shipped before refs: give it ours, set once (or just remember
+            # the ref it carries). A failure leaves the slug binding in
+            # place; a transient one is retried next resync, a final one not.
+            with conn:
+                adoption = ingest_ref.adopt_and_remember(
+                    adopter, conn, kind, row[uid_col], chosen, worker="event-ingest", ref=ref)
             if adoption.status == "adopted":
                 refs_adopted += 1
                 chosen["ingest_ref"] = ref  # a same-key local row can't adopt it too
-            elif not carries:
+            elif adoption.status != "already":
                 adopt_failures.append({"slug": chosen["slug"], "ref": ref,
                                        "status": adoption.status, "detail": adoption.detail})
                 print(f"[warn] adopt {kind} {chosen['slug']} <- {ref}: {adoption.status} "
                       f"{adoption.detail}", file=sys.stderr)
-        if carries and row["ingest_ref"] != ref:
-            with conn:
-                ingest_ref.remember(conn, kind, row[uid_col], ref)
         if _captured_slug(row) == chosen["slug"]:
             already_slugged += 1
             continue

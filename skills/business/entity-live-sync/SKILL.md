@@ -66,11 +66,15 @@ through the set-once PATCH, so recovery finds every row by ref. Ours = bound
 live by us (`townloops_slug` + `pushed_at`, local `ingest_ref` NULL); never a
 live mirror, a cross-town or `live_sync`-flagged row, or a `duplicate`/
 `superseded` event copy. A merged-away row is re-pointed at its survivor
-first. Outcomes (`ref-adoption` activities, one `sweep` summary):
+first. Outcomes (`ref-adoption` worker: one `adopt-ref` activity per row,
+the outcome in its detail — `ingest_ref.adopt_and_remember`, the sequence
+the ship paths use too — and one `sweep` summary):
 - **adopted / already** — the local `ingest_ref` is set.
 - **other-ref** — live carries another ref: never re-pointed, recorded once.
 - **taken** — another live row holds our ref, a duplicate on TownLoops: a
-  failed `ref-taken` activity for the operator, never retried.
+  failed `adopt-ref` activity for the operator.
+- other-ref and taken are final (`extra_json.ref_adoption`): never retried,
+  here or by event-ship.
 - **unbound** (404, no survivor) / transient errors — stamped, retried after
   the rest; event-ingest's name + date `resync` is an unbound row's fallback.
 

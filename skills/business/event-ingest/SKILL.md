@@ -46,7 +46,7 @@ $PYTHON $HERMES_HOME/skills/business/event-ingest/ingest.py <subcommand> [flags]
 | `ship` | POST new + PATCH changed events + mined entities. Batches (100/req). |
 | `ship --dry-run` | print payloads, don't POST. Use for smoke tests. |
 | `ship --only-kind venue,performer` | limit ship to those kinds. |
-| `resync` | reconcile local `townloops_slug` with the remote: by `ingest_ref` first, name + date only for live rows without one (then adopts our ref on it, set-once PATCH). Cures slug drift. |
+| `resync` | reconcile local `townloops_slug` with the remote: by `ingest_ref` first, name + date only for live rows without one (then adopts our ref on it, set-once PATCH — never for a live mirror, never again after a final other-ref / taken). Cures slug drift. |
 | `resync --delete-orphans` | Destructive remote deletion mode. Out of scope for this agent; do not run. |
 | `kinds` | print row counts + unpushed counts per kind. Sanity check. |
 | `list --limit 50` | dump upcoming events from local SQLite. |
@@ -70,7 +70,7 @@ Do not use that chain as the default town event job. The active event-first sche
 
 Every row carries `content_hash` (input to dedupe) and `townloops_slug` (captured from the POST response). PATCH paths use the captured slug so remote renames don't strand rows. When slug drift is suspected (rare), run `resync` to reconcile.
 
-Every create (bulk, events and the five entity kinds) carries the row's **`ingest_ref`** (`hermes-<town>-<uid16>`, `engine/ingest_ref.ref_for`) and **never a `slug`** — TownLoops derives the slug (#63, townloops ADR 0011). An event also carries `venue_ingest_ref` when its venue's local row exists (`venue_name` is always sent too). A per-item `409 ingest_ref_taken` is "already shipped": the row binds to `error.details.slug` with no second request, and the rest of the batch proceeds. Local `ingest_ref` (migration 029) records a live row known to carry the ref. A PATCH with no captured slug, or one that 404s, first re-reads the row by ref (`?ingest_ref=`) — a TownLoops rename never strands it or causes a re-POST duplicate.
+Every create (bulk, events and the five entity kinds) carries the row's **`ingest_ref`** (`hermes-<town>-<uid16>`, `engine/ingest_ref.ref_for`) and **never a `slug`** — TownLoops derives the slug (#63, townloops ADR 0011). An event also carries `venue_ingest_ref` when its venue's local row exists and isn't a live mirror (`venue_name` is always sent too). A per-item `409 ingest_ref_taken` is "already shipped": the row binds to `error.details.slug` with no second request, and the rest of the batch proceeds. Local `ingest_ref` (migration 029) records a live row known to carry the ref. A PATCH with no captured slug, or one that 404s, first re-reads the row by ref (`?ingest_ref=`) — a TownLoops rename never strands it or causes a re-POST duplicate; an unanswered lookup fails the row (retried next ship), never read as a miss.
 
 ## When it goes wrong
 

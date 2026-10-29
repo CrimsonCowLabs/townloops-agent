@@ -503,6 +503,48 @@ def _http_get(url: str, timeout: int = 20) -> requests.Response:
     return r
 
 
+class RefClient:
+    """The two TownLoops calls engine/ingest_ref makes — `list` (the
+    `?ingest_ref=` lookup, `find_by_ref`) and `update` (the set-once ref
+    PATCH, `adopt`) — over raw requests, for callers without
+    engine/townloops_api.Client (the event-ingest fork). A non-2xx answer
+    raises `TownloopsError` (status, code, details), so `adopt` reads a
+    409/422 and `find_by_ref` a failure exactly as it does the client's: an
+    unanswered lookup raises, it is never a miss."""
+
+    def __init__(self, base: str, town: str, api_key: str, idem_prefix: str):
+        self.base, self.town, self.api_key, self.idem_prefix = base, town, api_key, idem_prefix
+
+    def _url(self, resource: str, slug: str = "") -> str:
+        return f"{self.base}/towns/{self.town}/{resource}" + (f"/{slug}" if slug else "")
+
+    @staticmethod
+    def _answer(r: requests.Response):
+        if r.status_code in (200, 201):
+            return (r.json().get("data") if r.content else None)
+        from engine.townloops_api import TownloopsError
+        try:
+            err = (r.json() or {}).get("error") or {}
+        except ValueError:
+            err = {}
+        raise TownloopsError(r.status_code, err.get("code", ""),
+                             err.get("message", r.text[:200]), err.get("details"))
+
+    def list(self, resource: str, **params) -> list[dict]:
+        r = requests.get(self._url(resource), params=params, timeout=15,
+                         headers={"Authorization": f"Bearer {self.api_key}"})
+        return self._answer(r) or []
+
+    def update(self, resource: str, slug: str, body: dict) -> dict:
+        r = requests.patch(
+            self._url(resource, slug), json=body, timeout=30,
+            headers={"Authorization": f"Bearer {self.api_key}",
+                     "Content-Type": "application/json",
+                     "Idempotency-Key":
+                         f"{self.idem_prefix}:{resource}:adopt-ref:{slug}:{body.get('ingest_ref')}"})
+        return self._answer(r) or {}
+
+
 def _firecrawl_endpoint() -> str:
     """The local Firecrawl scrape endpoint (engine.firecrawl_env) — never cloud."""
     return f"{firecrawl_env.base_url()}/v1/scrape"

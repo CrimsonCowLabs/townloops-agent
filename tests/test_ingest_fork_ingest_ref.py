@@ -74,6 +74,7 @@ class FakeTownLoops:
         self.posted: list[dict] = []
         self.patches: list[tuple[str, str, dict]] = []
         self.gets: list[str] = []
+        self.retired: dict[tuple[str, str], str] = {}   # (kind, ref) → a deleted row's slug
         self.next_id = 1
 
     def live(self, kind, slug, **fields):
@@ -132,9 +133,11 @@ class FakeTownLoops:
             if row.get("ingest_ref") and row["ingest_ref"] != ref:
                 return _Resp(422, {"error": {"code": "validation_error", "message": "set once"}})
             other = self._by_ref(kind, ref)
-            if other and other is not row:
+            other_slug = (other["slug"] if other and other is not row
+                          else self.retired.get((kind, ref)))
+            if other_slug:
                 return _Resp(409, {"error": {"code": "ingest_ref_taken", "message": "taken",
-                                             "details": {"ingest_ref": ref, "slug": other["slug"]}}})
+                                             "details": {"ingest_ref": ref, "slug": other_slug}}})
             row["ingest_ref"] = ref
         return _Resp(200, {"data": {"slug": slug, "id": row["id"]}})
 
@@ -157,10 +160,10 @@ def _event(conn, title="Jazz Night", date="2026-10-09T20:00:00", venue=None):
     return uid
 
 
-def _entity(conn, kind, name="Riva Grill", uid=None):
+def _entity(conn, kind, name="Riva Grill", uid=None, source_kind="derived", **fields):
     uid = uid or f"{kind}-uid-0000000000000000"
-    insert_entity(conn, TABLES[kind], uid, {"source": "derived", "source_kind": "derived",
-                                            "name": name})
+    insert_entity(conn, TABLES[kind], uid, {"source": "derived", "source_kind": source_kind,
+                                            "name": name, **fields})
     return uid
 
 
@@ -441,3 +444,94 @@ def test_taken_slug_in_reads_a_bulk_item_error():
     assert ingest_ref.taken_slug_in({"code": "slug_taken", "details": {"slug": "a"}}) is None
     assert ingest_ref.taken_slug_in({"code": "ingest_ref_taken", "details": None}) is None
     assert ingest_ref.taken_slug_in(None) is None
+
+
+# --- rows that aren't ours, and final adoption outcomes (#63 review) ------------
+
+def test_a_live_mirror_venue_sends_no_venue_ref(ingest, conn, server):
+    venue_uid = ingest._entity_uid("venue", "Riva Grill")
+    _entity(conn, "venue", name="Riva Grill", uid=venue_uid, source_kind="live",
+            townloops_slug="riva-grill")
+    _event(conn, venue="Riva Grill")
+    _bulk(ingest, conn, "event")
+    (entry,) = server.posted
+    assert "venue_ingest_ref" not in entry["payload"]
+    assert entry["payload"]["venue_name"] == "Riva Grill"
+
+
+def test_a_venue_ref_is_the_one_its_live_row_carries(ingest, conn, server):
+    venue_uid = ingest._entity_uid("venue", "Riva Grill")
+    _entity(conn, "venue", name="Riva Grill", uid=venue_uid, ingest_ref="hermes-cmo-riva")
+    _event(conn, venue="Riva Grill")
+    _bulk(ingest, conn, "event")
+    (entry,) = server.posted
+    assert entry["payload"]["venue_ingest_ref"] == "hermes-cmo-riva"
+
+
+def test_resync_binds_a_live_mirror_by_name_but_never_adopts_our_ref_onto_it(ingest, conn, server):
+    _entity(conn, "venue", source_kind="live")
+    server.live("venue", "riva-grill", name="Riva Grill")
+
+    out = _resync(ingest, conn, "venue")
+
+    (row,) = _rows(conn, "venue")
+    assert row["townloops_slug"] == "riva-grill" and row["ingest_ref"] is None
+    assert server.patches == [] and out["refs_adopted"] == 0
+    assert server.rows["venue"]["riva-grill"].get("ingest_ref") is None
+
+
+def test_resync_adoption_is_the_shared_sequence_and_a_final_outcome_sticks(ingest, conn, server):
+    uid = _entity(conn, "venue")
+    server.live("venue", "riva-grill", name="Riva Grill")
+    server.retired[("venue", ingest_ref.ref_for(uid))] = "riva-old"   # deleted, holds our ref
+
+    out = _resync(ingest, conn, "venue")
+
+    (row,) = _rows(conn, "venue")
+    assert row["townloops_slug"] == "riva-grill" and row["ingest_ref"] is None
+    assert out["ref_adopt_failed"] == 1
+    assert ingest_ref.final(row) == "taken"
+    acts = [tuple(r) for r in conn.execute(
+        "SELECT worker, action, ok FROM agent_activity WHERE action = 'adopt-ref'")]
+    assert acts == [("event-ingest", "adopt-ref", 0)]
+
+    n = len(server.patches)
+    _resync(ingest, conn, "venue")
+    assert len(server.patches) == n                    # final: not tried again
+
+
+def test_a_lookup_error_is_not_a_miss(ingest, conn, server, monkeypatch):
+    """No captured slug and the ref lookup goes unanswered: the PATCH is not
+    sent to a guessed slug, and the row stays to ship next run."""
+    uid = _entity(conn, "venue")
+    server.live("venue", "riva-grill", name="Riva Grill", ingest_ref=ingest_ref.ref_for(uid))
+    conn.execute("UPDATE venues SET pushed_at = 'x', pushed_hash = 'stale' WHERE entity_uid = ?",
+                 (uid,))
+    monkeypatch.setattr(ingest.requests, "get",
+                        lambda url, **kw: _Resp(503, {"error": {"code": "unavailable",
+                                                                "message": "busy"}}))
+    (row,) = _rows(conn, "venue")
+
+    shipped, failed, failures = ingest._patch_one(conn, "venue", row, "https://tl.example",
+                                                  "test-town", "k", False)
+
+    assert (shipped, failed) == (0, 1) and server.patches == []
+    assert "ingest_ref" in str(failures[0]["error"])
+    (row,) = _rows(conn, "venue")
+    assert row["pushed_hash"] == "stale"
+
+
+def test_a_lookup_error_after_a_404_does_not_unbind_the_row(ingest, conn, server, monkeypatch):
+    uid = _entity(conn, "venue")
+    server.live("venue", "riva-renamed", name="Riva Grill", ingest_ref=ingest_ref.ref_for(uid))
+    conn.execute("UPDATE venues SET townloops_slug = 'riva-grill', pushed_at = 'x', "
+                 "pushed_hash = 'stale' WHERE entity_uid = ?", (uid,))
+    monkeypatch.setattr(ingest.requests, "get",
+                        lambda url, **kw: _Resp(503, {"error": {"code": "unavailable",
+                                                                "message": "busy"}}))
+    (row,) = _rows(conn, "venue")
+
+    assert ingest._patch_one(conn, "venue", row, "https://tl.example", "test-town", "k",
+                             False)[:2] == (0, 1)
+    (row,) = _rows(conn, "venue")
+    assert row["townloops_slug"] == "riva-grill" and row["pushed_at"] == "x"

@@ -214,19 +214,16 @@ def _seed_url(conn, event: dict) -> Optional[str]:
 
 
 def _venue_ref(conn, event: dict) -> Optional[str]:
-    """The derived venue's Ingest Ref (sent as `venue_ingest_ref`): the one
-    its live row is known to carry, else its own unless it is a live mirror
-    (a row we didn't ship carries no ref of ours). None without one."""
+    """The derived venue's Ingest Ref (sent as `venue_ingest_ref`),
+    `ingest_ref.own_ref`: the one its live row is known to carry, else its
+    own unless it is a live mirror (a row we didn't ship carries no ref of
+    ours). None without one."""
     vuid = event.get("derived_venue_uid")
     if not vuid:
         return None
-    v = conn.execute("SELECT source_kind, ingest_ref FROM venues WHERE entity_uid = ?",
-                     (vuid,)).fetchone()
-    if not v:
-        return None
-    if v["ingest_ref"]:
-        return v["ingest_ref"]
-    return None if v["source_kind"] == "live" else ref_for(vuid)
+    v = conn.execute("SELECT entity_uid, source_kind, ingest_ref FROM venues "
+                     "WHERE entity_uid = ?", (vuid,)).fetchone()
+    return ingest_ref.own_ref("venue", v) if v else None
 
 
 def _bind_venue(client, conn, event: dict, payload: dict, venue_slug: Optional[str]) -> None:

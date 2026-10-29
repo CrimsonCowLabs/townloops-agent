@@ -63,7 +63,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     held claims are released unattempted). Clamped so a drain ends before the 15-min stale-claim reaper.
   - `ingest_core.py` (1055 lines) — extracted shared core for event-ingest: entity dataclasses,
     `ENTITY_REG`, hashing, HTTP/Firecrawl fetch, JSON-LD walker, CSS-selector parsers, `PARSERS`
-    registry, enrichment overlay. `skills/business/event-ingest/ingest.py` is a **fork of SLT's
+    registry, enrichment overlay, `RefClient` (engine/ingest_ref's `list`/`update` over raw requests, for the
+    fork). `skills/business/event-ingest/ingest.py` is a **fork of SLT's
     `south-lake-tahoe-events/events.py`** that imports from this core — see Gotchas.
   - `townloops_api.py` — TownLoops client: envelope unwrap, retry on 429/503/network, deterministic
     town-scoped `Idempotency-Key`, and `verify_town()` (fail-closed cross-town guard).
@@ -114,7 +115,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     (full-body PATCH + GET verify for events and entities; never sends `ingest_ref`),
     `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote. Creates
     send `ingest_ref` (`engine/ingest_ref.ref_for`), never a slug; `409 ingest_ref_taken` binds `details.slug`
-    with no second lookup; a pre-ref row found by slug is `adopt`ed (set-once PATCH); bound refs `remember`ed),
+    with no second lookup; a pre-ref row found by slug is adopted (`adopt_and_remember`); bound refs `remember`ed),
     `live_lookup.py` (find a live record before creating one — by Ingest Ref first (`?ingest_ref=`), the old
     slug / series-day / source_url matches only as the fallback for pre-ref rows; the one parser of a merged entity's 404
     survivor, `merged_into`/`merged_into_slug`, and `follow_merges` — ≤`MAX_MERGE_HOPS`, under `get_live`
@@ -122,11 +123,18 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `entity_sync.repoint` (slug + `live_id` together): a 404 *with* a survivor re-points, only one without
     means gone/re-POST. Only entity 404s name a survivor (townloops ADR 0009) — an event's never does),
     `ingest_ref.py` (the agent's identity key on TownLoops, ADR 0011: `ref_for`, `taken_slug`, `find_by_ref`,
-    `adopt`, `remember`; local `ingest_ref` NULL on a shipped row = pre-ref, not adopted yet),
+    `own_ref` (stored, else ours; none for a live mirror), `RESOURCES` (the one kind → resource/table map);
+    `adopt_and_remember` is the one adoption sequence — every caller uses it: remember on adopted/already, one
+    `adopt-ref` activity, `other-ref`/`taken` stamped `extra_json.ref_adoption` (`FINAL`, never retried by sweep or
+    ship); `change_ref_for(uid, fields)` is per change (hash of the submitted values), `cancel_ref_for` per event;
+    `adopt_before_submission` puts our own ref on our live row before a change/cancel submission (a merge moves
+    the submission's ref onto a ref-less survivor); `read_live_event` = `live_lookup.get_live_event` (a 404 with
+    no survivor → by ref) + re-points local rows — event_cancel, event-ship's change/PATCH and the moderation
+    poll read live events through it; local `ingest_ref` NULL on a shipped row = pre-ref, not adopted yet),
     `ref_adoption.py` (`adopt_shipped`, entity-live-sync's daily pass: pre-ref rows bound live by us — not
     live mirrors, cross-town, `live_sync`-flagged or duplicate/superseded events — get their ref by the set-once
-    PATCH, merges followed + re-pointed first; `taken` = a live duplicate, one failed activity; `other-ref`
-    recorded once; both marked `extra_json.ref_adoption`, never retried; a survivor-less 404 is `unbound`, retried),
+    PATCH (`ingest_ref.adopt_and_remember`), merges followed + re-pointed first; `taken` = a live duplicate, a
+    failed `adopt-ref`; `other-ref` recorded once; both `FINAL`, never retried; a survivor-less 404 is `unbound`, retried),
     `event_dedup.py` (cross-seed dedup: `canonical_event_uid` on every new event via `upsert_event`;
     one copy stays pending, the rest are declined `status='duplicate'`; primary beats syndicator seeds),
     `event_cancel.py` (vanish detection in event-find → `possibly-cancelled`, and still-listed events the
@@ -314,8 +322,10 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   `Idempotency-Key` (a PATCH's names its target slug — TownLoops replays on key + body, not path),
   `agent` metadata `hermes/{slug}-events`, env-driven path constants, `AGENT_TZ` reads, and merge-survivor
   re-pointing via `engine/live_lookup.follow_merges` + `entity_sync.repoint`, and the Ingest Ref (#63: creates send
-  `ingest_ref` + `venue_ingest_ref`, never `slug`; a bulk item's `ingest_ref_taken` binds to `details.slug`; PATCH
-  re-reads by ref when slugless or 404; resync by ref first, name + date fallback adopts the ref) are deliberate edits
+  `ingest_ref` + `venue_ingest_ref` (`own_ref` — none for a live mirror), never `slug`; a bulk item's
+  `ingest_ref_taken` binds to `details.slug`; PATCH re-reads by ref (`find_by_ref` over `ingest_core.RefClient`) when
+  slugless or 404 — an unanswered lookup fails the row, never a miss; resync by ref first, name + date fallback adopts
+  via `adopt_and_remember`, never onto a live mirror) are deliberate edits
   that MUST be re-applied on any re-fork. Shared logic belongs in
   `engine/ingest_core.py`, not the fork.
 - **`verify_town()` is a hard cross-town guard.** Never write to a town other than `$TOWNLOOPS_TOWN_SLUG`.

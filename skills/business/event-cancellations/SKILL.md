@@ -57,8 +57,11 @@ $PYTHON $HERMES_HOME/skills/business/event-cancellations/cancellations.py apply 
   Confirm widget. `--uid` takes uids or prefixes; default is all flagged.
 - `apply` — for every event the operator **confirmed**: GET the live event,
   prefix its title with `Cancelled: ` and add the `cancelled` tag as a
-  full-body PATCH (engine/live_patch), then GET-verify. An event already gone
-  from TownLoops counts as cancelled. A PATCH that doesn't land parks the
+  full-body PATCH (engine/live_patch), then GET-verify. One renamed on
+  TownLoops is found by its Ingest Ref and its local slug re-pointed; an
+  event gone from TownLoops (404, nothing carries its ref) counts as
+  cancelled. Autonomous submissions do the same lookup, and give our own
+  pre-ref live row its ref before submitting. A PATCH that doesn't land parks the
   event as `apply-failed` (shown by `list`) — it's not retried until the
   operator confirms again. With nothing confirmed it exits without touching
   TownLoops (cron every 30 min).
