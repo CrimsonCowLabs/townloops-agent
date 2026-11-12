@@ -59,3 +59,22 @@ RUN uv pip install --system --no-cache --break-system-packages \
 # pins several packages we mustn't disturb.
 RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache \
     python-telegram-bot
+
+# Hermes runs no_agent cron scripts with that same venv interpreter
+# (PYTHONPATH=/app, no system site-packages). A wrapper that imports
+# engine/ in-process (onboarding_summary.py → engine.orchestrator →
+# ingest_core → feedparser) dies on ModuleNotFoundError there, so the
+# engine's runtime deps go into the venv too. Install-if-missing only (no
+# --upgrade), so packages Hermes already pins stay as they are.
+# tests/test_cron_migrate.py imports every cron script under this interpreter.
+RUN uv pip install --python /opt/hermes/.venv/bin/python --no-cache \
+    feedparser \
+    requests \
+    pyyaml \
+    beautifulsoup4 \
+    python-dateutil \
+    icalendar \
+    jinja2 \
+    lxml \
+    text-unidecode \
+    markdown
