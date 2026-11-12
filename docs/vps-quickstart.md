@@ -237,7 +237,9 @@ one firewall.** The agent talks to two supporting services that every town
 on the server shares:
 
 1. **Firecrawl** — a self-hosted web scraper the agent uses to read event
-   pages. It runs on your server; cloud Firecrawl is never used.
+   pages and to search the web. It runs on your server; cloud Firecrawl is
+   never used. Its search goes through a bundled SearXNG
+   (`firecrawl-searxng`).
 2. **Squid egress proxy** — a firewall-like guard that only lets the
    agent connect to an allowlist of websites (TownLoops, ChatGPT,
    Telegram, Listmonk, and the sites each town lists in its
@@ -249,7 +251,7 @@ Start them once, and every town you add later reuses them.
 ```
 cd ~/workspace/townloops-agent
 
-# Firecrawl (5 containers — takes about a minute the first time to download)
+# Firecrawl (6 containers — takes about a minute the first time to download)
 docker compose -f templates/_shared/firecrawl/docker-compose.yml up -d
 
 # Squid egress — first generate its allowlist (written outside the repo, to
@@ -294,9 +296,9 @@ reload alone keeps it on the old one). From then on,
 docker ps
 ```
 
-You should see about 6 containers running: `firecrawl-api`,
+You should see about 7 containers running: `firecrawl-api`,
 `firecrawl-playwright`, `firecrawl-redis`, `firecrawl-rabbitmq`,
-`firecrawl-postgres`, and `squid-egress`.
+`firecrawl-postgres`, `firecrawl-searxng`, and `squid-egress`.
 
 If any say "Restarting" or "Exited," see [Troubleshooting](#troubleshooting).
 
@@ -640,12 +642,48 @@ the scraper is the cause. Check that Firecrawl is running:
 docker ps | grep firecrawl
 ```
 
-You should see 5 containers. If not, restart the Firecrawl stack:
+You should see 6 containers. If not, restart the Firecrawl stack:
 
 ```
 cd ~/workspace/townloops-agent
 docker compose -f templates/_shared/firecrawl/docker-compose.yml up -d
 ```
+
+### Search finds nothing (performer research never resolves, no new seeds)
+
+Self-hosted Firecrawl searches through SearXNG only when its
+`SEARXNG_ENDPOINT` is set; without it, it scrapes DuckDuckGo, which answers
+with a CAPTCHA, so every search comes back empty ("search returned no
+results"). The shared stack (`templates/_shared/firecrawl`) runs
+`firecrawl-searxng` and wires it in. A stack started before that change
+needs it once — this adds the SearXNG container and recreates only
+`firecrawl-api` with the new setting:
+
+```
+cd ~/workspace/townloops-agent
+docker compose -f templates/_shared/firecrawl/docker-compose.yml up -d
+docker exec firecrawl-api wget -qO- 'http://firecrawl-searxng:8080/search?q=test&format=json' | head -c 200
+```
+
+Firecrawl from an upstream checkout instead (`firecrawl/docker-compose.yaml`
++ your own override): add the same service to the override, next to `api`,
+and point the API at it —
+
+```
+services:
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: change-me
+    volumes:
+      - ~/workspace/townloops-agent/templates/_shared/firecrawl/searxng/settings.yml:/etc/searxng/settings.yml:ro
+```
+
+and `SEARXNG_ENDPOINT=http://searxng:8080` in that checkout's `.env`, then
+`docker compose … up -d searxng api`. Agents need no change: they reach
+Firecrawl as before.
 
 If preflight is clean, check that the town has approved event sources —
 `operator-status` (Step 7) shows seed counts. A supervised town needs you

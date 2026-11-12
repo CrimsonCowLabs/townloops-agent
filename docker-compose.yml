@@ -77,7 +77,8 @@ services:
 
   # ─────────────────────────────────────────────────────────────────────
   # Firecrawl stack — inlined from upstream self-host compose.
-  # 5 services (api + playwright + redis + rabbitmq + nuq-postgres).
+  # 6 services (api + playwright + redis + rabbitmq + nuq-postgres + searxng;
+  # SearXNG is Firecrawl's search backend — templates/_shared/firecrawl).
   # FoundationDB backend intentionally excluded — nuq-postgres is stable.
   # ─────────────────────────────────────────────────────────────────────
   firecrawl-api:
@@ -95,6 +96,8 @@ services:
         condition: service_started
       firecrawl-rabbitmq:
         condition: service_healthy
+      firecrawl-searxng:
+        condition: service_started
     environment:
       HOST: "0.0.0.0"
       PORT: 3002
@@ -117,6 +120,9 @@ services:
       LOGGING_LEVEL: ${FIRECRAWL_LOGGING_LEVEL:-info}
       BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY:-}
       NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      SEARXNG_ENDPOINT: http://firecrawl-searxng:8080
+      SEARXNG_ENGINES: ${FIRECRAWL_SEARXNG_ENGINES:-}
+      SEARXNG_CATEGORIES: ${FIRECRAWL_SEARXNG_CATEGORIES:-}
       ENV: local
     # Loopback publish only — external tools can hit http://127.0.0.1:8302
     # for debugging; the agent uses in-network DNS (firecrawl-api:3002).
@@ -137,6 +143,18 @@ services:
       - /tmp/.cache:noexec,nosuid,size=1g
     cpus: 2.0
     mem_limit: 4G
+
+  firecrawl-searxng:
+    image: searxng/searxng:latest
+    container_name: firecrawl-searxng
+    restart: unless-stopped
+    networks:
+      - firecrawl-net
+    environment:
+      SEARXNG_BASE_URL: http://firecrawl-searxng:8080/
+      SEARXNG_SECRET: ${FIRECRAWL_SEARXNG_SECRET:-townloops-local-searxng}
+    volumes:
+      - ./templates/_shared/firecrawl/searxng/settings.yml:/etc/searxng/settings.yml:ro
 
   firecrawl-redis:
     image: redis:alpine
