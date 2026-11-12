@@ -92,6 +92,13 @@ CUSTOMER_FACING_MARKERS = [
 ]
 
 
+# A venue's own site: what's on there and how to get there.
+VENUE_FACING_MARKERS = [
+    "events", "calendar", "tickets", "directions", "parking", "hours", "rentals",
+    "book", "contact us", "about us", "visit",
+]
+
+
 # A community group's or non-profit's own site: how people take part.
 MEMBER_FACING_MARKERS = [
     "join", "membership", "members", "volunteer", "donate", "our mission", "meetings",
@@ -718,6 +725,9 @@ def verify_candidate(
         customer_facing = any(marker in md_lower for marker in CUSTOMER_FACING_MARKERS)
         if not customer_facing:
             reasons_reject.append("no customer-facing markers (menu/hours/book/shop/services)")
+    elif kind == "venue":
+        if not any(marker in md_lower for marker in VENUE_FACING_MARKERS):
+            reasons_reject.append("no venue markers (events/calendar/tickets/directions/hours)")
     elif not any(marker in md_lower for marker in MEMBER_FACING_MARKERS):
         reasons_reject.append("no member-facing markers (join/volunteer/donate/meetings)")
 
@@ -750,7 +760,8 @@ def verify_candidate(
     return {
         "verified": True,
         "reasons": ["in-town, no closure marker, "
-                    + ("customer-facing" if kind == "business" else "member-facing")],
+                    + {"business": "customer-facing", "venue": "venue-facing"}.get(
+                        kind, "member-facing")],
         "evidence": evidence,
         "markdown_head": md[:500],
         "title": scraped.get("title") or "",

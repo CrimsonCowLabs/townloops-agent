@@ -7,8 +7,17 @@
 # discovery + enrichment sweeps rather than duplicating the 5-container
 # stack per town.
 #
+# Search: Firecrawl's /v1/search goes through the bundled SearXNG
+# (firecrawl-searxng, settings in ./searxng/settings.yml). Without
+# SEARXNG_ENDPOINT self-hosted Firecrawl scrapes DuckDuckGo, which blocks it,
+# and every search comes back empty (seed hunting, organisation/venue
+# discovery and performer research all depend on search). Like the rest of
+# the stack it reaches the web directly, not through the agents' Squid.
+#
 # Bring up:  docker compose -f templates/_shared/firecrawl/docker-compose.yml up -d
-# Health:    docker compose ps  (all 5 must be Up)
+# Health:    docker compose ps  (all 6 must be Up)
+# Search:    docker exec firecrawl-api wget -qO- \
+#              'http://firecrawl-searxng:8080/search?q=test&format=json' | head -c 300
 # Access:    from any container on firecrawl-shared-net → http://firecrawl-api:3002
 #            from the host (debugging)                    → http://127.0.0.1:8302
 
@@ -28,6 +37,8 @@ services:
         condition: service_started
       firecrawl-rabbitmq:
         condition: service_healthy
+      firecrawl-searxng:
+        condition: service_started
     environment:
       HOST: "0.0.0.0"
       PORT: 3002
@@ -50,6 +61,9 @@ services:
       LOGGING_LEVEL: ${FIRECRAWL_LOGGING_LEVEL:-info}
       BULL_AUTH_KEY: ${FIRECRAWL_BULL_AUTH_KEY:-}
       NUQ_RABBITMQ_URL: amqp://firecrawl-rabbitmq:5672
+      SEARXNG_ENDPOINT: http://firecrawl-searxng:8080
+      SEARXNG_ENGINES: ${FIRECRAWL_SEARXNG_ENGINES:-}
+      SEARXNG_CATEGORIES: ${FIRECRAWL_SEARXNG_CATEGORIES:-}
       ENV: local
     ports:
       - "127.0.0.1:8302:3002"
@@ -68,6 +82,19 @@ services:
       - /tmp/.cache:noexec,nosuid,size=1g
     cpus: 2.0
     mem_limit: 4G
+
+  firecrawl-searxng:
+    image: searxng/searxng:latest
+    container_name: firecrawl-searxng
+    restart: unless-stopped
+    networks:
+      - firecrawl-shared-net
+    environment:
+      SEARXNG_BASE_URL: http://firecrawl-searxng:8080/
+      SEARXNG_SECRET: ${FIRECRAWL_SEARXNG_SECRET:-townloops-local-searxng}
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # No ports: only firecrawl-api calls it.
 
   firecrawl-redis:
     image: redis:alpine

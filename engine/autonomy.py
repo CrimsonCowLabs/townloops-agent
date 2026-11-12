@@ -72,6 +72,7 @@ class Settings:
     seed_trust_approve: float = 0.2    # … a proposed seed's trial passes at this score
     seed_trust_syndicator: float = 0.45  # … below this an approved seed is a syndicator
     seed_trust_retire: float = 0.3     # … below this it is retired
+    seed_trial_many: int = 20          # upcoming events that make a trial never low-yield
     series_reject_streak: int = 3
     series_publish_streak: int = 3     # published in a row → a well-established Series
     stuck_retries: int = 2             # backoff retries before a stuck event is resolved
@@ -113,6 +114,7 @@ def settings(profile: Optional[dict] = None) -> Settings:
         seed_trust_approve=num(trust, "approve", d.seed_trust_approve, float),
         seed_trust_syndicator=num(trust, "syndicator", d.seed_trust_syndicator, float),
         seed_trust_retire=num(trust, "retire", d.seed_trust_retire, float),
+        seed_trial_many=num(trust, "many_upcoming", d.seed_trial_many),
         series_reject_streak=num(a, "series_reject_streak", d.series_reject_streak),
         series_publish_streak=num(a, "series_publish_streak", d.series_publish_streak),
         stuck_retries=num(a, "stuck_retries", d.stuck_retries),
@@ -940,24 +942,35 @@ def judge_seed(conn: sqlite3.Connection, seed: dict, s: Settings) -> Decision:
     return Decision("keep", "healthy", record)
 
 
+# What a trial doesn't count: a feed lists its past and its far future too
+# (an iCal feed's whole history), which says nothing about its calendar now.
+_OUT_OF_WINDOW = frozenset({"past", "beyond-horizon", "no-start-time"})
+
+
 def judge_trial(items: list[dict], decisions_: list[Optional[Decision]],
                 failure: Optional[str], s: Settings) -> Decision:
     """A proposed seed's dry run: approve it when the page isn't an error /
     challenge / empty page and its trial score — the Laplace-smoothed share
-    of the listed events that passed the event judgement (upcoming, in town,
-    a real event), the trust it starts with — reaches `seed_trust_approve`
-    with at least one passing. Deferred items (the AI call failed) aren't
-    counted; while any are, a seed short of the bar is deferred, not
-    rejected."""
+    of its upcoming events (within the horizon; past and later entries
+    aren't counted) that passed the event judgement (in town, a real event),
+    the trust it starts with — reaches `seed_trust_approve` with at least
+    one passing. A listing with `seed_trial_many` upcoming events or more is
+    never low-yield: one passing approves it (`trial-many-upcoming`).
+    Deferred items (the AI call failed) aren't counted; while any are, a
+    seed short of the bar is deferred, not rejected."""
     if failure:
         return Decision("reject", f"trial-{failure}", {})
     passed = [it["title"] for it, d in zip(items, decisions_) if d and d.verdict == "approve"]
-    judged = sum(1 for d in decisions_ if d)
+    window = [d for d in decisions_ if not (d and d.reason in _OUT_OF_WINDOW)]
+    judged = sum(1 for d in window if d)
     trust = round((len(passed) + 1) / (judged + 2), 3)
-    evidence = {"events": len(items), "passed": passed[:5], "trust": trust,
-                "threshold": s.seed_trust_approve}
+    evidence = {"events": len(items), "upcoming": len(window), "passed": passed[:5],
+                "trust": trust, "threshold": s.seed_trust_approve}
     if passed and trust >= s.seed_trust_approve:
         return Decision("approve", "trial-yielded-events", evidence)
+    if passed and len(window) >= s.seed_trial_many:
+        return Decision("approve", "trial-many-upcoming", {**evidence,
+                                                           "many": s.seed_trial_many})
     if any(d is None for d in decisions_):
         return Decision("defer", "ai-unavailable", evidence)
     evidence["reasons"] = sorted({d.reason for d in decisions_ if d and d.verdict != "approve"})

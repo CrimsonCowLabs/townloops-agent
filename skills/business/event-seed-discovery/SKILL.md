@@ -1,22 +1,22 @@
 ---
 name: event-seed-discovery
-description: Propose, verify, and stage event-source URLs for operator approval.
+description: Hunt for, verify, trial and maintain event-source URLs (seeds) — daily, from web search, known organisations' sites and the sites events link to.
 ---
 
 # event-seed-discovery
 
-Uses the LLM (Codex CLI) to propose seed source URLs for a town — chamber
-of commerce, city government, county government, library, tourism board,
-parks & rec, local newspaper, and major venues. These become the starting
-points for the daily `event-find` cron.
-
-Runs weekly (Sunday 04:00 UTC) and on first-run from `town-init`. New
-proposals land as `event_seeds.status='proposed'` for the operator to
-approve, reject, or edit in the dashboard's Seeds panel.
+Finds a town's event sources (seeds) — the starting points for the daily
+`event-find` cron — and keeps them healthy. `hunt` (daily 04:15, see Hunt)
+finds them from evidence; `discover`, the original Codex-from-memory
+proposer, is one of its inputs (weekly) and still runs on first-run from
+`town-init`. New seeds land as `event_seeds.status='proposed'`: autonomous
+`review` trials them the same morning (04:45); in supervised mode the
+operator approves them in the dashboard's Seeds panel.
 
 ## CLI
 
 ```bash
+$PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py hunt [--max-firecrawl N] [--max-proposals N] [--inputs domains,sites,search,memory]
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover --limit N
 $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py discover --dry-run
@@ -41,6 +41,35 @@ $PYTHON $HERMES_HOME/skills/business/event-seed-discovery/discover.py retire --s
 `discover` runs LLM discovery, HEAD-verifies each URL, and inserts survivors
 as proposed seeds, recording each one's feed. It is idempotent and skips URLs already in `event_seeds`.
 `show` prints current seed rows as JSON lines.
+
+## Hunt
+
+`hunt` (engine/seed_hunt; cron `event-seed-hunt`, detached, log
+`state/logs/seed-hunt-<date>.log`) interleaves four inputs so none starves
+the others, stopping at `--max-firecrawl` Firecrawl calls (default 40 —
+every search, homepage scrape and verify counts) or `--max-proposals` new
+seeds (default 10):
+
+- **domains** — hosts the town's events' `source_url` point at that aren't a
+  seed (≥2 events): the event pages' listing path (`/events/x` → `/events`),
+  else the calendar linked from the host's homepage.
+- **sites** — known venues', businesses' and communities' websites (live
+  mirrors too), busiest first: the calendar page their homepage links to.
+- **search** — town calendar queries (events calendar, library, parks and
+  recreation, each town category, each alias, profile `seed_hunt.queries`),
+  least recently run first. Needs working Firecrawl search (SearXNG — see
+  docs/vps-quickstart.md "Search finds nothing").
+- **memory** — `discover`'s Codex proposal, at most weekly.
+
+Never proposed: listing/aggregator pages (engine/listing_hosts), social
+platforms, articles, and any URL on a host that already has a seed **in any
+status** — a rejected or retired source is remembered. Each proposal is
+verified (rawHtml scrape, feed recorded), inserted with `discovered_by`
+`domain`/`site`/`search`/`llm` and its evidence in `notes`, and logged as a
+`seed:propose` decision (`autonomy why seed:<name>`). `discovery_checks`
+remembers mined sites/domains and unreachable URLs for 30 days and when each
+query ran, so the next day moves on. Bad proposals cost a trial, not a
+shipped event: the trial is the gate.
 
 ## Source role (dedup)
 
@@ -235,10 +264,13 @@ In supervised mode only the adapter step runs, and only proposes (see Adapters).
 - **Proposed seeds** (feeds first, `--trials` per run, default 2) are dry-run:
   scrape, extract, and judge the listed events as event-find would (an
   adapter seed through its adapter). The
-  trial's score — the smoothed share of listed events that are real upcoming
+  trial's score — the smoothed share of its *upcoming* events (within the
+  horizon; a feed's past and far-future entries don't count) that are real
   in-town events, `(passed + 1) / (judged + 2)`, stored as its starting
   `trust_score` — must reach `seed_trust.approve` (default 0.2) with at least
-  one passing; short of it is `trial-low-yield`. An error page
+  one passing; short of it is `trial-low-yield` — except that a listing with
+  `seed_trust.many_upcoming` (default 20) upcoming events or more is never
+  low-yield: one passing approves it (`trial-many-upcoming`). An error page
   (`trial-not-found`), bot wall (`trial-challenge`), empty page or empty
   listing, or nothing usable is a rejection. A 2xx alone never approves.
 - **Trust** (`trust_score`, 0..1) is refreshed from moderator outcomes since

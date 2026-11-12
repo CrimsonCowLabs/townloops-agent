@@ -35,7 +35,7 @@ python autonomy/autonomy.py decline 3f2a9c          # or decline it (operator on
 - Stuck events: `backoff` (wait), `backoff-elapsed` (retry),
   `retries-exhausted` (ship with what it has), `missing-required-fields`,
   `ship-failed`, `past` (drop).
-- Seeds: `trial-yielded-events` (approve), `trial-not-found`,
+- Seeds: `trial-yielded-events`, `trial-many-upcoming` (approve), `trial-not-found`,
   `trial-challenge`, `trial-empty-page`, `trial-empty-listing`,
   `trial-no-usable-events`, `trial-low-yield`, `trial-unreachable` (reject),
   `low-trust`, `dead-source`, `health-alert-persists` (retire, or

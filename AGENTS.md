@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 031).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 032).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -85,7 +85,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `recent_changes` feeds the nightly digest's "Egress hosts opened"; preflight lists the agent's hosts (info).
   - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
     `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
-    same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>"),
+    same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>";
+    a `venue` candidate goes through `live_index`'s `VenueIndex` — live venues, then live businesses/communities),
+    `harvest_terms.py` (the daily harvest's rotating search terms per kind: event hosts/venues with no entity, live
+    row or candidate; the profile's terms; keywords of categories thin on live — least recently searched first),
+    `seed_hunt.py` (`event-seed-discovery hunt`, daily, Firecrawl-budgeted: seeds from search, known organisations'
+    homepage calendar links, the hosts events' `source_url` point at, weekly the Codex-memory proposer; never a
+    listing/social/article page or a host with a seed in any status; each proposal a `seed:propose` decision),
+    `discovery_checks.py` (migration 032's `discovery_checks`: what hunt/harvest already looked at, by key),
     `own_site.py` (the one "own page, not a page about it" rule: platform profile, a host carrying the name, else a
     homepage where the caller says one counts — performer research's presence test and discovery's verify; also
     `UTILITY_PATH`, a site's jobs/member-application/deals pages, which discovery always rejects, and `ARTICLE_PATH`,
@@ -449,6 +456,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Firecrawl is always the local instance, never cloud.** Every Firecrawl call resolves its endpoint through
   `engine/firecrawl_env.base_url()` (`TOWNLOOPS_FIRECRAWL_URL` → `FIRECRAWL_API_URL`); unset, or a
   `firecrawl.dev` URL, raises `FirecrawlNotConfigured`. Don't add a cloud default or a second endpoint resolver.
+  Its `/v1/search` needs the stack's SearXNG (`firecrawl-searxng`, `SEARXNG_ENDPOINT`; settings in
+  `templates/_shared/firecrawl/searxng/`) — without it Firecrawl scrapes DuckDuckGo, gets a CAPTCHA, and every
+  search is empty (`tests/test_firecrawl_search_backend.py` keeps both compose files wired).
 - **Agent judgement lives in `SOUL.md` §Judgement + skill `references/`.** The CMO's hard-won rules
   (business vs venue vs community, recurring series, vague venues/off-town URLs → review, venue images,
   duplicates as operator proposals, source tricks, "say whether live, local or both changed") are
@@ -481,8 +491,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   (no CLI flag can), and the `business-promote` cron ships only `approved` rows — live re-check, local
   business, enrich, then `engine/entity_ship.ship_entity` (event-ship's entity path) → `promoted`. Operator
   declines are remembered by name. See `docs/business-discovery-handoff.md`. It also covers
-  community groups and non-profits (`--kind`; non-profits ship as communities, `kind`
-  'nonprofit'), and in autonomous mode `harvest` approves verified candidates itself — only on a
+  community groups, non-profits and venues (`--kind`; non-profits ship as communities, `kind`
+  'nonprofit'; venues as venues), and in autonomous mode the daily `harvest` (rotating gap-driven terms,
+  `engine/harvest_terms`) approves verified candidates itself — only on a
   verdict this verifier produced within `autonomy.verdict_max_age_days`; an imported (`imported_from`) or
   older one is re-verified first (`business_discovery.reverifier`).
   The CMO's stranded candidates and research drafts come in once via `scripts/import_cmo.py`

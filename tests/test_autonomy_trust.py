@@ -67,7 +67,7 @@ class TestTrialApproval:
     def test_a_calendar_that_is_mostly_unusable_scores_too_low_to_approve(self, town):
         town.seed("Arena", ARENA, status="proposed")
         town.listing(ARENA, [concert("Jazz Night")] +
-                     [concert(f"Old Show {i}", days=-3 - i) for i in range(9)])
+                     [concert(f"Box Office Closed {i}", days=3 + i) for i in range(9)])
         town.seed_review()
         assert town.seed_row("Arena")["status"] == "rejected"
         [d] = town.decisions("seed")
@@ -79,7 +79,7 @@ class TestTrialApproval:
         town.set_profile(PROFILE, seed_trust={"approve": 0.1})
         town.seed("Arena", ARENA, status="proposed")
         town.listing(ARENA, [concert("Jazz Night")] +
-                     [concert(f"Old Show {i}", days=-3 - i) for i in range(9)])
+                     [concert(f"Box Office Closed {i}", days=3 + i) for i in range(9)])
         town.seed_review()
         seed = town.seed_row("Arena")
         assert seed["status"] == "approved"
@@ -89,10 +89,44 @@ class TestTrialApproval:
 
     def test_the_trial_score_is_a_smoothed_share_of_usable_events(self):
         ok = autonomy.Decision("approve", "checks-passed")
-        drop = autonomy.Decision("drop", "past")
+        drop = autonomy.Decision("drop", "not-an-event")
         items = [{"title": "A"}, {"title": "B"}, {"title": "C"}]
         d = autonomy.judge_trial(items, [ok, ok, drop], None, AUTO)
         assert (d.verdict, d.evidence["trust"]) == ("approve", round(3 / 5, 3))
+
+    def test_only_upcoming_events_in_the_horizon_count(self):
+        # A feed's past and far-future entries say nothing about its calendar.
+        ok = autonomy.Decision("approve", "checks-passed")
+        past = autonomy.Decision("drop", "past")
+        later = autonomy.Decision("drop", "beyond-horizon")
+        items = [{"title": str(i)} for i in range(12)]
+        d = autonomy.judge_trial(items, [ok] + [past] * 10 + [later], None, AUTO)
+        assert (d.verdict, d.evidence["trust"]) == ("approve", round(2 / 3, 3))
+        assert (d.evidence["events"], d.evidence["upcoming"]) == (12, 1)
+
+    def test_a_feed_with_hundreds_of_upcoming_events_is_never_low_yield(self, town):
+        # Douglas County Public Library (SLT seed 47): an iCal feed whose trial
+        # returned 862 events — most of them past, most upcoming ones with no
+        # venue the checks could place — was rejected `trial-low-yield`.
+        library = "https://library.example/calendar"
+        town.seed("Library", library, status="proposed", kind="library")
+        events = ([concert(f"Story Time {i}") for i in range(3)]
+                  + [{"title": f"Old Program {i}", "date": soon(-2 - i % 300)}
+                     for i in range(800)]
+                  + [{"title": f"Book Club {i}", "date": soon(2 + i % 90)} for i in range(50)]
+                  + [{"title": f"Next Year {i}", "date": soon(200 + i)} for i in range(9)])
+        town.listing(library, events)
+        town.seed_review()
+        assert town.seed_row("Library")["status"] == "approved"
+        [d] = town.decisions("seed")
+        assert d["reason"] == "trial-many-upcoming"
+        assert (d["evidence"]["events"], d["evidence"]["upcoming"]) == (862, 53)
+
+    def test_many_upcoming_events_none_of_them_real_is_still_rejected(self):
+        drop = autonomy.Decision("drop", "out-of-town")
+        items = [{"title": str(i)} for i in range(40)]
+        d = autonomy.judge_trial(items, [drop] * 40, None, AUTO)
+        assert (d.verdict, d.reason) == ("reject", "trial-no-usable-events")
 
 
 class TestSeedDecisions:

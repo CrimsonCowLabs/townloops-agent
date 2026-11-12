@@ -58,6 +58,17 @@ _HINT_RE = {concept: re.compile(r"(?<![\w'’-])(?:" + "|".join(re.escape(k) for
             for concept, kws in _HINTS.items()}
 
 
+def hints_for(slug: str, allowed: Iterable[str],
+              concepts: Optional[Iterable[str]] = None) -> list[str]:
+    """The keywords that point to the town's category `slug` (from the
+    `concepts` given, else all) — what organisation harvest searches for
+    when that category is thin on live."""
+    allowed = set(allowed)
+    keep = set(_HINTS) if concepts is None else set(concepts)
+    return [kw for concept, kws in _HINTS.items() if concept in keep
+            and cats.normalize_category_slugs([concept], allowed) == [slug] for kw in kws]
+
+
 def keyword_category(name: str, description: str, allowed: Iterable[str]) -> Optional[str]:
     """The one town slug the text's hints point to, or None when no hint
     matches, hints for more than one category match, or the only match is a

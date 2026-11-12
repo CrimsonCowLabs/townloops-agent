@@ -1,0 +1,29 @@
+# SearXNG for the shared Firecrawl stack — the search backend behind
+# Firecrawl's /v1/search (engine/discovery.firecrawl_search: seed hunting,
+# organisation and venue discovery, performer research).
+#
+# Self-hosted Firecrawl searches through SearXNG when SEARXNG_ENDPOINT is
+# set; without it, it scrapes DuckDuckGo, which blocks it, and every search
+# comes back empty. Only Firecrawl calls this instance (in-network, never
+# published), so the bot limiter is off and the JSON API Firecrawl reads is
+# on. Everything else is SearXNG's defaults.
+#
+# The secret below is overridden by SEARXNG_SECRET when set (it only signs
+# SearXNG's own cookies; nothing here is reachable from outside).
+
+use_default_settings: true
+
+general:
+  instance_name: "townloops-firecrawl-search"
+
+server:
+  secret_key: "townloops-local-searxng"
+  limiter: false
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
