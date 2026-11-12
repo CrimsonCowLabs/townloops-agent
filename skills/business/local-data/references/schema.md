@@ -426,6 +426,8 @@ Unique `sqlite_autoindex_event_workqueue_1`: (event_uid, next_action)
 | series_slug | TEXT |  |  |  |  |
 | series_id | INTEGER |  |  |  |  |
 | ingest_ref | TEXT |  |  |  |  |
+| image_alt | TEXT |  |  |  |  |
+| age_restriction | TEXT |  |  |  |  |
 
 Index `idx_events_approval`: (approval_status)
 

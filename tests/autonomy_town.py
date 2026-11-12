@@ -78,6 +78,7 @@ class Town:
         self.extractions: dict[str, list[dict]] = {}
         self.judge: Callable[[str], str] = lambda prompt: "[]"
         self.details: dict[str, dict] = {}
+        self.page_html: dict[str, str] = {}   # an event page's HTML (og tags, JSON-LD)
         self.telegrams: list[str] = []
         self.search: dict[str, list[dict]] = {}
         self.redirects: dict[str, str] = {}
@@ -96,7 +97,7 @@ class Town:
         monkeypatch.setattr(tl, "Client", lambda *a, **k: self.api)
         monkeypatch.setattr("engine.orchestrator._telegram_notify", self.telegrams.append)
         monkeypatch.setattr("engine.notify.telegram", self.telegrams.append)
-        monkeypatch.setattr("engine.event_detail.firecrawl_markdown", self._fetch_detail)
+        monkeypatch.setattr("engine.event_detail.firecrawl_page", self._fetch_detail)
         monkeypatch.setattr("engine.event_detail.codex_exec", self._codex)
         monkeypatch.setattr("engine.event_people.codex_exec", self._codex)
         # Enrichment's page fields (entity_classify.codex_llm) resolve it lazily.
@@ -147,7 +148,8 @@ class Town:
         titles = [e["title"] for events in self.extractions.values() for e in events
                   if e.get("source_url") == url]
         return True, self.pages.get(url) or page_text(*(f"# {t}" for t in titles[:1]),
-                                                      "Event details."), ""
+                                                      "Event details."), "", \
+            {"html": self.page_html.get(url), "metadata": {}}
 
     def judge_by_title(self, answers: dict[str, dict]) -> None:
         """Answer the judgement call per item title (items come numbered)."""

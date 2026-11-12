@@ -10,7 +10,9 @@
    "Live Music"
   ],
   "tags": [],
-  "source_url": "https://shops.example/event/live-music/2027-01-08/"
+  "source_url": "https://shops.example/event/live-music/2027-01-08/",
+  "image_url": "https://shops.example/wp-content/uploads/2026/12/mountain-boys.jpg",
+  "image_alt": "The Mountain Boys playing banjo and fiddle on the plaza stage"
  },
  {
   "title": "Ice Skating Lessons",

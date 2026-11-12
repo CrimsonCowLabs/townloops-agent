@@ -1,6 +1,6 @@
 """How to get in: an event's stated price and ticket/RSVP link, as shipped.
 
-TownLoops has no ticket fields (by decision — none will be added), so the
+TownLoops has no ticket-link field (by decision — none will be added), so the
 detail-page pass (engine/event_detail.py) stores the page's own price
 wording in `events.price` and the ticket/RSVP link in `events.rsvp_url`,
 and event-ship carries them in what it can send:
@@ -14,6 +14,15 @@ and event-ship carries them in what it can send:
 
 Both are built from the stored values at ship time, so the local
 description and its content hash never change.
+
+TownLoops' typed fields (ADR 0010, issue #17) go alongside, only when the
+stored wording is unambiguous (`typed_price`): stated free → `free`; one
+amount ("$15") → a fixed price; a stated range ("$10–$20") → a range. Any
+other wording — two prices for two kinds of ticket, free for some and paid
+for others, a donation, sold out with no price — sends nothing, and
+TownLoops keeps `unknown`. `age_restriction` reads a quote-checked age
+sentence the same way: 21+/18+/adults only → `adults_only`, "all ages" →
+`all_ages`, anything else (or both) → nothing.
 """
 
 from __future__ import annotations
@@ -75,6 +84,54 @@ def price_kind(price: Optional[str]) -> Optional[str]:
     if _SOLD_OUT.search(price) or _WAITLIST.search(price):
         return "paid"
     return None
+
+
+# Two amounts written as one range ("$10-$20", "$10 to 20").
+_RANGE = re.compile(r"\$\s?(\d[\d,]*(?:\.\d{1,2})?)\s*(?:-|–|—|to)\s*\$?\s?(\d[\d,]*(?:\.\d{1,2})?)(?![\d,])",
+                    re.IGNORECASE)
+
+
+def _cents(amount: float) -> int:
+    return int(round(amount * 100))
+
+
+def typed_price(price: Optional[str]) -> dict:
+    """TownLoops' typed price fields for the stored wording — {} when it
+    isn't unambiguous: `free`; `paid` with one amount (min only) or a stated
+    range of two (min and max)."""
+    kind = price_kind(price)
+    if kind == "free":
+        return {"price_kind": "free"}
+    if kind != "paid" or _FREE.search(price):
+        return {}
+    amounts = {a for a in _amounts(price) if a}
+    for m in _RANGE.finditer(price):
+        lo, hi = sorted(float(x.replace(",", "")) for x in m.groups())
+        if lo and amounts <= {lo, hi}:   # the range is every price stated
+            return {"price_kind": "paid", "price_min_cents": _cents(lo),
+                    **({"price_max_cents": _cents(hi)} if hi > lo else {})}
+    if len(amounts) == 1:
+        return {"price_kind": "paid", "price_min_cents": _cents(amounts.pop())}
+    return {}
+
+
+_ADULTS = re.compile(
+    r"(?<![\w$])(?:18|21)\s?\+|\b(?:18|21)\s+(?:years?\s+(?:of\s+age\s+)?|yrs?\s+)?"
+    r"(?:and|&|or)\s+(?:over|older|up)\b|\bmust\s+be\s+(?:at\s+least\s+)?(?:18|21)\b"
+    r"|\badults?[- ]only\b|\bno\s+(?:one|minors|children|kids)\s+under\s+(?:18|21)\b",
+    re.IGNORECASE)
+_ALL_AGES = re.compile(r"\ball[- ]ages\b", re.IGNORECASE)
+
+
+def age_restriction(text: Optional[str]) -> Optional[str]:
+    """'adults_only' | 'all_ages' for a sentence that states who may come
+    by age, else None (no statement, or both)."""
+    if not isinstance(text, str):
+        return None
+    adults, all_ages = bool(_ADULTS.search(text)), bool(_ALL_AGES.search(text))
+    if adults == all_ages:
+        return None
+    return "adults_only" if adults else "all_ages"
 
 
 def is_free(price: Optional[str]) -> bool:

@@ -42,7 +42,7 @@ import sqlite3
 from typing import NamedTuple, Optional
 from urllib.parse import urljoin
 
-from engine import blocked_page, review_hold
+from engine import blocked_page, images, review_hold
 from engine.derive_helpers import dict_rows as _rows, iso_utc_now, load_event
 from engine.discovery import canonicalize_url
 from engine.event_extract import day_and_clock, parse_json_array, published_times
@@ -97,6 +97,9 @@ _BLOCK = re.compile(r"^(?:[ \t]{0,3}(?P<h>#{1,6})[ \t]|(?P<li>[-*+][ \t]|\d+[.)]
 _JOIN = re.compile(r"[\s)\]#*_\[|>-]*")
 # A line that is a linked image — a card's picture, just above its title.
 _LINKED_IMAGE = re.compile(r"[ \t]*\[!\[")
+# What may sit between a picture (`![alt](src`) and the title it is just
+# above: the rest of its markup (a link wrapping it) and a heading's marks.
+_ABOVE = re.compile(r"[\s()\[\]#*_|>-]*")
 _STOP = {"the", "and", "with", "for", "from", "at", "of", "on", "in", "to", "an", "a", "by",
          "our", "your", "featuring", "feat", "presents", "live"}
 
@@ -271,14 +274,36 @@ class _Listing:
                 return "refused", self.shown[c.key]
         return "not-in-card", None
 
+    def card_image(self, key: str, title) -> Optional[images.Image]:
+        """The first usable picture (engine/images) the event's own card
+        shows: one inside the card that isn't just above the next card's
+        title, or one just above its own title."""
+        anchors = sorted(a for c in self.cards for a in c.anchors)
+        own = {a for c in self.cards_of(key) for a in c.anchors}
+        for m in images.MD_IMAGE.finditer(self.page):
+            nxt = next((a for a in anchors if a >= m.end()), None)
+            if nxt is not None and _ABOVE.fullmatch(self.text[m.end():nxt]):
+                owner = nxt in own   # just above a title: that card's picture
+            else:
+                owner = any(c.start <= m.start() < c.end for c in self.cards_of(key))
+            image = owner and images.candidate(m.group("src"), m.group("alt"), title, self.base)
+            if image:
+                return image
+        return None
+
     def check(self, e: dict) -> dict:
         title = e.get("title")
         key = " ".join(_words(title))
+        # A picture is the card's own, never the model's say-so.
+        e = {k: v for k, v in e.items() if k not in ("image_url", "image_alt")}
         if not key:
             return e
         cards = self.cards_of(key)
         card_text = "\n".join(self.text[c.start:c.end] for c in cards) if cards else self.text
         e = published_times(e, card_text)
+        image = self.card_image(key, title) if cards else None
+        if image:
+            e = {**e, "image_url": image.url, "image_alt": image.alt}
         url = e.get("source_url")
         if not cards:
             return {**e, LISTING_CHECK: {
@@ -322,8 +347,9 @@ def listing_events(stdout: str, page: str, base_url: str) -> list:
     """An extraction's JSON array read against the listing `page` it came
     from (at `base_url`): each event's times held to what its own card
     states (engine/event_extract.published_times), its source_url to its
-    card's own link, and `LISTING_CHECK` on an event the listing doesn't
-    vouch for."""
+    card's own link, its picture to its card's own (`card_image`, with the
+    card's alt text — a model-supplied one is dropped), and `LISTING_CHECK`
+    on an event the listing doesn't vouch for."""
     events = parse_json_array(stdout)
     listing = _Listing(page, base_url, events)
     return [listing.check(e) if isinstance(e, dict) else e for e in events]

@@ -35,6 +35,14 @@
     "url": "https://shops.example/venue/village/"
    },
    "organizer": [],
+   "image": {
+    "url": "https://shops.example/wp-content/uploads/2026/12/mountain-boys.jpg",
+    "id": 777,
+    "extension": "jpg",
+    "width": 1200,
+    "height": 800,
+    "alt": "The Mountain Boys playing banjo and fiddle on the plaza stage"
+   },
    "url": "https://shops.example/event/live-music/2027-01-08/"
   },
   {

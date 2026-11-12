@@ -195,7 +195,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     (a `Fetch` answering from a file, `index.json` {requested URL: file} or `page-<N>.<ext>`) read a capture with
     no network — `event-seed-discovery test-adapter` in a town, `tests/test_adapter_fixtures.py` over every
     `tests/fixtures/adapters/<name>/` case here (a case carrying `<name>.py` runs as a town adapter: `eventcards`);
-    helpers adapters import: `html_text`, `local_time`, `location`),
+    helpers adapters import: `html_text`, `local_time`, `location`, `feed_image` (an optional picture + alt)),
     `event_detail.py` (one recorded read of an approved event's own `source_url` page — the
     `read-detail` action, skill `event-read-detail`: Firecrawl + Codex, `accessibility_notes` kept
     only as quote-checked sentences that name an access feature, else null; skipped with no fetch
@@ -203,7 +203,20 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     workqueue attempt instead of parking the event. The same pass keeps the stated `price` (quote-checked,
     must state a cost) and ticket/RSVP link `rsvp_url` (on the page, never a homepage); `event_tickets.py`
     turns them into the `free` tag or one `Tickets: …`/`RSVP: …` line atop the shipped description —
-    built at ship time, so the local description and content hash never change),
+    built at ship time, so the local description and content hash never change — and, only when the
+    wording is unambiguous (`typed_price`: free / "$15" / "$10–$20"), TownLoops' typed `price_kind`/
+    `price_min_cents`/`price_max_cents`; the pass also keeps a quote-checked `age_restriction`
+    (`adults_only`/`all_ages`) and the page's picture (`firecrawl_page` brings its HTML)),
+    `images.py` (#64: the one logo/icon/placeholder rule `is_generic_image` — research, performer research,
+    CMO import and events use it — and event pictures: `image_url` + `image_alt`, the alt copied from the
+    source (og:image:alt, a JSON-LD ImageObject caption, a listing card's markdown alt, a feed) and
+    describing more than the title (`usable_alt`), else no image. Best first: the event's own page
+    (`page_image`: JSON-LD Event `image`, og:image), an adapter row (`seed_adapters.feed_image`), the
+    listing card (`event_provenance` — the card's own picture, never the model's); kept like categories —
+    never in the content hash, filled only while the row has none with alt. event-ship sends the pair on
+    create and fills only a live row with no `image_path` (never a change submission, never verified —
+    the server fetches it); no venue fallback is sent — TownLoops shows the venue's picture itself.
+    `is_all_day` is sent for a date-only start),
     `event_provenance.py` (#45: an event's `source_url` is the page its fields came from. `listing_events` is the
     one extraction entry point (event-find, event-reconcile, seed trial): LLM JSON → each event read against its own
     listing card (split at extracted titles and at the card's own heading/list-item/table-row structure) — only

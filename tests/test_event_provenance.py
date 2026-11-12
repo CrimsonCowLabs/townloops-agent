@@ -529,7 +529,7 @@ class TestSkill:
         spec.loader.exec_module(mod)
         stub = Stub(page("marathon_detail"))
         monkeypatch.setattr(mod, "open_db", lambda: conn)
-        monkeypatch.setattr(event_detail, "firecrawl_markdown", stub.fetch)
+        monkeypatch.setattr(event_detail, "firecrawl_page", stub.fetch)
         monkeypatch.setattr(event_detail, "codex_exec", stub.llm)
         monkeypatch.setattr(mod, "parse_event_uid_arg", lambda: ev["event_uid"])
         assert mod.main() == 0
