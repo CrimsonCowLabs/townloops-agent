@@ -25,11 +25,17 @@ way. A live row that is otherwise gone (404 on GET or PATCH and no row
 carries the ref, or a merge chain past `live_lookup.MAX_MERGE_HOPS`) or
 that doesn't show what was sent is flagged for the operator
 (`extra_json.live_sync`, a failed `entity-sync` activity) and left alone
-until cleared — never re-created. Never synced: live mirrors
-(`source_kind='live'` — their local image is an operator proposal, not ours
-to ship) and rows the server filed under another town
-(`extra_json.cross_town` — our town-scoped GET/PATCH can't reach them, so a
-404 there doesn't mean "gone").
+until cleared — never re-created. Never synced: rows the server filed under
+another town (`extra_json.cross_town` — our town-scoped GET/PATCH can't reach
+them, so a 404 there doesn't mean "gone").
+
+A live mirror (`source_kind='live'`, someone else's row in our town) is
+synced only for what our enrichment found for it (`mirror_fills`:
+`extra_json.mirror_fills`, recorded by entity_enrich.fill_blanks, and the
+image of an `image-proposed` row): resync from live, then those fields fill
+live's blanks only — never a value live has, never a value the mirror merely
+copied from live (a curator may have cleared it since) — GET-verified, one
+`mirror-filled` activity naming the fields set.
 """
 
 from __future__ import annotations
@@ -83,13 +89,35 @@ def is_cross_town(row: dict) -> bool:
     return bool(parse_extra_json(row.get("extra_json")).get("cross_town"))
 
 
+MIRROR_FILLS = "mirror_fills"
+IMAGE_PROPOSED = "image-proposed"
+_IMAGE = ("image_path", "image_alt")
+
+
+def is_mirror(row: dict) -> bool:
+    return row.get("source_kind") == "live"
+
+
+def mirror_fills(row: dict) -> list[str]:
+    """The fields our enrichment filled on a live mirror, still to reach
+    live: `extra_json.mirror_fills`, plus the image of an `image-proposed`
+    row (proposals staged before fills were recorded)."""
+    fills = list(parse_extra_json(row.get("extra_json")).get(MIRROR_FILLS) or [])
+    if row.get("enrichment_status") == IMAGE_PROPOSED:
+        fills += [k for k in _IMAGE if row.get(k) and k not in fills]
+    return fills
+
+
 def needs_sync(row: dict) -> bool:
-    """Shipped by us (in our town), changed since live was last verified,
-    not flagged."""
+    """In our town, live-bound, not flagged — and either shipped by us and
+    changed since live was last verified, or a live mirror with fills."""
     extra = parse_extra_json(row.get("extra_json"))
-    return bool(row.get("source_kind") != "live" and row.get("townloops_slug")
-                and row.get("pushed_at") and not ({"live_sync", "cross_town"} & extra.keys())
-                and row.get("pushed_hash") != row.get("content_hash"))
+    if not (row.get("townloops_slug") and row.get("pushed_at")
+            and not ({"live_sync", "cross_town"} & extra.keys())):
+        return False
+    if is_mirror(row):
+        return bool(mirror_fills(row))
+    return row.get("pushed_hash") != row.get("content_hash")
 
 
 def _blank(value) -> bool:
@@ -149,9 +177,11 @@ def _sync(client, conn: sqlite3.Connection, kind: str, entity_uid: str,
     for k in pulled:
         row[k] = live[k]
     town_categories = cats.town_category_slugs()
+    # A mirror sends only what enrichment found for it (module doc).
+    allowed = set(mirror_fills(row)) if is_mirror(row) else set(fields)
     fill = {k: row[k] for k in fields
-            if k != "name" and _blank(live.get(k)) and sendable(resource, k, row.get(k))
-            and not _listing_website(k, row[k])
+            if k != "name" and k in allowed and _blank(live.get(k))
+            and sendable(resource, k, row.get(k)) and not _listing_website(k, row[k])
             and (k != "category_slug" or row[k] in town_categories)}
 
     if fill:
@@ -182,14 +212,25 @@ def _sync(client, conn: sqlite3.Connection, kind: str, entity_uid: str,
                                      + "; ".join(result.mismatches), pulled)
 
     _save_pulled(conn, kind, row, pulled)
+    mirror = is_mirror(row)
     extra = parse_extra_json(row.get("extra_json"))
-    if extra.pop("sync_error_at", None):
+    cleared = extra.pop("sync_error_at", None) is not None
+    cleared = extra.pop(MIRROR_FILLS, None) is not None or cleared
+    if cleared:
         conn.execute(f"UPDATE {resource} SET extra_json = ? WHERE entity_uid = ?",
                      (json.dumps(extra) if extra else None, entity_uid))
+    if mirror and row.get("enrichment_status") == IMAGE_PROPOSED:
+        # The proposal is decided: on live now (ours, or live's own).
+        conn.execute(f"UPDATE {resource} SET enrichment_status = ? WHERE entity_uid = ?",
+                     ("enriched" if "image_path" in fill else "live", entity_uid))
     conn.execute(f"UPDATE {resource} SET pushed_hash = content_hash, pushed_at = ? "
                  "WHERE entity_uid = ?", (iso_utc_now(), entity_uid))
     detail = f"{slug}: pulled {','.join(pulled) or '-'}; pushed {','.join(sorted(fill)) or '-'}"
-    if pulled or fill:
+    if mirror and fill:
+        record_activity(conn, _WORKER, "mirror-filled", f"{kind}:{entity_uid}",
+                        detail=f"live {kind} {slug} (someone else's): set "
+                               f"{', '.join(sorted(fill))}")
+    elif pulled or fill:
         record_activity(conn, _WORKER, "synced", f"{kind}:{entity_uid}", detail=detail)
     return SyncResult("synced", pulled, sorted(fill), detail)
 
@@ -286,7 +327,8 @@ def sweep(client, conn: sqlite3.Connection, limit: int = 25,
           kinds: tuple[str, ...] = tuple(RESOURCES)) -> dict[str, int]:
     """Sync up to `limit` entities that need it (any kind, in `kinds`
     order) — catches rows enriched outside event-ship, e.g. by
-    event-reconcile. Returns a count per SyncResult status."""
+    event-reconcile, and live mirrors with fills (an image proposal
+    included). Returns a count per SyncResult status."""
     client.verify_town()
     counts: dict[str, int] = {}
     for kind in kinds:
@@ -294,9 +336,12 @@ def sweep(client, conn: sqlite3.Connection, limit: int = 25,
             break
         uids = [r[0] for r in conn.execute(
             f"SELECT entity_uid FROM {RESOURCES[kind]} "
-            "WHERE COALESCE(source_kind, '') != 'live' AND townloops_slug IS NOT NULL "
-            "  AND pushed_at IS NOT NULL "
-            "  AND (pushed_hash IS NULL OR pushed_hash != content_hash) "
+            "WHERE townloops_slug IS NOT NULL AND pushed_at IS NOT NULL "
+            "  AND ((COALESCE(source_kind, '') != 'live' "
+            "        AND (pushed_hash IS NULL OR pushed_hash != content_hash)) "
+            "    OR (source_kind = 'live' AND (enrichment_status = 'image-proposed' "
+            "        OR (json_valid(COALESCE(extra_json, '{}')) AND json_array_length("
+            f"            COALESCE(json_extract(extra_json, '$.{MIRROR_FILLS}'), '[]')) > 0)))) "
             "  AND NOT (json_valid(COALESCE(extra_json, '{}')) "
             "           AND (json_extract(COALESCE(extra_json, '{}'), '$.live_sync') IS NOT NULL "
             "                OR json_extract(COALESCE(extra_json, '{}'), '$.cross_town') IS NOT NULL)) "

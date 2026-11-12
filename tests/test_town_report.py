@@ -184,6 +184,7 @@ class TestCronJobAlerts:
         from engine import lock
         mod = load(SKILLS / "entity-live-sync" / "sync.py", "town_entity_live_sync")
         monkeypatch.setattr("sys.argv", ["sync.py", "run"])
+        monkeypatch.setattr(mod, "LOCK_WAIT_S", 0)  # a skip, not a 20-min wait
 
         def sync():
             town.conn.commit()

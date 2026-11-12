@@ -237,6 +237,10 @@ def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
         except autonomy.SubmissionsHeld as e:   # stays approved, no attempt spent
             out["held"] = e.reason
             break
+        except entity_ship.AmbiguousLiveMatch as e:   # stamped on the entity row
+            out["failed"] += 1
+            _failed(conn, out, uid, f"{url}: {e.reason} — not created; bind or rename it")
+            continue
         if not slug:
             out["failed"] += 1
             _failed(conn, out, uid, f"{url}: ship failed — stays approved for the next run")

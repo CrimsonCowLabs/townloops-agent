@@ -47,7 +47,11 @@ for rows shipped before refs; a row they find without our ref is given it
 / `taken` stamped on the row and never retried).
 
 - **Entities**: by ref, else GET by slug (the row's `townloops_slug`, else the
-  slug pre-ref creates proposed — the ref's own string). Found → adopted: `townloops_slug` and
+  slug pre-ref creates proposed — the ref's own string), else in the run's live
+  index by website, then name ≥0.85 (`engine/live_index.resolve` — a live row
+  someone else made is reused: a `deduped-live` activity names it; several
+  different near-names → `extra_json.live_match` ambiguous, nothing created, the
+  event ships without it). Found → adopted: `townloops_slug` and
   `extra_json.live_id` recorded, nothing POSTed. Created → the live id
   from the create response is recorded the same way. Either way (and for a
   row shipped earlier whose content changed since, e.g. by enrichment) the
@@ -62,13 +66,19 @@ for rows shipped before refs; a row they find without our ref is given it
   second source's copy of one evening, whatever its source_url or start), two
   or more are a duplicate for the operator; then — the list endpoint has no
   `source_url` filter — list the events starting within 12h and match `source_url`
-  (trailing `/` ignored; with several, the one at the same start wins).
+  (trailing `/` ignored; with several, the one at the same start wins); last,
+  the same title (`live_index.titles_match`, reconcile's rule) on the same
+  town-local date, no clashing stated time, same venue when both know it — a
+  hand-made live row with another source_url and no Series. A match by Series
+  day, source_url or title is a `deduped-live` activity naming the live slug.
   Found → **filled, not overridden**: blank live fields get the local value,
   local categories/tags are added to the live sets, a venue is bound only if
   the live event has none; sent as a full-body PATCH + GET verify
   (`engine.live_patch.apply_event_patch`), nothing sent when there's nothing
   to add. Several live rows for one event → a failed `find-live-event`
-  activity listing their slugs, the event parked `stuck-` for the operator.
+  activity listing their slugs, `extra_json.live_match` {ambiguous,
+  candidates} (the daily report's "Ambiguous live matches"), the event parked
+  `stuck-` for the analyst run / operator.
 - **409 `ingest_ref_taken` means "already shipped"** (a lookup miss — e.g. a
   soft-deleted row the list excludes — or a lost create answer): the row is
   bound to `error.details.slug` with no second request (a `bound-by-ref`

@@ -5,7 +5,8 @@ people) and by business-discovery's promote (an operator-approved business).
 Nothing is created without first looking it up live (engine/live_lookup):
 by its Ingest Ref first (engine/ingest_ref — survives a wiped local cache and
 a TownLoops-side rename), then, for rows shipped before refs, by the cached
-slug. A create never proposes a slug — TownLoops derives it — and carries the
+slug, then by website/name in the run's live index (engine/live_index: a
+live row someone else made is reused, never duplicated). A create never proposes a slug — TownLoops derives it — and carries the
 ref; a `409 ingest_ref_taken` names the row that already holds it, which is
 bound with no second lookup. A created, bound or matched row is then synced
 (engine/entity_sync).
@@ -18,6 +19,7 @@ import os
 import sys
 from typing import Optional
 
+from engine import live_index
 from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
 
 
@@ -28,6 +30,17 @@ ENTITY_TABLES = {
     "performer": ("performers", "performers"),
     "creator": ("creators", "creators"),
 }
+
+
+class AmbiguousLiveMatch(RuntimeError):
+    """Several live rows the entity may be (engine/live_index.resolve):
+    nothing created, nothing bound — stamped `extra_json.live_match` for the
+    analyst run. A hold, not a failure."""
+
+    def __init__(self, kind: str, slugs: list[str]):
+        self.slugs = slugs
+        self.reason = f"ambiguous live match: {', '.join(slugs)}"
+        super().__init__(f"{kind} {self.reason}")
 
 
 class AwaitingResearch(RuntimeError):
@@ -107,6 +120,10 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     set-once PATCH; a final `other-ref`/`taken` is stamped, never retried).
     A kind the API takes no refs for (`ingest_ref.supported`, #64) skips the
     ref lookup and adoption, and is created without one.
+    Not found by ref or slug: matched against the run's live index
+    (engine/live_index — website, else name ≥0.85): a live row someone else
+    made is bound like one found by slug (a `deduped-live` activity names
+    it); several plausible ones raise AmbiguousLiveMatch, nothing created.
     Not found: created with the ref and no slug; a `409 ingest_ref_taken`
     binds to the row it names, with no second lookup. A shipped row gone from
     live (no ref match, cached slug 404s with no survivor) is flagged for the
@@ -141,6 +158,7 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     ref = ref_for(entity_uid)
     cached = row["townloops_slug"]
     created = bound = sent_ref = False
+    matched = None
     try:
         live = find_live_entity(client, resource, cached or ref, ingest_ref=ref)
         if live is None and row["pushed_at"] and cached:
@@ -149,19 +167,25 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
                                           f"no row carries {ref}) — not re-created")
             return None
         if live is None:
+            # Not ours by ref or slug: is it live already, made by someone
+            # else? (engine/live_index — website, else name.)
+            matched = _match_live(client, conn, kind, resource, table, row)
+            live = matched.row if matched else None
+        if live is None:
             payload = PAYLOAD_BUILDERS[kind](row)
             # No ref where the API takes none for this kind (#64).
             sent_ref = with_ref(resource, payload, ref)
             idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:{kind}:{entity_uid[:16]}"
             try:
                 live, created = client.create(resource, payload, idempotency_key=idem), True
+                live_index.note_created(client, resource, live)
             except Exception as e:
                 taken = taken_slug(e)
                 if not taken:
                     raise
                 # Already shipped (a wiped cache, a lost response): bind to it.
                 live, bound = {"slug": taken}, True
-    except SubmissionsHeld:
+    except (SubmissionsHeld, AmbiguousLiveMatch):
         raise
     except Exception as e:  # noqa: BLE001 — surfaced as a failed ship-<kind> activity
         print(f"  ship {kind} {entity_uid[:12]} failed: {str(e)[:120]}", file=sys.stderr)
@@ -191,11 +215,26 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
                            (entity_uid,)).fetchone()   # its stamp, kept below
     _record_live_entity(conn, table, row, slug, live.get("id") if in_town else None,
                         None if in_town else live.get("town_slug"))
+    live_index.clear_ambiguous(conn, table, "entity_uid", entity_uid)
+    if matched:
+        live_index.record_dedup(conn, f"{kind}:{entity_uid}", kind, slug, matched.reason)
     if in_town:
         res = entity_sync.sync_entity(client, conn, kind, entity_uid)
         if res.status == "error":
             print(f"  sync {kind} {entity_uid[:12]} → {slug}: {res.detail}", file=sys.stderr)
     return slug
+
+
+def _match_live(client, conn, kind: str, resource: str, table: str, row):
+    """The live row this never-shipped entity already is (the run's live
+    index, engine/live_index), or None. Several plausible ones raise
+    AmbiguousLiveMatch after stamping the row. A failed list raises."""
+    res = live_index.entity_index(client, resource, kind).resolve(row["name"], row["website"])
+    if res.ambiguous:
+        live_index.mark_ambiguous(conn, table, "entity_uid", row["entity_uid"], kind,
+                                  res.slugs(), res.reason)
+        raise AmbiguousLiveMatch(kind, res.slugs())
+    return res if res.row else None
 
 
 def ship_released(client, conn, limit: int = 25,
@@ -243,6 +282,10 @@ def ship_released(client, conn, limit: int = 25,
                 print(f"  ship {kind} {uid[:12]}: submissions held ({e.reason})",
                       file=sys.stderr)
                 return dict(counts)
+            except AmbiguousLiveMatch as e:   # stamped on the row; the analyst decides
+                counts["ambiguous"] += 1
+                print(f"  ship {kind} {uid[:12]}: {e.reason}", file=sys.stderr)
+                continue
             except Exception as e:  # noqa: BLE001 — counted as failed, retried later
                 print(f"  ship {kind} {uid[:12]} failed: {str(e)[:120]}", file=sys.stderr)
                 slug = None

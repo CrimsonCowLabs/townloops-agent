@@ -681,6 +681,8 @@ services:
       SEARXNG_SECRET: change-me
     volumes:
       - ~/workspace/townloops-agent/templates/_shared/firecrawl/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # Upstream's compose puts `api` on a `backend` network, not the default one.
+    networks: [backend]
 ```
 
 and `SEARXNG_ENDPOINT=http://searxng:8080` in that checkout's `.env`, then

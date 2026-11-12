@@ -154,3 +154,7 @@ operating_mode: autonomous
 #   max_minutes: 90        # wall time
 #   max_firecrawl: 300     # Firecrawl requests
 #   max_submissions: 150   # creates/changes sent to TownLoops
+
+# enrichment:
+#   retry_not_found_days: 14   # entity-live-sync researches an entity that came back
+#                              # `not-found` again after this many days

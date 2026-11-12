@@ -9,13 +9,28 @@ event-reconcile enrichment of an already-shipped venue).
 
 ## When an entity is synced
 
-It was created or adopted live by us (`townloops_slug` + `pushed_at`), it
-is not a live mirror (`source_kind='live'` — a mirror's local image is an
-operator proposal), the server didn't file it under another town
+It was created or adopted live by us (`townloops_slug` + `pushed_at`), the
+server didn't file it under another town
 (`extra_json.cross_town` — town-scoped GETs can't see it), it is not flagged, and its `content_hash` differs from
 `pushed_hash` (the hash live was last verified to reflect; NULL for an
 adopted row). `fill_blanks` refreshes `content_hash` whenever it fills a
 field.
+
+A **live mirror** (`source_kind='live'`, someone else's row in the town) is
+synced only for what our enrichment found for it — `extra_json.mirror_fills`
+(recorded by `fill_blanks`) and the image of an `image-proposed` row: those
+fields fill live's blanks only (never a value live has, never a value the
+mirror copied from live), GET-verified, one `mirror-filled` activity naming
+the fields set. An applied proposal becomes `enriched` (`live` when live had
+its own image by then).
+
+## Re-enrichment (first)
+
+Venues, businesses and communities that came back `not-found` at least
+`enrichment.retry_not_found_days` (town-profile.yaml, default 14) ago are
+researched again, oldest first, up to `--limit` (one `re-enrich` activity
+each; a lookup that didn't run keeps it `not-found` for the next run). What
+it finds syncs in the same run. The JSON line's `reenriched` counts them.
 
 ## What a sync does
 
