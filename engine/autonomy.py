@@ -365,6 +365,13 @@ class GatedClient:
     def __getattr__(self, name):
         return getattr(self._client, name)
 
+    def ref_filter_ignored(self, resource: str, evidence: dict) -> None:
+        """engine/ingest_ref's report: a resource the OpenAPI snapshot says
+        filters by `ingest_ref` answered rows not carrying the ref. The lookup
+        is no match either way; the server broke its contract, so submissions
+        stop until the operator looks (`ingest-ref-filter-ignored`)."""
+        open_circuit(self._conn, "ingest-ref-filter-ignored", evidence, self._alert)
+
     def create(self, resource: str, payload: dict, *, idempotency_key: Optional[str] = None):
         if resource != "events" and not self._settings.entity_moderation:
             raise SubmissionsHeld("entity-moderation-off",

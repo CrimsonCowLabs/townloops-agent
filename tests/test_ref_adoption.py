@@ -17,8 +17,11 @@ from engine import ingest_ref, ref_adoption
 from engine.derive_helpers import insert_entity
 from engine.townloops_api import TownloopsError
 
+# An API whose every resource takes refs (an unsupported kind is skipped:
+# tests/test_ingest_ref_support.py).
+pytestmark = pytest.mark.usefixtures("refs_everywhere")
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT =Path(__file__).resolve().parent.parent
 
 
 class RefAPI:

@@ -3,8 +3,14 @@
 import json
 import re
 
+import pytest
+
 from engine import ingest_ref
 from engine.townloops_api import TownloopsError
+
+# An API whose every resource takes refs; what changes where one doesn't is
+# tests/test_ingest_ref_support.py (#64).
+pytestmark = pytest.mark.usefixtures("refs_everywhere")
 
 
 class FakeClient:

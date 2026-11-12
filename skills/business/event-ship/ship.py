@@ -227,7 +227,8 @@ def _venue_ref(conn, event: dict) -> Optional[str]:
 
 
 def _bind_venue(client, conn, event: dict, payload: dict, venue_slug: Optional[str]) -> None:
-    """venue_id, then venue_ingest_ref, then the payload's venue_name —
+    """venue_id, then venue_ingest_ref (only when the event payload declares
+    it, `ingest_ref.accepts_venue_ref`), then the payload's venue_name —
     TownLoops resolves them in that order."""
     venue_id = _resolve_venue_id(client, conn, event, venue_slug)
     if venue_id:
@@ -235,7 +236,7 @@ def _bind_venue(client, conn, event: dict, payload: dict, venue_slug: Optional[s
         # The name rides along — unused when the id resolves, kept as the
         # curator's hint when it doesn't.
         payload["venue_id"] = venue_id
-    vref = _venue_ref(conn, event)
+    vref = _venue_ref(conn, event) if ingest_ref.accepts_venue_ref() else None
     if vref:
         payload["venue_ingest_ref"] = vref
 
@@ -264,7 +265,7 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
     _bind_venue(client, conn, event, payload, venue_slug)
     event_uid = event["event_uid"]
     ref = ref_for(event_uid)
-    payload["ingest_ref"] = ref
+    sent_ref = ingest_ref.with_ref("events", payload, ref)
     # Pre-ref rows: the cached slug, or (none cached) the slug pre-ref creates
     # proposed — the ref's own string.
     legacy_slug = event.get("townloops_slug") or ref
@@ -350,7 +351,8 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         record_activity(conn, _WORKER, "ship-event", event_uid, ok=False,
                         error=f"create answered no slug: {str(result)[:200]}")
         return None
-    remember(conn, "event", event_uid, ref)
+    if sent_ref:
+        remember(conn, "event", event_uid, ref)
     if not _repair_dropped_fields(client, conn, event, slug, payload, result):
         return None
     return slug
@@ -430,7 +432,8 @@ def _submit_change(client, conn, event: dict, meta: dict,
         payload.pop("end_at", None)   # never an end that may fall before the new start
     # Its own row, never the event's ref — one per change (the values it
     # submits): a retry 409s and binds, a later, different change is new.
-    payload["ingest_ref"] = change_ref = change_ref_for(uid, submit)
+    change_ref = change_ref_for(uid, submit)
+    ingest_ref.with_ref("events", payload, change_ref)
     client.context.update(kind="change", target_slug=live_slug, local_uid=uid)
     idem = (f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:change:event:{uid[:16]}:"
             f"{change_ref.rsplit('-', 1)[1]}")

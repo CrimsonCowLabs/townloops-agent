@@ -16,6 +16,13 @@ public URL, the ref is the identity.
   soon as it is found — always through `adopt_and_remember` (adopt, remember
   the local column, one `adopt-ref` activity; a final outcome is stamped on
   the local row and never tried again).
+- Not every resource takes a ref (#64): `supported(resource)` reads the
+  OpenAPI snapshot (`state/openapi.json`) — the list endpoint must declare the
+  `ingest_ref` query param and the create payload the property; no snapshot,
+  events only. Where unsupported there is no ref lookup, no ref on a create
+  (`with_ref`) and no adoption. A lookup accepts only a row that carries the
+  ref: a server ignoring the filter (SLT's entity lists answered unrelated
+  rows) is `ignored`, never a match — and reported (`ref_filter_ignored`).
 - `own_ref` is the ref a local row's live row carries or should: the stored
   one, else ours — none for a live mirror (someone else's row).
 - `read_live_event` GETs a live event of ours by slug and, renamed on
@@ -36,7 +43,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
+import sys
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 from engine.derive_helpers import iso_utc_now, parse_extra_json, record_activity
@@ -93,15 +103,177 @@ def _named_slug(code, details) -> Optional[str]:
     return slug if isinstance(slug, str) and slug else None
 
 
-def find_by_ref(client, resource: str, ref: Optional[str]) -> Optional[dict]:
-    """The live row of `resource` carrying `ref`, else None. At most one row
-    in a town carries a ref; the list read excludes deleted events, so None
-    is not a promise a create will succeed (that answers 409, `taken_slug`).
-    API errors raise — the caller must not act on an unanswered lookup."""
+# --------------------------------------------------------------------------
+# Which resources take a ref — from the OpenAPI snapshot
+# --------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Capabilities:
+    resources: frozenset      # list filter + create property both declared
+    venue_ref: bool           # an event create takes `venue_ingest_ref`
+    source: str               # the snapshot read, or why none was
+
+
+# No (readable) snapshot: conservative — the events API is the one known to
+# take refs; a venue ref on an event names nothing then.
+DEFAULT = Capabilities(frozenset({"events"}), False, "no snapshot: events only")
+_cache: dict = {}
+
+
+def snapshot_path() -> Path:
+    """`$TOWNLOOPS_OPENAPI_SNAPSHOT`, else `$HERMES_HOME/state/openapi.json`
+    (the townloops-api skill's daily snapshot)."""
+    env = os.environ.get("TOWNLOOPS_OPENAPI_SNAPSHOT")
+    return Path(env) if env else Path(
+        os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "openapi.json"
+
+
+def capabilities() -> Capabilities:
+    """What the live API declares, per the snapshot. Re-read whenever the
+    snapshot file changes (path, mtime, size), else cached."""
+    path = snapshot_path()
+    try:
+        st = path.stat()
+    except OSError:
+        return DEFAULT
+    key = (str(path), st.st_mtime_ns, st.st_size)
+    if _cache.get("key") != key:
+        try:
+            cap = parse_capabilities(json.loads(path.read_text()), str(path))
+        except (OSError, ValueError, AttributeError, TypeError):
+            cap = Capabilities(DEFAULT.resources, False, f"{path} unreadable: events only")
+        _cache.update(key=key, cap=cap)
+    return _cache["cap"]
+
+
+def parse_capabilities(spec: dict, source: str = "spec") -> Capabilities:
+    """`Capabilities` of an OpenAPI document: each `/towns/{town}/<resource>`
+    whose GET declares the `ingest_ref` query param and whose POST body
+    declares the `ingest_ref` property."""
+    resources, venue_ref = set(), False
+    for path, ops in (spec.get("paths") or {}).items():
+        m = re.search(r"/towns/\{[^}]+\}/([a-z_]+)$", path)
+        if not m or not isinstance(ops, dict):
+            continue
+        get, post = ops.get("get") or {}, ops.get("post") or {}
+        params = [_deref(spec, p) for p in
+                  (ops.get("parameters") or []) + (get.get("parameters") or [])]
+        filters = any(p.get("name") == "ingest_ref" and p.get("in") == "query" for p in params)
+        props: set = set()
+        for media in (_deref(spec, post.get("requestBody") or {}).get("content") or {}).values():
+            props |= _properties(spec, (media or {}).get("schema") or {})
+        if filters and "ingest_ref" in props:
+            resources.add(m.group(1))
+        if m.group(1) == "events" and "venue_ingest_ref" in props:
+            venue_ref = True
+    return Capabilities(frozenset(resources), venue_ref and "venues" in resources, source)
+
+
+def _deref(spec: dict, obj, depth: int = 0) -> dict:
+    ref = obj.get("$ref") if isinstance(obj, dict) else None
+    if not ref or depth > 8 or not ref.startswith("#/"):
+        return obj if isinstance(obj, dict) else {}
+    node = spec
+    for part in ref[2:].split("/"):
+        node = node.get(part, {}) if isinstance(node, dict) else {}
+    return _deref(spec, node, depth + 1)
+
+
+def _properties(spec: dict, schema, depth: int = 0) -> set:
+    schema = _deref(spec, schema)
+    out = set(schema.get("properties") or {})
+    if depth < 8:
+        for key in ("allOf", "anyOf", "oneOf"):
+            for sub in schema.get(key) or []:
+                out |= _properties(spec, sub, depth + 1)
+    return out
+
+
+def supported(resource: str) -> bool:
+    """`resource` (or a kind) takes refs: lookups by ref, refs on creates,
+    set-once adoption. See `capabilities`."""
+    return RESOURCES.get(resource, resource) in capabilities().resources
+
+
+def accepts_venue_ref() -> bool:
+    """An event create may carry `venue_ingest_ref`."""
+    return capabilities().venue_ref
+
+
+def with_ref(resource: str, payload: dict, ref: Optional[str]) -> bool:
+    """Put `ref` on create `payload` when `resource` takes refs (else make
+    sure none rides along). True when sent — only then may the created row be
+    remembered as carrying it."""
+    if ref and supported(resource):
+        payload["ingest_ref"] = ref
+        return True
+    payload.pop("ingest_ref", None)
+    return False
+
+
+# --------------------------------------------------------------------------
+# Lookup by ref
+# --------------------------------------------------------------------------
+
+@dataclass
+class RefLookup:
+    row: Optional[dict] = None
+    status: str = "none"      # found | none | unsupported | ignored
+
+
+class RefNotUnique(RuntimeError):
+    """Two live rows carry one ref — never pick one."""
+
+
+def lookup_by_ref(client, resource: str, ref: Optional[str]) -> RefLookup:
+    """The live row of `resource` carrying `ref`. Only a returned row whose
+    own `ingest_ref` equals `ref` is a match: rows that don't carry it mean
+    the server ignored the filter — `ignored`, no match, reported
+    (`_report_ignored`). A resource the snapshot says takes no refs is
+    `unsupported`, with no request. The list read excludes deleted events, so
+    `none` is not a promise a create will succeed (that answers 409,
+    `taken_slug`). API errors raise — the caller must not act on an
+    unanswered lookup."""
     if not ref:
-        return None
-    rows = client.list(resource, ingest_ref=ref, limit=2) or []
-    return rows[0] if rows else None
+        return RefLookup()
+    if not supported(resource):
+        return RefLookup(status="unsupported")
+    rows = [r for r in (client.list(resource, ingest_ref=ref, limit=2) or [])
+            if isinstance(r, dict)]
+    carrying = [r for r in rows if r.get("ingest_ref") == ref]
+    if len(carrying) > 1:
+        raise RefNotUnique(f"{resource}: {len(carrying)} live rows carry {ref}")
+    if carrying:
+        return RefLookup(carrying[0], "found")
+    if rows:
+        _report_ignored(client, resource, ref, rows)
+        return RefLookup(status="ignored")
+    return RefLookup()
+
+
+def find_by_ref(client, resource: str, ref: Optional[str]) -> Optional[dict]:
+    """`lookup_by_ref`'s row: the live row carrying `ref`, else None — the
+    caller falls back to its slug / name matches. API errors raise."""
+    return lookup_by_ref(client, resource, ref).row
+
+
+def _report_ignored(client, resource: str, ref: str, rows: list) -> None:
+    """A resource that declares the filter answered rows not carrying the
+    ref: stderr, and the client's `ref_filter_ignored` hook when it has one
+    (autonomy.GatedClient opens the circuit)."""
+    evidence = {"resource": resource, "ingest_ref": ref,
+                "returned": [{"slug": r.get("slug"), "ingest_ref": r.get("ingest_ref")}
+                             for r in rows[:2]],
+                "snapshot": capabilities().source}
+    print(f"[warn] {resource}?ingest_ref={ref} answered rows not carrying it "
+          f"({', '.join(str(r.get('slug')) for r in rows[:2])}) — filter ignored, no match",
+          file=sys.stderr)
+    try:
+        hook = getattr(client, "ref_filter_ignored", None)
+    except Exception:  # noqa: BLE001 — a client without the hook
+        hook = None
+    if callable(hook):
+        hook(resource, evidence)
 
 
 # Per kind, the TownLoops resource — which is also the local table. The one
@@ -164,7 +336,7 @@ def clear_mark(conn, kind: str, uid: str) -> None:
 
 @dataclass
 class Adoption:
-    status: str            # adopted | already | other-ref | taken | error
+    status: str            # adopted | already | other-ref | taken | error | unsupported
     detail: str = ""
 
 
@@ -203,8 +375,13 @@ def adopt_and_remember(client, conn, kind: str, uid: str, live: dict, *, worker:
     the outcome is stamped (`mark` — `other-ref` / `taken` are FINAL). Every
     outcome but `already` is one `adopt-ref` activity of `worker`, the status
     in its detail; `taken` (a duplicate on TownLoops) and `error` are
-    failures. No commit; never raises on an API error."""
+    failures. A kind that takes no refs (`supported`) is `unsupported`: no
+    PATCH, nothing stamped or recorded — not final, so a later snapshot that
+    declares refs adopts it. No commit; never raises on an API error."""
     ref = ref or ref_for(uid)
+    if not supported(kind):
+        return Adoption("unsupported", f"{RESOURCES[kind]} take no ingest_ref "
+                                       f"({capabilities().source})")
     result = adopt(client, RESOURCES[kind], live, ref)
     if result.status in ("adopted", "already"):
         remember(conn, kind, uid, ref)

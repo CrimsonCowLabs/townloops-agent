@@ -111,6 +111,7 @@ class TestFindByIngestRef:
                             start_at=START)
         assert m.row["slug"] == "by-url" and m.matched_by == "source_url"
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_entity_ref_first_then_cached_slug(self):
         api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill"},
                               {"id": 8, "slug": "riva-new", "name": "Riva", "ingest_ref": "r"}])
@@ -323,6 +324,7 @@ class TestEventVenueById:
         [created] = api.events.values()
         assert created["venue_slug"] == "gunbarrel-tavern"
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_new_venue_id_comes_from_its_create(self, ship, monkeypatch, conn):
         api = _use(monkeypatch, FakeAPI())
         _stage(ship, monkeypatch, conn, venue={"address": "1 Main St"})
@@ -444,6 +446,7 @@ class TestShipEntityLookup:
         assert api.creates() == []
         assert json.loads(self._venue_row(conn)["extra_json"])["live_sync"]["status"] == "missing"
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_not_found_is_created_and_its_live_id_recorded(self, ship, conn):
         api = FakeAPI()
         self._venue(conn)
@@ -466,6 +469,7 @@ class TestShipEntityLookup:
         assert ship._ship_entity(api, conn, "venue", "v-uid") is None
         assert self._venue_row(conn)["townloops_slug"] is None
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_ingest_ref_taken_binds_to_the_slug_it_names(self, ship, conn, monkeypatch):
         """The lookup misses (a stale read); the create's 409 names the row —
         bound with no second lookup, then synced."""
@@ -482,6 +486,7 @@ class TestShipEntityLookup:
         post = next(i for i, c in enumerate(api.calls) if c[0] == "POST")
         assert api.calls[post - 1] == ("GET", "venues", ref)     # the lookup, before it
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_found_by_ref_under_a_renamed_slug_is_repointed(self, ship, conn):
         ref = ingest_ref.ref_for("v-uid")
         api = FakeAPI(venues=[{"id": 7, "slug": "riva-renamed", "name": "Riva Grill",
@@ -493,6 +498,7 @@ class TestShipEntityLookup:
         assert "live_sync" not in json.loads(row["extra_json"])
         assert api.creates() == [] and ("GET", "venues", "riva-grill") not in api.calls
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_pre_ref_row_found_by_slug_is_given_the_ref_once(self, ship, conn):
         from engine import entity_enrich
         api = FakeAPI(venues=[{"id": 7, "slug": "riva-grill", "name": "Riva Grill"}])

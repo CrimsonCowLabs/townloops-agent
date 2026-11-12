@@ -105,6 +105,8 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     or merged on TownLoops) is re-pointed (`entity_sync.repoint`); one found
     by slug without our ref is given it (`ingest_ref.adopt_and_remember`,
     set-once PATCH; a final `other-ref`/`taken` is stamped, never retried).
+    A kind the API takes no refs for (`ingest_ref.supported`, #64) skips the
+    ref lookup and adoption, and is created without one.
     Not found: created with the ref and no slug; a `409 ingest_ref_taken`
     binds to the row it names, with no second lookup. A shipped row gone from
     live (no ref match, cached slug 404s with no survivor) is flagged for the
@@ -117,7 +119,7 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
     from engine import entity_sync
     from engine.autonomy import SubmissionsHeld
     from engine.ingest_ref import (
-        adopt_and_remember, ref_for, remember, taken_slug, wants_adoption,
+        adopt_and_remember, ref_for, remember, taken_slug, wants_adoption, with_ref,
     )
     from engine.live_lookup import find_live_entity
     from engine.performer_research import awaits_research
@@ -138,7 +140,7 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         raise AwaitingResearch(kind, row["enrichment_status"])
     ref = ref_for(entity_uid)
     cached = row["townloops_slug"]
-    created = bound = False
+    created = bound = sent_ref = False
     try:
         live = find_live_entity(client, resource, cached or ref, ingest_ref=ref)
         if live is None and row["pushed_at"] and cached:
@@ -148,7 +150,8 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
             return None
         if live is None:
             payload = PAYLOAD_BUILDERS[kind](row)
-            payload["ingest_ref"] = ref
+            # No ref where the API takes none for this kind (#64).
+            sent_ref = with_ref(resource, payload, ref)
             idem = f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG','?')}:ship:{kind}:{entity_uid[:16]}"
             try:
                 live, created = client.create(resource, payload, idempotency_key=idem), True
@@ -178,7 +181,7 @@ def ship_entity(client, conn, kind: str, entity_uid: str) -> Optional[str]:
         entity_sync.repoint(conn, kind, dict(row), live)
         row = conn.execute(f"SELECT * FROM {table} WHERE entity_uid = ?",
                            (entity_uid,)).fetchone()
-    if created or bound or live.get("ingest_ref") == ref:
+    if (created and sent_ref) or bound or live.get("ingest_ref") == ref:
         remember(conn, kind, entity_uid, ref)
     elif in_town and wants_adoption(kind, row):
         # Shipped before refs, found by slug: give it ours (set-once PATCH).

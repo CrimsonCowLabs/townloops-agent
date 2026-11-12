@@ -9,6 +9,7 @@ Notes on env:
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
 import sys
@@ -44,6 +45,20 @@ def tmp_state_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("TOWNLOOPS_LOCK_DIR", str(state / "locks"))
     monkeypatch.setenv("TOWNLOOPS_DB_PATH", str(state / "townloops.db"))
     yield state
+
+
+@pytest.fixture
+def refs_everywhere(tmp_path, monkeypatch):
+    """A TownLoops API whose every resource takes Ingest Refs (#64): the
+    OpenAPI snapshot engine/ingest_ref reads declares the `ingest_ref` filter
+    and property everywhere, and FakeAPI honours them by default. Without it
+    the snapshot is absent (events only) and FakeAPI mirrors the real API."""
+    from tests.fake_townloops import REF_RESOURCES, FakeAPI
+    monkeypatch.setattr(FakeAPI, "DEFAULT_REF_RESOURCES", REF_RESOURCES)
+    path = tmp_path / "openapi-refs-everywhere.json"
+    path.write_text(json.dumps(FakeAPI().openapi()))
+    monkeypatch.setenv("TOWNLOOPS_OPENAPI_SNAPSHOT", str(path))
+    return path
 
 
 @pytest.fixture
