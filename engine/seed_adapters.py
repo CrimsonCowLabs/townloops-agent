@@ -20,7 +20,10 @@ Every adapter name is resolved through `registry()`.
 
 `read(seed)` returns a `Listing`: events normalized to what the extraction
 prompt returns (title, local-wall-clock `date`/`end_at`, venue, location,
-description, categories, tags, source_url) — so they go through event-find's
+description, categories, tags, source_url; optionally `image_url` +
+`image_alt` — `feed_image` — when the feed carries a picture with its alt
+text: Tribe's `image`; Showare gives only a file name, no URL, so none) — so
+they go through event-find's
 one upsert / cancellation / vanish / source-health / judgement path — plus
 `page`, the text those quote-check against. Anything short of the whole
 listing raises `AdapterError`, as does a reader that raises anything else or
@@ -196,6 +199,15 @@ def html_text(value) -> Optional[str]:
     return "\n".join(line for line in lines if line) or None
 
 
+def feed_image(url, alt) -> dict:
+    """An event row's optional picture, as the feed gives it: `image_url` +
+    `image_alt` (both kept by upsert only when engine/images accepts them —
+    an https picture with alt text that describes it), {} with no URL."""
+    if not isinstance(url, str) or not url.strip():
+        return {}
+    return {"image_url": url.strip(), "image_alt": html_text(alt)}
+
+
 def local_time(utc_value, local_value) -> Optional[str]:
     """A feed time as the extraction's form: town-local wall clock, no offset."""
     if isinstance(utc_value, str) and utc_value.strip():
@@ -244,7 +256,9 @@ def _tribe_event(row: dict) -> dict:
     end = local_time(row.get("utc_end_date"), row.get("end_date"))
     if row.get("all_day") is True and start:   # 00:00–23:59:59 is no published time
         start, end = start[:10], None
+    image = row.get("image") if isinstance(row.get("image"), dict) else {}   # else `false`
     return {
+        **feed_image(image.get("url"), image.get("alt")),
         "title": html_text(row.get("title")),
         "date": start,
         "end_at": end,

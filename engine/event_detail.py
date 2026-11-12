@@ -3,9 +3,12 @@
 event-find and event-reconcile only see the seed's listing page. After the
 operator approves an event, the `read-detail` workqueue action (skill
 `event-read-detail`) reads the event's own page once — Firecrawl markdown +
-one Codex call — and stores what it states: accessibility notes, and the
-price and ticket/RSVP link (shipped via engine/event_tickets.py). A new
-field is a key in DETAIL_FIELDS and a column in `_extract`.
+one Codex call — and stores what it states: accessibility notes, the
+price and ticket/RSVP link (shipped via engine/event_tickets.py), and an
+age restriction (21+ / all ages, quote-checked like the price). A new
+field is a key in DETAIL_FIELDS and a column in `_extract`. The same scrape
+brings the page's HTML: its picture (JSON-LD Event `image`, og:image — with
+alt text from the page, engine/images.page_image) replaces a listing card's.
 
 Accessibility is a differentiator, but a wrong claim does harm. The LLM only
 picks sentences; a sentence is kept only if it is on the page (quote check)
@@ -35,11 +38,11 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from engine import autonomy, event_cancel, event_provenance, time_plausibility
+from engine import autonomy, event_cancel, event_provenance, images, time_plausibility
 from engine.derive_helpers import iso_utc_now, seed_name_of
-from engine.event_extract import codex_exec, firecrawl_markdown
+from engine.event_extract import codex_exec, firecrawl_page
 from engine.event_provenance import canon_url as _canon
-from engine.event_tickets import price_kind
+from engine.event_tickets import age_restriction, price_kind
 from engine.page_extract import (MD_EMPHASIS, PAGE_URL, find_quote, join_quotes, normalize,
                                  parse_object)
 
@@ -77,6 +80,12 @@ DETAIL_FIELDS = {
         "buy tickets, RSVP or register for this event (a ticketing or "
         "registration page, or this event's own page). Never a site or venue "
         "homepage. null if there is none"
+    ),
+    "age_quote": (
+        "the sentence or phrase copied word for word from the page that states "
+        "who may attend this event by age: an age limit (21+, 18 and over, adults "
+        "only) or that all ages are welcome. null if the page does not say. Never "
+        "infer it from the venue (a bar) or the kind of event"
     ),
 }
 
@@ -138,6 +147,26 @@ def ticket_price(quote, page: str) -> Optional[str]:
 
 
 _SENTENCE_END = re.compile(r"[!?;]|\.(?!\d)")
+
+
+def age_of(quote, page: str) -> Optional[str]:
+    """'adults_only' | 'all_ages' when `quote` is on `page` and states it
+    (engine/event_tickets.age_restriction) — and so does the whole page
+    sentence around it ("21+" of "All ages until 9pm, 21+ after" says
+    neither). None otherwise."""
+    if not isinstance(quote, str):
+        return None
+    norm_page = normalize(page)
+    found = find_quote(MD_EMPHASIS.sub("", quote), norm_page, min_chars=3)
+    if not found or len(found.text) > PRICE_MAX:
+        return None
+    kind = age_restriction(found.text)
+    if kind is None:
+        return None
+    start = max((m.end() for m in _SENTENCE_END.finditer(norm_page, 0, found.pos)), default=0)
+    end = _SENTENCE_END.search(norm_page, found.pos + len(found.key))
+    return kind if age_restriction(norm_page[start:end.start() if end else None]) == kind \
+        else None
 _HOMEPAGE_PATH = re.compile(r"/?(?:(?:home|index|default)(?:\.\w+)?/?)?", re.IGNORECASE)
 
 
@@ -191,7 +220,18 @@ def _extract(parsed: dict, page: str, seeds: set[str]) -> dict:
         "accessibility_notes": accessibility_notes(parsed.get("accessibility_quotes"), page),
         "price": ticket_price(parsed.get("price_quote"), page),
         "rsvp_url": ticket_url(parsed.get("ticket_url"), page, seeds),
+        "age_restriction": age_of(parsed.get("age_quote"), page),
     }
+
+
+def _record_image(conn, event: dict, image: Optional[images.Image]) -> dict:
+    """The event's own page's picture replaces a listing card's or a feed's
+    (engine/images: the page is the best source). {} when it offers none."""
+    if not image:
+        return {}
+    conn.execute("UPDATE events SET image_url = ?, image_alt = ? WHERE event_uid = ?",
+                 (image.url, image.alt, event["event_uid"]))
+    return {"image_url": image.url, "image_alt": image.alt}
 
 
 def _record(conn, event: dict, status: str, url: Optional[str], fields: dict) -> None:
@@ -219,7 +259,7 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
     """Read `event`'s detail page once and store what it states. A failed
     fetch or LLM call is `retry` (nothing recorded) unless `final_attempt`,
     when it is recorded as `failed` so the event can go on without it."""
-    fetch = fetch or (lambda u: firecrawl_markdown(u, timeout_s=FETCH_TIMEOUT_S))
+    fetch = fetch or (lambda u: firecrawl_page(u, timeout_s=FETCH_TIMEOUT_S))
     llm = llm or codex_exec
     url = event.get("source_url")
     canon = _canon(url)
@@ -240,9 +280,12 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         return DetailResult("already-read")
 
     try:
-        ok, markdown, err = fetch(url)
+        # (ok, markdown, error[, {"html", "metadata"}]) — the page's image is
+        # read from its HTML/metadata when the fetch gives them.
+        ok, markdown, err, *extra = fetch(url)
     except TimeoutError as e:  # the Firecrawl token bucket stayed empty
-        ok, markdown, err = False, "", str(e)
+        ok, markdown, err, extra = False, "", str(e), []
+    page = extra[0] if extra and isinstance(extra[0], dict) else {}
     disagreed = event_provenance.detail_disagreements(conn, event, markdown) \
         if ok and judge_page else []
     if disagreed:
@@ -268,6 +311,8 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         return DetailResult("retry", error=err)
     fields = _extract(parsed, markdown, seeds)
     _record(conn, event, "read", url, fields)
+    fields.update(_record_image(conn, event, images.page_image(
+        page.get("html"), page.get("metadata"), url, event.get("title") or event.get("name"))))
     cache_page(event["event_uid"], markdown)
     return DetailResult("read", fields=fields)
 

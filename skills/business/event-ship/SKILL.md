@@ -103,7 +103,34 @@ accessibility notes, and the venue only when every sibling with a resolved
 venue shares it — from the richest sibling (full-body PATCH + GET verify; a
 failure is a failed `series-fill` activity, the event stays shipped). Date,
 times, slug, title, price/ticket line and cancellation marks never copy.
-TownLoops has no event image field, so images aren't shared.
+Images aren't shared between occurrences.
+
+## Image
+
+`events.image_url` + `events.image_alt` go out as `image_url` + `image_alt`
+(TownLoops fetches the picture server-side) only as a pair: an image with no
+alt text from its source is never sent (TownLoops: "if you can't say what is
+in the picture, send no picture"). Where it comes from, best first: the event's
+own page (`event-read-detail`), an adapter's feed row, the listing card
+(`engine/images`). On an already-live row it only fills: sent only when live
+has no `image_path` of its own — never replacing a curator's picture, never
+re-sent — and never part of a change submission (a published row's blank
+picture is a fill-blank PATCH). A failed server fetch is TownLoops' warning,
+not a verify mismatch. No venue fallback is sent: TownLoops already shows the
+venue's picture on an event with none (`resolved_image_path`), and copying it
+would make the venue's photo the event's own and block a real one later.
+`image_path` is never sent (the agent hosts nothing).
+
+## Typed fields
+
+Sent alongside the ticket line, each only when the source states it
+(`engine/event_tickets`): `price_kind`/`price_min_cents`/`price_max_cents` from
+`events.price` when its wording is unambiguous (free → `free`; "$15" → `paid`
+1500; "$10–$20" → `paid` 1000–2000; two ticket types, free-for-some, donation,
+sold out → nothing, TownLoops keeps `unknown`); `is_all_day: true` for a
+date-only start; `age_restriction` from `event-read-detail`'s quote-checked
+age. On a live row each fills only where live states nothing (`unknown`,
+`unrestricted`, not all-day at the same start), GET-verified.
 
 ## Accessibility notes
 
@@ -116,8 +143,9 @@ like dropped tags (full-body PATCH + GET verify, else flagged).
 
 ## Ticket / price info
 
-TownLoops has no ticket fields, so `events.price` / `events.rsvp_url` (from
-`event-read-detail`) ship as (`engine/event_tickets.py`):
+TownLoops has no ticket-link field, so `events.price` / `events.rsvp_url` (from
+`event-read-detail`) also ship as (`engine/event_tickets.py`; the typed price is
+above):
 
 - **Tags** — a stated-free event (free, $0) gets `free`; a stated price, sold
   out notice or suggested donation drops `free` from the create body. No price

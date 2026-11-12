@@ -118,7 +118,11 @@ def shipped_sibling(conn: sqlite3.Connection, event: dict) -> Optional[dict]:
 # Fields one copy of an event can lend another (groups fill together).
 _LENDABLE = (("description",), ("end_at", "end_at_local", "end_at_utc"),
              ("venue_name", "venue_raw"), ("location", "location_raw"), ("source_url",),
-             ("accessibility_notes",), ("price",), ("rsvp_url",), ("image_url",))
+             ("accessibility_notes",), ("price",), ("rsvp_url",), ("image_alt", "image_url"),
+             ("age_restriction",))
+# Groups lent whole: a picture goes with its own alt text (engine/images), so
+# a url-only image (no alt) is replaced, never paired with another's alt.
+_LENT_WHOLE = {"image_alt"}
 
 
 def best_of_copies(conn: sqlite3.Connection, event: dict) -> dict[str, str]:
@@ -149,7 +153,8 @@ def best_of_copies(conn: sqlite3.Connection, event: dict) -> dict[str, str]:
         if donor is None:
             continue
         for col in group:
-            if event.get(col) in (None, "") and donor.get(col) not in (None, ""):
+            if (event.get(col) in (None, "") or lead in _LENT_WHOLE) \
+                    and donor.get(col) not in (None, ""):
                 sets[col] = donor[col]
         filled[lead] = donor["event_uid"]
     if sets:

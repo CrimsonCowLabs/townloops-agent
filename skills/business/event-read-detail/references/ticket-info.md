@@ -1,6 +1,6 @@
 # Ticket / price info — what counts
 
-TownLoops has no ticket fields (decided; don't propose them). The detail-page
+TownLoops has no ticket-link field (decided; don't propose one); a stated price also goes out typed (`price_kind`, see event-ship). The detail-page
 pass stores the page's own price wording in `events.price` and the ticket/RSVP
 link in `events.rsvp_url`; event-ship turns them into the `free` tag or one
 ticket line atop the description (`engine/event_tickets.py`).

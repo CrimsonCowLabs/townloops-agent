@@ -24,7 +24,7 @@ from dateutil.parser import isoparse as _isoparse
 
 from engine import blocked_page
 from engine import categories as _cats
-from engine import event_dedup
+from engine import event_dedup, images
 from engine.derive_helpers import seed_ref
 from engine.discovery import (
     FIRECRAWL_TIMEOUT_S,
@@ -170,9 +170,11 @@ def published_times(evt: dict, page: str) -> dict:
     return {**evt, "date": date, "end_at": end_at}
 
 
-def _firecrawl_scrape(url: str, timeout_s: int) -> tuple[bool, str, str, dict]:
+def _firecrawl_scrape(url: str, timeout_s: int,
+                     formats: tuple[str, ...] = ("markdown",)) -> tuple[bool, str, str, dict]:
     """One Firecrawl scrape: (ok, markdown, error, the target page's metadata
-    — `statusCode`, `title`). Firecrawl answers 200 whatever the target
+    — `statusCode`, `title`, og tags; with "rawHtml" in `formats`, the page's
+    HTML as `metadata["rawHtml"]`). Firecrawl answers 200 whatever the target
     returned; the target's own status is in the metadata."""
     firecrawl_bucket.wait()
     try:
@@ -181,7 +183,7 @@ def _firecrawl_scrape(url: str, timeout_s: int) -> tuple[bool, str, str, dict]:
             headers=_firecrawl_headers(),
             json={
                 "url": url,
-                "formats": ["markdown"],
+                "formats": list(formats),
                 "waitFor": 3500,
             },
             timeout=timeout_s + 5,
@@ -195,7 +197,9 @@ def _firecrawl_scrape(url: str, timeout_s: int) -> tuple[bool, str, str, dict]:
     except ValueError:
         return (False, "", "firecrawl returned non-JSON", {})
     data = body.get("data") or {}
-    meta = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+    meta = dict(data["metadata"]) if isinstance(data.get("metadata"), dict) else {}
+    if isinstance(data.get("rawHtml"), str):
+        meta["rawHtml"] = data["rawHtml"]
     return (True, data.get("markdown") or "", "", meta)
 
 
@@ -210,6 +214,18 @@ def firecrawl_markdown(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[
     if not ok:
         return (False, "", err)
     return (bool(md), md, "" if md else "empty markdown")
+
+
+def firecrawl_page(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[bool, str, str, dict]:
+    """`firecrawl_markdown` plus what the markdown loses, for an event's own
+    page (event-read-detail): (ok, markdown, error, {"html", "metadata"}) —
+    the raw HTML carries the JSON-LD and og tags its image is read from
+    (engine/images.page_image). Same one scrape."""
+    ok, md, err, meta = _firecrawl_scrape(url, timeout_s, ("markdown", "rawHtml"))
+    if not ok:
+        return (False, "", err, {})
+    html = meta.pop("rawHtml", None)
+    return (bool(md), md, "" if md else "empty markdown", {"html": html, "metadata": meta})
 
 
 def firecrawl_listing(url: str, timeout_s: int = FIRECRAWL_TIMEOUT_S) -> tuple[bool, str, str]:
@@ -359,6 +375,14 @@ def _legacy_content_hash(evt: dict, category: str | None) -> str:
     return _hash({**_source_fields(evt), "category": category or ""})
 
 
+def _fill_image(conn: sqlite3.Connection, uid: str, evt: dict) -> None:
+    """The extracted image, unless the row already has one with alt text."""
+    image = images.candidate(evt.get("image_url"), evt.get("image_alt"), evt.get("title"))
+    if image:
+        conn.execute("UPDATE events SET image_url = ?, image_alt = ? "
+                     "WHERE event_uid = ? AND image_alt IS NULL", (*image, uid))
+
+
 def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
     """Insert or update an event. Returns 'inserted' | 'updated' | 'unchanged'.
     A new row is linked to its canonical event (engine/event_dedup), which may
@@ -366,7 +390,10 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
 
     Categories and tags are the extractor's classification, not source
     content: they don't count as a change, and an existing row only gains
-    them where it has none (an operator's or a previous pass's choice stays)."""
+    them where it has none (an operator's or a previous pass's choice stays).
+    An image (`image_url` + `image_alt` from an adapter or the listing card,
+    engine/images.candidate) is the same: never in the hash, kept only while
+    the row has no image with alt text."""
     now = _iso_utc_now()
     uid = event_uid(seed_name, evt.get("title") or "", evt.get("date") or "")
     chash = content_hash(evt)
@@ -408,10 +435,12 @@ def upsert_event(conn: sqlite3.Connection, seed_name: str, evt: dict) -> str:
                 now, seed_ref(seed_name),
             ),
         )
+        _fill_image(conn, uid, evt)
         # Copies of this event from other seeds share one canonical uid, and
         # only one copy goes on to the operator and ship.
         event_dedup.link(conn, uid)
         return "inserted"
+    _fill_image(conn, uid, evt)
     fill_classification = (
         "category_slug = CASE WHEN category_slugs IS NULL AND ? IS NOT NULL THEN ? "
         "  ELSE category_slug END, "

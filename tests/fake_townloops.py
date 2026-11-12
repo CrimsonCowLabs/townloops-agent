@@ -40,6 +40,17 @@ ignored, any other value — `""` included — is written, a `category_slug`
 not in `categories` (when given) clears the category, and a missing slug
 is a 404.
 
+Event images and typed fields (townloops #15/#16/#17, ADR 0010): `image_url`
+or `image_path` without `image_alt` is a 422; an `image_url` is "fetched"
+(recorded in `fetched_images`) and stored as an `image_path` under
+`/static/uploads/events/`, alt with it — a URL in `image_fetch_fails` is the
+server's `image_fetch_*` warning: no picture, the write still succeeds (a
+PATCH keeps the picture it had). The GET shows `image_path`/`image_alt`,
+never `image_url`. `is_all_day`, `price_kind`/`price_min_cents`/
+`price_max_cents` and `age_restriction` are stored as sent and read back with
+the server's defaults (`false`, `unknown`, `unrestricted`); amounts with a
+non-`paid` kind are a 422, and an equal min/max is stored as a fixed price.
+
 Moderation (autonomous mode): `event_status` is the key's mode — events
 create as `published` (a key with `event.publish`, the default) or
 `pending` (an `api_ingest` key); `entity_status` does the same for entities
@@ -63,7 +74,13 @@ EVENT_PATCH_FIELDS = {
     "title", "description", "start_at", "end_at", "venue_name", "venue_id",
     "category_slugs", "business_id", "source_url", "is_featured",
     "accessibility_notes", "tags",
+    "is_all_day", "price_kind", "price_min_cents", "price_max_cents", "age_restriction",
 }
+# The event resource's typed fields as the server defaults them.
+EVENT_DEFAULTS = {"is_all_day": False, "price_kind": "unknown", "price_min_cents": None,
+                  "price_max_cents": None, "age_restriction": "unrestricted",
+                  "image_path": None, "image_alt": None}
+_IMAGE_FIELDS = ("image_url", "image_path", "image_alt")
 
 
 class FakeAPI:
@@ -71,9 +88,12 @@ class FakeAPI:
 
     def __init__(self, events=None, venues=None, ignore=(), create_drops=(),
                  entities=None, categories=None, series=None,
-                 event_status="published", entity_status=None):
-        self.events = {e["slug"]: {"series_slug": None, "series_id": None, **copy.deepcopy(e)}
+                 event_status="published", entity_status=None, image_fetch_fails=()):
+        self.events = {e["slug"]: {"series_slug": None, "series_id": None, **EVENT_DEFAULTS,
+                                   **copy.deepcopy(e)}
                        for e in (events or [])}
+        self.image_fetch_fails = set(image_fetch_fails)
+        self.fetched_images: list[str] = []
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
         self.series = {s["slug"]: {"is_active": True, "cadence_text": None, "town": "slt",
                                    "description": None, **s} for s in (series or [])}
@@ -153,13 +173,16 @@ class FakeAPI:
                 row["status"] = self.entity_status
             table[slug] = row
             return copy.deepcopy(row)
+        _check_event_body(payload)
         row = {"id": len(self.events) + 1, "slug": slug, "town_slug": "slt",
                "venue_id": None, "venue_slug": None, "category_slugs": [], "tags": [],
                "status": self.event_status, "series_slug": None, "series_id": None,
-               "ingest_ref": ref}
+               "ingest_ref": ref, **EVENT_DEFAULTS}
         for k in EVENT_PATCH_FIELDS - {"venue_id", "venue_name"}:
             if k in payload and k not in self.create_drops:
                 row[k] = payload[k]
+        _normalize_price(row)
+        self._attach_image(row, payload)
         self._bind_venue(row, payload.get("venue_id"), payload.get("venue_name"),
                          payload.get("venue_ingest_ref"))
         row["category_slugs"] = sorted(row["category_slugs"])
@@ -167,6 +190,19 @@ class FakeAPI:
         self._auto_link(row)
         self.events[row["slug"]] = row
         return copy.deepcopy(row)
+
+    def _attach_image(self, row, payload):
+        """The server's image write: a path is taken as is; a URL is fetched
+        (a failed fetch is a warning — nothing changes)."""
+        if payload.get("image_path"):
+            row["image_path"], row["image_alt"] = payload["image_path"], payload["image_alt"]
+        elif payload.get("image_url"):
+            self.fetched_images.append(payload["image_url"])
+            if payload["image_url"] not in self.image_fetch_fails:
+                row["image_path"] = f"/static/uploads/events/{row['slug']}-{len(self.fetched_images)}.jpg"
+                row["image_alt"] = payload["image_alt"]
+        elif payload.get("image_alt") and row.get("image_path"):
+            row["image_alt"] = payload["image_alt"]   # alt alone corrects the alt
 
     def ref_holder(self, resource, ref):
         """Slug of the row holding `ref` in the town (a merged-away row's
@@ -260,14 +296,18 @@ class FakeAPI:
         self._set_ref(resource, slug, row, payload.get("ingest_ref"))
         if "title" in payload and payload["title"] is not None and len(payload["title"]) < 3:
             raise RuntimeError("[422 validation_error] title too short")
+        _check_event_body(payload)
         body = {k: v for k, v in payload.items()
                 if k in EVENT_PATCH_FIELDS and k not in self.ignore and v is not None}
+        if not self.ignore & set(_IMAGE_FIELDS):
+            self._attach_image(row, payload)
         self._bind_venue(row, body.pop("venue_id", None), body.pop("venue_name", None))
         for k in ("category_slugs", "tags"):
             if k in body:
                 row[k] = sorted(body.pop(k) if k == "category_slugs"
                                 else (_slug(t) for t in body.pop(k)))
         row.update(body)
+        _normalize_price(row)
         return copy.deepcopy(row)
 
     def _update_entity(self, resource, slug, payload):
@@ -334,6 +374,25 @@ class FakeAPI:
 
     def creates(self):
         return [c[2] for c in self.calls if c[0] == "POST"]
+
+
+def _check_event_body(payload):
+    """EventImageFields + the price shape (townloops `event_price.normalize`)."""
+    if (payload.get("image_url") or payload.get("image_path")) \
+            and not (payload.get("image_alt") or "").strip():
+        raise TownloopsError(422, "validation_error",
+                             "image_alt is required when image_url or image_path is supplied")
+    kind = payload.get("price_kind")
+    amounts = (payload.get("price_min_cents"), payload.get("price_max_cents"))
+    if kind in ("unknown", "free") and any(a is not None for a in amounts):
+        raise TownloopsError(422, "validation_error", f"price_kind {kind!r} carries no amounts")
+    if payload.get("age_restriction") not in (None, "unrestricted", "all_ages", "adults_only"):
+        raise TownloopsError(422, "validation_error", "bad age_restriction")
+
+
+def _normalize_price(row):
+    if row.get("price_max_cents") is not None and row["price_max_cents"] == row.get("price_min_cents"):
+        row["price_max_cents"] = None
 
 
 def _no_series_writes(resource):

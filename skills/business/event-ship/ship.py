@@ -31,6 +31,12 @@ any other field) is submitted as a pending event carrying its source_url, for
 the TownLoops merge flow, never PATCHed; a change that only fills a blank live
 field is PATCHed live like any fill-blank. Blank fields are first filled from the best other copy of the event
 (engine/event_dedup.best_of_copies).
+
+The event's picture (`image_url` + its source's `image_alt`, engine/images)
+and TownLoops' typed fields (price, all-day, age — engine/event_tickets) go
+out with a create; on a live row each only fills what it states nothing for
+(`_blank_fills`) — a picture is never replaced and never part of a change
+submission.
 """
 
 from __future__ import annotations
@@ -41,7 +47,7 @@ from typing import Any, Optional
 
 from engine import autonomy
 from engine import categories as cats
-from engine import event_dedup, event_detail, event_state, event_tickets, time_plausibility
+from engine import event_dedup, event_detail, event_state, event_tickets, images, time_plausibility
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
     seed_name_of,
@@ -92,6 +98,51 @@ def _ticket_line(row) -> Optional[str]:
     return event_tickets.ticket_line(row.get("price"), row.get("rsvp_url"))
 
 
+def _image_fields(row) -> dict:
+    """`image_url` + `image_alt` when the event has a picture with alt text
+    (engine/images) — TownLoops fetches it. None of the venue's: TownLoops
+    already shows the venue's picture on an event with none of its own."""
+    image = images.candidate(row.get("image_url"), row.get("image_alt"))
+    return {"image_url": image.url, "image_alt": image.alt} if image else {}
+
+
+def _typed_fields(row) -> dict:
+    """TownLoops' typed fields the source states: price (only when its
+    wording is unambiguous, engine/event_tickets.typed_price), all-day for a
+    date-only start, a quote-checked age restriction."""
+    out = dict(event_tickets.typed_price(row.get("price")))
+    if row.get("date_utc") and not has_clock_time(row["date_utc"]):
+        out["is_all_day"] = True
+    if row.get("age_restriction") in ("adults_only", "all_ages"):
+        out["age_restriction"] = row["age_restriction"]
+    return out
+
+
+# What a live event reads as when nothing was stated (the API's defaults).
+_LIVE_UNSET = {"price_kind": ("unknown",), "age_restriction": ("unrestricted",),
+               "is_all_day": (False,)}
+_PRICE_FIELDS = ("price_kind", "price_min_cents", "price_max_cents")
+_IMAGE_FIELDS = ("image_url", "image_alt")
+
+
+def _blank_fills(live: dict, sent: dict) -> dict:
+    """The image and typed fields of `sent` that only fill `live`: a picture
+    where it has none of its own (`image_path`), a price, an age or all-day
+    where it states nothing — and all-day only when both start at the same
+    instant. A set value is never replaced."""
+    out: dict[str, Any] = {}
+    if sent.get("image_url") and _blank_on(live, "image_url"):
+        out.update({k: sent[k] for k in _IMAGE_FIELDS})
+    if sent.get("price_kind") and _blank_on(live, "price_kind"):
+        out.update({k: sent[k] for k in _PRICE_FIELDS if k in sent})
+    if sent.get("age_restriction") and _blank_on(live, "age_restriction"):
+        out["age_restriction"] = sent["age_restriction"]
+    if (sent.get("is_all_day") and _blank_on(live, "is_all_day")
+            and _to_dt(sent.get("start_at")) == _to_dt(live.get("start_at"))):
+        out["is_all_day"] = True
+    return out
+
+
 def _event_payload(row) -> dict:
     """Times go out as UTC only — a naive local `date`/`end_at` is never sent.
     Categories go as `category_slugs` — create has no singular field."""
@@ -115,6 +166,8 @@ def _event_payload(row) -> dict:
         payload["source_url"] = row["source_url"]
     if row.get("accessibility_notes"):
         payload["accessibility_notes"] = row["accessibility_notes"]
+    payload.update(_image_fields(row))
+    payload.update(_typed_fields(row))
     return payload
 
 
@@ -428,6 +481,10 @@ def _submit_change(client, conn, event: dict, meta: dict,
     payload.update(submit)
     if "start_at" in submit and not submit.get("end_at"):
         payload.pop("end_at", None)   # never an end that may fall before the new start
+    # A picture is never part of a change: the published row's own is kept,
+    # a blank one was filled above.
+    for k in _IMAGE_FIELDS:
+        payload.pop(k, None)
     # Its own row, never the event's ref — one per change (the values it
     # submits): a retry 409s and binds, a later, different change is new.
     payload["ingest_ref"] = change_ref = change_ref_for(uid, submit)
@@ -513,7 +570,11 @@ def _fills_only(live: dict, field: str, value: Any) -> bool:
 def _blank_on(live: dict, field: str) -> bool:
     if field in ("venue_id", "venue_name"):
         return not (live.get("venue_id") or live.get("venue_slug") or live.get("venue_name"))
-    return live.get(field) in (None, "", [])
+    if field in _IMAGE_FIELDS:   # the GET shows the stored picture, not a URL
+        return not live.get("image_path")
+    if field in _PRICE_FIELDS:   # the three are one stated price
+        return live.get("price_kind") in (None, "", *_LIVE_UNSET["price_kind"])
+    return live.get(field) in (None, "", [], *_LIVE_UNSET.get(field, ()))
 
 
 def _remember_change_submission(conn, event_uid: str, pending_slug: str, target_slug: str,
@@ -541,7 +602,9 @@ def _fill_live_event(client, conn, event: dict, live: dict, payload: dict) -> Op
     slug = live["slug"]
     line = _ticket_line(event)
     if ((payload.get("accessibility_notes") and "accessibility_notes" not in live)
-            or (line and "description" not in live)):
+            or (line and "description" not in live)
+            or (payload.get("image_url") and "image_path" not in live)
+            or any(k in payload and k not in live for k in _LIVE_UNSET)):
         # A source_url match is a list row; decide "blank" on the full row.
         try:
             live = client.get("events", slug) or live
@@ -588,6 +651,7 @@ def _fill_overrides(live: dict, payload: dict, event: Optional[dict] = None) -> 
             out[k] = merged
     if payload.get("venue_id") and not live.get("venue_id"):
         out["venue_id"] = payload["venue_id"]
+    out.update(_blank_fills(live, payload))
     return out
 
 
@@ -727,7 +791,8 @@ def _patch_live_event(client, conn, event: dict, meta: dict,
     from engine.live_patch import apply_event_patch
     changes = meta.get("changes") or {}
     if not ({"start_at", "venue"} & changes.keys()) and not (
-            event.get("accessibility_notes") or _ticket_line(event) or event.get("price")):
+            event.get("accessibility_notes") or _ticket_line(event) or event.get("price")
+            or _image_fields(event) or _typed_fields(event)):
         return meta["live_slug"]
     current = _read_live_target(client, conn, event, meta)
     if current is None:
@@ -770,7 +835,8 @@ def _note_unclearable_end(conn, event: dict, live_slug: str, live_end: Optional[
 def _reconcile_fill_overrides(event: dict, current: dict) -> dict[str, Any]:
     """The fills a reconcile-staged change brings to the live row: accessibility
     notes only when it has none, the ticket line on top of its description,
-    `free` added to (or dropped from) its tags by the stated price."""
+    `free` added to (or dropped from) its tags by the stated price, and a
+    picture / typed field only where live states none (`_blank_fills`)."""
     overrides: dict[str, Any] = {}
     notes = event.get("accessibility_notes")
     line = _ticket_line(event)
@@ -783,6 +849,8 @@ def _reconcile_fill_overrides(event: dict, current: dict) -> dict[str, Any]:
     tags = event_tickets.live_tags(list(current.get("tags") or []), event.get("price"))
     if tags != list(current.get("tags") or []):
         overrides["tags"] = tags
+    overrides.update(_blank_fills(current, {**_image_fields(event), **_typed_fields(event),
+                                            "start_at": event.get("date_utc")}))
     return overrides
 
 

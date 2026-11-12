@@ -252,7 +252,7 @@ def _skill(conn, monkeypatch, stub):
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "open_db", lambda: conn)
-    monkeypatch.setattr(event_detail, "firecrawl_markdown", stub.fetch)
+    monkeypatch.setattr(event_detail, "firecrawl_page", stub.fetch)
     monkeypatch.setattr(event_detail, "codex_exec", stub.llm)
     return mod
 

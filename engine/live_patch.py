@@ -38,6 +38,13 @@ _TIMES = ("start_at", "end_at")
 # Never in a PATCH body: the Ingest Ref is set once, by engine/ingest_ref.adopt
 # alone (a re-point is a 422), and isn't round-tripped.
 _NEVER_SENT = ("ingest_ref", "venue_ingest_ref")
+# Sent only as an override, never round-tripped (resending would re-fetch and
+# replace the picture): an image TownLoops fetches. The GET shows the stored
+# `image_path`, and a failed fetch is the server's warning, not a write that
+# didn't land — so they are not verified. The typed fields (`is_all_day`,
+# `price_*`, `age_restriction`) aren't round-tripped either (omitted = left
+# alone) but are verified like any other sent value.
+_SERVER_FETCHED = ("image_url", "image_alt")
 
 
 @dataclass
@@ -82,7 +89,7 @@ def verify_event(row: dict, body: dict) -> list[str]:
     write-only, so only a sent `venue_id` is checked."""
     out = []
     for k, sent in body.items():
-        if k in ("venue_name", "business_id"):
+        if k in ("venue_name", "business_id") or k in _SERVER_FETCHED:
             continue
         got = row.get(k)
         if k in _SETS:

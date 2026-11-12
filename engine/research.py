@@ -24,6 +24,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from engine import firecrawl_env
+from engine.images import is_generic_image, ld_images  # noqa: F401 — is_generic_image re-exported
 from engine.log import get_logger
 
 log = get_logger("research")
@@ -284,29 +285,10 @@ def detect_kind(html: str, url: str) -> tuple[Optional[str], float, list[str]]:
 
 # -------- image capture --------
 
-# Logos, icons and stand-ins are worse than no image: a null image_path
-# is a gap the operator sees, a generic one looks done.
-# Whole words only ("icon" not "silicon"), except "logo", which turns up
-# glued into names ("sitelogo.png", "/logos/").
-_GENERIC_IMAGE_RE = re.compile(
-    r"logo|placeholder|favicon|spacer|sprite|gravatar|"
-    r"(?<![a-z])(?:icons?|default|blank|pixel|no[-_]?image|coming[-_]?soon|missing|"
-    r"badges?|avatars?)(?![a-z])",
-    re.IGNORECASE,
-)
+# Logos and placeholders are dropped by engine/images.is_generic_image, the
+# one rule for every image the agent keeps.
 _IMG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
 _ATTR_RE = re.compile(r'(?<![-\w])(src|alt)=["\']([^"\']*)["\']', re.IGNORECASE)
-
-
-def is_generic_image(url: str, hint: str = "") -> bool:
-    """True for logos, icons, placeholders, avatars, SVG/ICO/GIF files and
-    data URIs — images that don't show the entity itself. `hint` is the
-    <img> alt text."""
-    p = urlparse(url)
-    if url.startswith("data:") or p.path.lower().endswith((".svg", ".ico", ".gif")):
-        return True
-    return bool(_GENERIC_IMAGE_RE.search(f"{p.hostname or ''}{p.path}")
-                or _GENERIC_IMAGE_RE.search(hint))
 
 
 def image_candidates(html: str, base_url: str) -> list[str]:
@@ -318,7 +300,7 @@ def image_candidates(html: str, base_url: str) -> list[str]:
     if og:
         found.append(og)
     for block in ld_json_blocks(html):
-        found.extend(_ld_images(block))
+        found.extend(ld_images(block))
     for tag in _IMG_RE.findall(html):
         attrs = {k.lower(): v for k, v in _ATTR_RE.findall(tag)}
         src = attrs.get("src")
@@ -329,25 +311,6 @@ def image_candidates(html: str, base_url: str) -> list[str]:
         url = urljoin(base_url, raw)
         if url.startswith("https://") and not is_generic_image(url) and url not in out:
             out.append(url)
-    return out
-
-
-def _ld_images(node: Any) -> list[str]:
-    """Every JSON-LD `image` value (string, {url}, or a list of either)."""
-    out: list[str] = []
-    if isinstance(node, list):
-        for child in node:
-            out.extend(_ld_images(child))
-    elif isinstance(node, dict):
-        v = node.get("image")
-        for item in v if isinstance(v, list) else [v]:
-            if isinstance(item, str):
-                out.append(item)
-            elif isinstance(item, dict) and isinstance(item.get("url"), str):
-                out.append(item["url"])
-        for key, child in node.items():
-            if key != "image":
-                out.extend(_ld_images(child))
     return out
 
 

@@ -1,6 +1,6 @@
 ---
 name: event-read-detail
-description: Read an approved event's own detail page once (Firecrawl + Codex) and store what it states — its accessibility notes, price and ticket/RSVP link, each checked against the page.
+description: Read an approved event's own detail page once (Firecrawl + Codex) and store what it states — its accessibility notes, price and ticket/RSVP link, age restriction and picture, each checked against the page.
 ---
 
 # event-read-detail
@@ -28,6 +28,17 @@ event-reconcile only see the seed's listing page; this reads the event's own
   is an http(s) link on the page and not a homepage or the seed's listing
   page. event-ship turns these into the `free` tag or one ticket line atop the
   description (`engine/event_tickets.py`, see event-ship).
+- `events.age_restriction` — `adults_only` (21+, 18 and over, adults only) or
+  `all_ages`, only from a quoted sentence on the page that states it — and the
+  whole page sentence around the quote must say the same ("all ages until 9,
+  21+ after" says neither). Never inferred from the venue (a bar) or the kind
+  of event. NULL → TownLoops keeps `unrestricted`.
+- `events.image_url` / `events.image_alt` — the page's picture: its JSON-LD
+  Event `image`, else its og:image, from the same scrape's HTML
+  (`engine/images.page_image`). Kept only with alt text the page gives
+  (og:image:alt, an ImageObject caption) that describes the picture — never the
+  event's title, "event image" or a file name — and never a logo/icon/
+  placeholder. It replaces a listing card's or feed's picture.
 - `detail_read_status` / `detail_read_url` / `detail_read_at` — the pass is
   recorded, so a page is read once per `source_url`, not every tick.
 
