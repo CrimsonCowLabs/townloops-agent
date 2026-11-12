@@ -146,6 +146,14 @@
       "prompt": "python /home/agent/.hermes/scripts/onboarding_summary.py"
     },
     {
+      "id": "town-analyst",
+      "name": "Daily analyst run (LLM turn: review yesterday, hunt sources, events, organisations, cross-reference + enrich, report; budgeted; time per town, rendered by bin/townloops-agent-add)",
+      "schedule": "20 9 * * *",
+      "skills": ["town-analyst"],
+      "deliver": "local",
+      "prompt": "Run today's analyst run for this town now: follow the town-analyst skill's run order from step 1 (town-report budget start) to step 8 (the report sent and budget finish). Work without asking questions; stop when the budget says exhausted; always finish the run."
+    },
+    {
       "id": "newsletter-compose",
       "name": "Sunday: compose the coming week's newsletter draft",
       "schedule": "0 8 * * 0",

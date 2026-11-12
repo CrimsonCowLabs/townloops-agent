@@ -60,7 +60,7 @@ class Settings:
     mode: str = SUPERVISED
     paused: bool = False
     entity_moderation: bool = True
-    max_pending: int = 100
+    max_pending: Optional[int] = None  # None: scaled from moderation throughput (pending_cap)
     reject_rate: float = 0.5           # circuit breaker: rejected share of recent outcomes
     reject_window: int = 20            # … over this many recent outcomes
     reject_min_outcomes: int = 10      # … once at least this many are in
@@ -103,7 +103,7 @@ def settings(profile: Optional[dict] = None) -> Settings:
         mode=AUTONOMOUS if profile.get("operating_mode") == AUTONOMOUS else SUPERVISED,
         paused=bool(a.get("paused")),
         entity_moderation=bool(a.get("entity_moderation", d.entity_moderation)),
-        max_pending=num(a, "max_pending", d.max_pending),
+        max_pending=num(a, "max_pending", None),
         reject_rate=num(breaker, "reject_rate", d.reject_rate, float),
         reject_window=num(breaker, "window", d.reject_window),
         reject_min_outcomes=num(breaker, "min_outcomes", d.reject_min_outcomes),
@@ -279,6 +279,28 @@ def pending_count(conn: sqlite3.Connection) -> int:
     return conn.execute("SELECT COUNT(*) FROM submissions WHERE status = 'pending'").fetchone()[0]
 
 
+# The pending cap, unless the profile sets `autonomy.max_pending`: a floor,
+# or this many times what the moderator decided over the last week — a
+# productive town isn't cut off at an arbitrary number (#64).
+PENDING_CAP_FLOOR = 100
+PENDING_CAP_FACTOR = 3
+PENDING_CAP_DAYS = 7
+
+
+def decided_recently(conn: sqlite3.Connection, days: int = PENDING_CAP_DAYS) -> int:
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat(timespec="seconds")
+    return conn.execute(
+        "SELECT COUNT(*) FROM submissions WHERE status IN ('published', 'rejected', 'merged') "
+        "AND decided_at >= ?", (since,)).fetchone()[0]
+
+
+def pending_cap(conn: sqlite3.Connection, s: Settings) -> int:
+    """How many of our submissions may be pending in TownLoops at once."""
+    if s.max_pending is not None:
+        return s.max_pending
+    return max(PENDING_CAP_FLOOR, PENDING_CAP_FACTOR * decided_recently(conn))
+
+
 def submission_gate(conn: sqlite3.Connection, s: Settings) -> Decision:
     """Whether a new submission may go to TownLoops now."""
     if not s.autonomous:
@@ -289,8 +311,12 @@ def submission_gate(conn: sqlite3.Connection, s: Settings) -> Decision:
     if c:
         return Decision("hold", "circuit-open", c)
     n = pending_count(conn)
-    if n >= s.max_pending:
-        return Decision("hold", "pending-cap", {"pending": n, "max_pending": s.max_pending})
+    cap = pending_cap(conn, s)
+    if n >= cap:
+        evidence = {"pending": n, "max_pending": cap}
+        if s.max_pending is None:
+            evidence["scaled_from"] = {"decided_7d": decided_recently(conn)}
+        return Decision("hold", "pending-cap", evidence)
     return Decision("submit", "gate-open", {"pending": n})
 
 

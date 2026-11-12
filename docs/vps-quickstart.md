@@ -315,17 +315,19 @@ with all the config files pre-filled.
 
 ```
 cd ~/workspace/townloops-agent
-./bin/townloops-agent-add YOUR-TOWN-SLUG                # supervised (dashboard)
-./bin/townloops-agent-add YOUR-TOWN-SLUG --autonomous   # or: autonomous (no dashboard)
+./bin/townloops-agent-add YOUR-TOWN-SLUG                # autonomous: the TownLoops moderation queue is the gate
+./bin/townloops-agent-add YOUR-TOWN-SLUG --supervised   # or: supervised (local dashboard approvals)
 ```
 
 Replace `YOUR-TOWN-SLUG` with your actual town's slug (like `slt` or
 `bozeman`). The command will:
 - Create a folder at `~/townloops-agents/YOUR-TOWN-SLUG/`
 - Copy in the docker-compose file, `.env`, `town-profile.yaml`, and the
-  repo's cron schedule
-- For `--autonomous`, also write a `docker-compose.override.yml` that keeps
-  the dashboard from starting
+  repo's cron schedule (with this town's own start time for the daily
+  analyst run — `analyst.schedule` in `town-profile.yaml` overrides it;
+  re-apply with `--rerender`)
+- For an autonomous town (the default), also write a
+  `docker-compose.override.yml` that keeps the dashboard from starting
 
 It ends by printing the remaining steps, including the one-time ChatGPT
 sign-in for this town's own Hermes runtime (`hermes auth add openai-codex`)
