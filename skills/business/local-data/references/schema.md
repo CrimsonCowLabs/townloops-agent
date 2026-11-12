@@ -9,7 +9,7 @@ hold JSON text. Log a direct edit with `local_data.py log --reason "…"`.
 A note is the comment the table's first migration gave the column; later
 migrations may have widened it (e.g. more status values) — `engine/migrations/` says.
 
-Tables: `ad_spots`, `agent_activity`, `agent_state`, `analyst_runs`, `autonomy_state`, `businesses`, `chat_messages`, `chat_read_state`, `communities`, `creators`, `discovery_candidates`, `enrichment_queue`, `event_seeds`, `event_workqueue`, `events`, `job_health`, `linked_events`, `listing_website_clears`, `newsletters`, `performers`, `post_counters`, `schema_version`, `source_runs`, `sponsors`, `submissions`, `venues`
+Tables: `ad_spots`, `agent_activity`, `agent_state`, `analyst_runs`, `autonomy_state`, `businesses`, `chat_messages`, `chat_read_state`, `communities`, `creators`, `discovery_candidates`, `discovery_checks`, `enrichment_queue`, `event_seeds`, `event_workqueue`, `events`, `job_health`, `linked_events`, `listing_website_clears`, `newsletters`, `performers`, `post_counters`, `schema_version`, `source_runs`, `sponsors`, `submissions`, `venues`
 
 ## ad_spots
 
@@ -279,6 +279,19 @@ Index `idx_discovery_verified`: (kind, first_seen_at)
 Unique `sqlite_autoindex_discovery_candidates_1`: (candidate_uid)
 
 Unique `sqlite_autoindex_discovery_candidates_2`: (town_slug, canonical_url, kind)
+
+## discovery_checks
+
+| column | type | not null | default | pk | note |
+|---|---|---|---|---|---|
+| key | TEXT |  |  | 1 |  |
+| checked_at | TEXT | yes |  |  |  |
+| outcome | TEXT |  |  |  |  |
+| detail | TEXT |  |  |  |  |
+
+Index `idx_discovery_checks_at`: (checked_at)
+
+Unique `sqlite_autoindex_discovery_checks_1`: (key)
 
 ## enrichment_queue
 

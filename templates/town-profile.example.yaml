@@ -137,3 +137,7 @@ discovery:
 #                              # verify verdict this recent; an older one (or one the CMO
 #                              # import copied in) is re-verified first
 # zip_codes: ["96150"]         # optional: a listed ZIP outside these is out of town
+
+# enrichment:
+#   retry_not_found_days: 14   # entity-live-sync researches an entity that came back
+#                              # `not-found` again after this many days

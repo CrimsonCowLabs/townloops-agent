@@ -50,13 +50,14 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
-from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Callable, Iterable, Optional
-from urllib.parse import urlparse
 
 from engine import discovery, listing_hosts
-from engine.derive_helpers import entity_richness, iso_utc_now, normalize_name
+from engine.live_index import (  # noqa: F401 — re-exported for callers
+    FUZZY_NAME_RATIO, SHARED_HOSTS, LiveIndex, LiveMatch, VenueIndex, _host, _shared_host,
+)
+from engine.derive_helpers import iso_utc_now, normalize_name
 
 
 KIND = "business"
@@ -64,7 +65,6 @@ KIND = "business"
 KINDS = {"business": "businesses", "community": "communities", "nonprofit": "communities",
          "venue": "venues"}
 VENUE = "venue"
-FUZZY_NAME_RATIO = 0.85
 OPERATOR_REASON = "operator"
 TOWNLOOPS_REASON = "townloops"
 # Rejections remembered by name across URLs.
@@ -72,151 +72,16 @@ _REMEMBERED = (OPERATOR_REASON, TOWNLOOPS_REASON)
 PROPOSED = ("new", "verified")
 _PROPOSED_SQL = "(" + ", ".join(f"'{s}'" for s in PROPOSED) + ")"
 
-# Hosts many businesses share: a website here identifies a business only by
-# its exact page, never by the host. Listing hosts (engine.listing_hosts)
-# are shared too — see _shared_host.
-SHARED_HOSTS = {
-    "facebook.com", "instagram.com", "tiktok.com", "x.com", "twitter.com",
-    "youtube.com", "linktr.ee", "sites.google.com", "google.com",
-}
-
-# --------------------------------------------------------------------------
-# Live dedup
-# --------------------------------------------------------------------------
-
-@dataclass
-class LiveMatch:
-    slug: str
-    name: str
-    reason: str
-    status: Optional[str] = None     # the live row's TownLoops status, when it has one
-
-
-def _shared_host(host: str) -> bool:
-    return host in SHARED_HOSTS or listing_hosts.is_listing_host(host)
-
-
-def _host(url: str) -> str:
-    host = urlparse(url).netloc.lower()
-    for prefix in ("www.", "m."):
-        if host.startswith(prefix):
-            host = host[len(prefix):]
-    return host
-
-
-class LiveIndex:
-    """The town's live businesses, indexed for candidate dedup. Works for
-    any live entity list; `kind` names it in match reasons. `venues`, when
-    given, is checked after the rows themselves: a candidate that is a live
-    venue is never proposed either."""
-
-    def __init__(self, rows: list[dict], kind: str = KIND,
-                 venues: Optional["LiveIndex"] = None):
-        self.rows = rows
-        self.kind = kind
-        self.venues = venues
-        self._by_url: dict[str, dict] = {}
-        self._by_site: dict[tuple[str, str], dict] = {}   # (host, path) → row
-        for r in sorted(rows, key=entity_richness):   # richest row wins a shared key
-            site = r.get("website")
-            if not site:
-                continue
-            canon = discovery.canonicalize_url(site)
-            self._by_url[canon] = r
-            host = _host(canon)
-            if host and not _shared_host(host):
-                self._by_site[(host, urlparse(canon).path or "/")] = r
-
-    @classmethod
-    def build(cls, rows: Iterable[dict], kind: str = KIND,
-              venues: Optional[Iterable[dict]] = None) -> "LiveIndex":
-        # A venue TownLoops rejected isn't a live venue.
-        vindex = None if venues is None else cls(
-            [v for v in venues if v.get("slug") and v.get("status") != "rejected"], "venue")
-        return cls([r for r in rows if r.get("slug")], kind, vindex)
-
-    @classmethod
-    def from_api(cls, client, kind: str = KIND) -> "LiveIndex":
-        return cls.build(client.paginate(KINDS[kind]), "business" if kind == KIND else "community",
-                         venues=client.paginate("venues"))
-
-    def match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
-        m = self._match(canonical_url, name)
-        if m or self.venues is None:
-            return m
-        v = self.venues._match(canonical_url, name)
-        if v is None:
-            return None
-        # Always `already-live`: a venue's own status says nothing about this candidate.
-        return LiveMatch(v.slug, v.name, f"matches live venue {v.slug}: {v.reason}")
-
-    def _match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
-        row = self._by_url.get(canonical_url)
-        if row:
-            return LiveMatch(row["slug"], row.get("name") or "",
-                             f"url matches live {self.kind} website", row.get("status"))
-        row = self._site_match(canonical_url)
-        if row:
-            return LiveMatch(row["slug"], row.get("name") or "",
-                             f"under live {self.kind} website {row.get('website')}",
-                             row.get("status"))
-        target = normalize_name(name or "")
-        if not target:
-            return None
-        best, best_rank = None, None
-        for r in self.rows:
-            ratio = SequenceMatcher(None, target, normalize_name(r.get("name") or "")).ratio()
-            if ratio < FUZZY_NAME_RATIO:
-                continue
-            rank = (ratio, entity_richness(r))
-            if best_rank is None or rank > best_rank:
-                best, best_rank = r, rank
-        if best is None:
-            return None
-        return LiveMatch(best["slug"], best.get("name") or "",
-                         f"name fuzzy-matches live {self.kind} {best.get('name')!r} "
-                         f"({best_rank[0]:.2f})", best.get("status"))
-
-
-    def _site_match(self, canonical_url: str) -> Optional[dict]:
-        """The live business whose website contains this page: same host, and
-        the page sits under the website's path. A chain's per-location
-        website (`aleworx.com/stateline`) covers only that location's pages."""
-        host = _host(canonical_url)
-        if _shared_host(host):
-            return None
-        path = urlparse(canonical_url).path or "/"
-        best, best_len = None, -1
-        for (h, site_path), row in self._by_site.items():
-            if h != host:
-                continue
-            if site_path == "/" or path == site_path or path.startswith(site_path + "/"):
-                if len(site_path) > best_len:
-                    best, best_len = row, len(site_path)
-        return best
-
-
-class VenueIndex:
-    """A venue candidate's live dedup: the town's live venues, then its live
-    businesses and communities (`orgs`) — the same match rules as
-    LiveIndex."""
-
-    def __init__(self, venues: LiveIndex, orgs: LiveIndex):
-        self.rows, self.venues, self._v, self._orgs = venues.rows, None, venues, orgs
-
-    def match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
-        m = self._v.match(canonical_url, name)
-        if m:
-            return m
-        o = self._orgs.match(canonical_url, name)
-        return o and LiveMatch(o.slug, o.name,
-                               f"matches live organisation {o.slug}: {o.reason}")
+# Live dedup: the one live-match module (engine/live_index) — website/path
+# and name ≥ FUZZY_NAME_RATIO, the same rules every create path uses.
 
 
 def live_index(client, kind: str = KIND):
     """The live dedup index for a candidate `kind` (read from TownLoops)."""
     if kind != VENUE:
-        return LiveIndex.from_api(client, kind)
+        return LiveIndex.build(client.paginate(KINDS[kind]),
+                               "business" if kind == KIND else "community",
+                               venues=client.paginate("venues"))
     venues = [v for v in client.paginate("venues") if v.get("status") != "rejected"]
     orgs = [*client.paginate("businesses"), *client.paginate("communities")]
     return VenueIndex(LiveIndex.build(venues, VENUE),

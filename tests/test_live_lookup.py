@@ -472,9 +472,11 @@ class TestShipEntityLookup:
     @pytest.mark.usefixtures("refs_everywhere")
     def test_ingest_ref_taken_binds_to_the_slug_it_names(self, ship, conn, monkeypatch):
         """The lookup misses (a stale read); the create's 409 names the row —
-        bound with no second lookup, then synced."""
+        bound with no second lookup, then synced. (Renamed live, so the
+        live index's name match misses too.)"""
         ref = ingest_ref.ref_for("v-uid")
-        api = FakeAPI(venues=[{"id": 42, "slug": "riva", "name": "Riva Grill", "ingest_ref": ref}])
+        api = FakeAPI(venues=[{"id": 42, "slug": "riva", "name": "Lakeside Supper Club",
+                               "ingest_ref": ref}])
         real_list = api.list
         monkeypatch.setattr(api, "list", lambda r, **p: [] if "ingest_ref" in p else real_list(r, **p))
         self._venue(conn, phone="530-555-0100")
@@ -484,7 +486,7 @@ class TestShipEntityLookup:
         assert json.loads(row["extra_json"])["live_id"] == 42      # from the sync's read
         assert api.venues["riva"]["phone"] == "530-555-0100"
         post = next(i for i, c in enumerate(api.calls) if c[0] == "POST")
-        assert api.calls[post - 1] == ("GET", "venues", ref)     # the lookup, before it
+        assert ("GET", "venues", ref) in api.calls[:post]        # the lookup, before it
 
     @pytest.mark.usefixtures("refs_everywhere")
     def test_found_by_ref_under_a_renamed_slug_is_repointed(self, ship, conn):

@@ -229,15 +229,17 @@ class TestSkips:
         assert entity_sync.sync_entity(api, conn, "venue", "v-uid").status == "skipped"
         assert api.calls == []
 
-    def test_live_mirror_is_never_pushed(self, conn):
-        """A mirror's local image is an operator proposal (image-proposed)."""
+    def test_live_mirror_sends_only_its_fills(self, conn):
+        """A mirror's found image fills live's blank (#64); the values it
+        copied from live are never sent back."""
         from engine.derive_helpers import mirror_live_entity
         api = FakeAPI(venues=[live_venue()])
         uid = mirror_live_entity(conn, "venue", live_venue())
+        assert entity_sync.sync_entity(api, conn, "venue", uid).status == "skipped"
         ee.fill_blanks(conn, "venue", uid, {"image_path": "https://riva.example/hero.jpg"},
                        "image-proposed")
-        assert entity_sync.sync_entity(api, conn, "venue", uid).status == "skipped"
-        assert api.calls == []
+        res = entity_sync.sync_entity(api, conn, "venue", uid)
+        assert res.status == "synced" and res.pushed == ["image_path"]
 
     def test_never_shipped_entity_is_left_to_event_ship(self, conn):
         api = FakeAPI()

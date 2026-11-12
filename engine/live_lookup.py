@@ -15,7 +15,8 @@ without refs): an event is looked up by slug
 occurrences on the same town-local date (`?series=` + the day — the
 strongest "already live" signal: a second source's copy of one evening is
 the same occurrence, whatever its source_url or start time); then by
-listing the events that start within a day of it and matching `source_url`. A recurring series shares one source_url across
+listing the events that start within a day of it and matching `source_url`;
+last, by title + town-local date + venue (engine/live_index). A recurring series shares one source_url across
 instances, hence the time window and the same-start preference. Two or more
 live rows for one event is a duplicate for the operator, never a guess.
 See CMO ref `staged-events-already-live-and-duplicate-checks.md`.
@@ -45,7 +46,7 @@ MAX_MERGE_HOPS = 3
 class LiveEventMatch:
     row: Optional[dict] = None                 # the one live event, when found
     ambiguous: list[dict] = field(default_factory=list)   # >1 candidates
-    matched_by: Optional[str] = None           # ingest_ref | slug | series-day | source_url
+    matched_by: Optional[str] = None           # ingest_ref | slug | series-day | source_url | title-day
 
 
 def is_not_found(exc: Exception) -> bool:
@@ -162,14 +163,22 @@ def find_live_entity(client, resource: str, slug: Optional[str],
 def find_live_event(client, *, slug: Optional[str], source_url: Optional[str],
                     start_at: Optional[str], series_slug: Optional[str] = None,
                     tz: Optional[tzinfo] = None,
-                    ingest_ref: Optional[str] = None) -> LiveEventMatch:
+                    ingest_ref: Optional[str] = None,
+                    titles: tuple = (), venue_id: Optional[int] = None,
+                    venue_slug: Optional[str] = None,
+                    venue_name: Optional[str] = None) -> LiveEventMatch:
     """Live event carrying `ingest_ref`; else (rows shipped before refs) by
     `slug`; else, given the Series it will join and the town
     timezone, that Series' occurrence on the same town-local date; else by
     `source_url` among events starting within 12h of `start_at` (UTC with
-    offset). Two or more hits at a step are ambiguous. API errors other than
-    a 404 raise — the caller must not create on an unanswered lookup."""
+    offset); else, given `titles` (the event's, and the title it ships
+    under) and the town timezone, a live event of the same title on the same
+    town-local date at the same venue (`live_index.event_matches` — a hand-
+    made row with another source_url and no Series). Two or more hits at a
+    step are ambiguous. API errors other than a 404 raise — the caller must
+    not create on an unanswered lookup."""
     from engine.ingest_ref import find_by_ref
+    from engine.live_index import event_matches
     row = find_by_ref(client, "events", ingest_ref)
     if row:
         return LiveEventMatch(row=row, matched_by="ingest_ref")
@@ -187,17 +196,30 @@ def find_live_event(client, *, slug: Optional[str], source_url: Optional[str],
         if rows:
             return LiveEventMatch(ambiguous=rows, matched_by="series-day")
     url = _norm_url(source_url)
-    if not (start and url):
+    if start and url:
+        rows = [r for r in events_between(client, start - _WINDOW, start + _WINDOW)
+                if _norm_url(r.get("source_url")) == url]
+        if len(rows) > 1:
+            same = [r for r in rows if _instant(r.get("start_at")) == start]
+            if len(same) == 1:
+                rows = same
+        if len(rows) == 1:
+            return LiveEventMatch(row=rows[0], matched_by="source_url")
+        if rows:
+            return LiveEventMatch(ambiguous=rows, matched_by="source_url")
+    titles = [t for t in (titles or ()) if t]
+    if not (start and titles and tz is not None):
         return LiveEventMatch()
-    rows = [r for r in events_between(client, start - _WINDOW, start + _WINDOW)
-            if _norm_url(r.get("source_url")) == url]
-    if len(rows) > 1:
-        same = [r for r in rows if _instant(r.get("start_at")) == start]
-        if len(same) == 1:
-            rows = same
+    # Last: a hand-made (or other submitter's) row of the same event —
+    # title + town-local date + venue (engine/live_index.event_matches).
+    day = start.astimezone(tz).date()
+    lo = datetime.combine(day, time.min, tzinfo=tz)
+    rows = [r for r in events_between(client, lo, lo + timedelta(days=1) - timedelta(seconds=1))
+            if any(event_matches(t, start_at, r, venue_id=venue_id, venue_slug=venue_slug,
+                                 venue_name=venue_name) for t in titles)]
     if len(rows) == 1:
-        return LiveEventMatch(row=rows[0], matched_by="source_url")
-    return LiveEventMatch(ambiguous=rows, matched_by="source_url" if rows else None)
+        return LiveEventMatch(row=rows[0], matched_by="title-day")
+    return LiveEventMatch(ambiguous=rows, matched_by="title-day" if rows else None)
 
 
 def events_between(client, lo: datetime, hi: datetime, page: int = 200, **filters):

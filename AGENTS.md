@@ -84,9 +84,15 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     BASE_DIR`, what `townloops-agent-add --egress` and `bin/townloops-egress-sync` run) writes `BASE_DIR/_egress/squid.conf`.
     `recent_changes` feeds the nightly digest's "Egress hosts opened"; preflight lists the agent's hosts (info).
   - `discovery.py` (Firecrawl sweep/verify kernel, no LLM, no DB), `business_discovery.py` (the
-    `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses:
-    same website/under its path, or name ≥0.85 → `already-live`; live venues too, reason "matches live venue <slug>";
-    a `venue` candidate goes through `live_index`'s `VenueIndex` — live venues, then live businesses/communities),
+    `business-discovery` skill's candidate store on `discovery_candidates` + dedup against live businesses
+    (`engine/live_index` rules) → `already-live`; live venues too, reason "matches live venue <slug>";
+    a `venue` candidate goes through `bd.live_index`'s `VenueIndex` — live venues, then live businesses/communities),
+    `live_index.py` (the one live-match module, #64: `LiveIndex` — same website/under its path, else name ≥0.85;
+    `match` for discovery, `resolve` for creates: several different near-names, none exact → ambiguous; another
+    own-site host = another entity. `titles_match` = reconcile's title rule; `event_matches` adds same town-local
+    date, no clashing clock time, venue by id/slug/name when both know it. `live_rows` = one list per resource per
+    run (memo + 10-min file cache, `note_created`). Records: `deduped-live` activity naming the live slug,
+    `extra_json.live_match` {ambiguous, candidates} via `mark_ambiguous`/`ambiguous()` — the report lists both),
     `harvest_terms.py` (the daily harvest's rotating search terms per kind: event hosts/venues with no entity, live
     row or candidate; the profile's terms; keywords of categories thin on live — least recently searched first),
     `seed_hunt.py` (`event-seed-discovery hunt`, daily, Firecrawl-budgeted: seeds from search, known organisations'
@@ -122,15 +128,19 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `sameAs`, profile paths only, one per platform) fill blank socials; ambiguous → `needs-review`;
     driven by the `performer-research` skill, ≤3 per 20-min cron run),
     `entity_sync.py` (local entity changes → live: resync, fill live blanks, verify; used by event-ship and
-    `entity-live-sync`; a 404 naming a merge survivor re-points instead of flagging, one naming none is looked
+    `entity-live-sync`; a live mirror sends only its `mirror_fills` (`extra_json.mirror_fills` from `fill_blanks`, an
+    `image-proposed` image) to live blanks — one `mirror-filled` activity; a 404 naming a merge survivor re-points instead of flagging, one naming none is looked
     up by Ingest Ref first — a TownLoops rename re-points too), `live_patch.py`
     (full-body PATCH + GET verify for events and entities; never sends `ingest_ref`),
     `entity_ship.py` (one entity → live: lookup, create or adopt, sync; event-ship and business promote. Creates
     send `ingest_ref` (`engine/ingest_ref.ref_for`), never a slug; `409 ingest_ref_taken` binds `details.slug`
-    with no second lookup; a pre-ref row found by slug is adopted (`adopt_and_remember`); bound refs `remember`ed),
+    with no second lookup; a pre-ref row found by slug is adopted (`adopt_and_remember`); bound refs `remember`ed;
+    not found by ref/slug → `live_index.resolve` by website/name: bound (no create), or `AmbiguousLiveMatch` — a
+    hold like `AwaitingResearch`, the event ships without it),
     `live_lookup.py` (find a live record before creating one — by Ingest Ref first (`?ingest_ref=`, only where
     `ingest_ref.supported`), the old slug / series-day / source_url matches as the fallback for pre-ref rows and
-    resources without refs; the one parser of a merged entity's 404
+    resources without refs, last `title-day` (`live_index.event_matches`: a hand-made live row isn't duplicated;
+    ≥2 hits → event-ship stamps `live_match` and parks it); the one parser of a merged entity's 404
     survivor, `merged_into`/`merged_into_slug`, and `follow_merges` — ≤`MAX_MERGE_HOPS`, under `get_live`
     and event-ingest's PATCH. Entity reads by cached slug go through it and re-point via
     `entity_sync.repoint` (slug + `live_id` together): a 404 *with* a survivor re-points, only one without
@@ -311,7 +321,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     on recovery; table `job_health`; fed by Hermes' `$HERMES_HOME/cron/output/<job>/<stamp>.md` Status lines
     (`cron:<id>`) and by skills that skip on a lock — entity-live-sync, business-discovery — calling `record`),
     `town_report.py` (the daily report: `run` → `state/reports/<date>-analyst.md` + short Telegram; sources/events/
-    entities (dedups name the live slug)/holds/failures/analyst runs, counts + examples; skill `town-report`),
+    entities (dedups name the live slug — discovery's and ship's `deduped-live`)/holds/ambiguous live
+    matches/failures/analyst runs, counts + examples; skill `town-report`),
     `analyst_runs.py` (table `analyst_runs`; budget = town-profile `analyst:` over `DEFAULTS`; `start` backs up,
     marks a run past its `max_minutes` `interrupted`, refuses while one is live; used = minutes, Firecrawl requests
     since start (`firecrawl_env.note_call` per request → `state/usage/`), `submissions` rows since start),
@@ -392,7 +403,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   way (nor into a live mirror) — clearing one is the operator-gated `listing-website-cleanup`, never a sync. A 404 naming a curator's merge
   survivor (`merged_into_slug`) re-points the row there (slug + `live_id` persisted) and syncs the survivor; any
   other 404 or a PATCH that doesn't land flags the entity (`extra_json.live_sync`) for the operator — never
-  re-created, never retried until cleared.
+  re-created, never retried until cleared. Live mirrors (someone else's row in the town) get only what our
+  enrichment found for them, into live blanks (`mirror_fills`, never a value copied from live). entity-live-sync
+  first re-researches `not-found` entities older than `enrichment.retry_not_found_days` (profile, default 14).
 - **Performer/creator identity is never inferred from a name.** They're researched only by the
   `performer-research` batch (event-enrich-entities skips them); a profile is attached only when a venue page
   links it or its metadata names the town/a linked venue *and* the role. Bios are the profile's own text or
