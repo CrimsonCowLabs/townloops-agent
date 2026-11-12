@@ -1,6 +1,6 @@
 ---
 name: business-discovery
-description: Find local businesses that aren't on TownLoops yet — Firecrawl sweeps, page verification, and dedup against live businesses into a candidate list for the operator.
+description: Find local businesses, community groups, non-profits and venues that aren't on TownLoops yet — Firecrawl sweeps, page verification, and dedup against live into a candidate list (autonomous: approved and submitted pending).
 ---
 
 # business-discovery
@@ -165,7 +165,7 @@ promote.
 
 ## Kinds and autonomous mode
 
-Every subcommand takes `--kind business|community|nonprofit` (default
+Every subcommand takes `--kind business|community|nonprofit|venue` (default
 business; `promote` defaults to all). Community groups and non-profits sweep
 `discovery.community` / `discovery.nonprofit` in town-profile.yaml
 (`category_query_terms`, `query_groups`, `seed_directories`,
@@ -179,8 +179,20 @@ A moderator rejection (engine/moderation) is remembered **by name**, like an
 operator decline: the same organisation under another URL is never proposed
 again.
 
-In autonomous mode `harvest` (weekly cron `org-harvest-weekly`) sweeps and
-verifies every configured kind and approves verified candidates itself
+**Venues** are a candidate kind too (`--kind venue`): deduped against live
+venues, then live businesses and communities (`business_discovery.live_index`
+— a place already listed as an organisation is never proposed as a venue),
+verified on venue markers (events, calendar, tickets, directions, hours),
+and promoted as a venue through engine/entity_ship.
+
+In autonomous mode `harvest` (daily cron `org-harvest-daily`, 03:07) sweeps
+and verifies every kind and approves verified candidates itself. Its search
+terms (`--terms` a kind, default 4) rotate, least recently searched first
+(engine/harvest_terms, remembered in `discovery_checks`): hosts (venues, for
+the venue kind) the town's events name with no entity, live row or
+candidate; the profile's terms; keywords of town categories with fewer
+than 3 live rows of the kind. Seed directories and Facebook terms sweep
+weekly. It approves verified candidates itself
 (`autonomy.judge_candidate` — held while `autonomy.entity_moderation` is off).
 It trusts only a verdict this verifier produced within
 `autonomy.verdict_max_age_days` (default 30): a CMO-imported verdict

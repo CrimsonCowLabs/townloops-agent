@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
-"""business-discovery — find local businesses, community groups and non-profits
-that aren't on TownLoops yet (`--kind business|community|nonprofit`, default business).
+"""business-discovery — find local businesses, community groups, non-profits and
+venues that aren't on TownLoops yet (`--kind business|community|nonprofit|venue`,
+default business).
 Logic: engine/business_discovery.py (store + live dedup) on the
 engine/discovery.py kernel (Firecrawl sweeps + page verify).
 
@@ -17,11 +18,13 @@ Subcommands:
   propose-decline [--uid U ...]    read-only proposal to decline candidates for good
   promote [--limit N]              ship the candidates the OPERATOR approved: live
                                    check → local business → enrich → ship
-  harvest [--limit N]              autonomous mode only: sweep + verify every kind the
-                                   town profile configures, and approve the verified
-                                   ones itself (engine/autonomy.judge_candidate) —
-                                   an imported or stale verdict re-verified first
-                                   (≤ --limit a kind)
+  harvest [--limit N] [--terms N]  autonomous mode only, daily: sweep (on --terms
+                                   rotating terms a kind — event hosts/venues with no
+                                   entity, the profile's, categories thin on live:
+                                   engine/harvest_terms) + verify every kind, and
+                                   approve the verified ones itself
+                                   (engine/autonomy.judge_candidate) — an imported or
+                                   stale verdict re-verified first (≤ --limit a kind)
 
 sweep/verify/list/propose-* never write to TownLoops. `promote` writes only
 what the operator approved (status `approved`) — there is no flag to
