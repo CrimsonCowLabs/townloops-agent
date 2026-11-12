@@ -1,137 +1,28 @@
-"""Safety rails for the autonomous onboarding loop.
+"""Safety rails shared by the pipeline.
 
 Everything here is deliberately dumb & fast: pure functions plus a token
-bucket. All I/O is either against the local SQLite (`post_counters` table
-from migration 008) or the categories snapshot / TownLoops health endpoint.
+bucket. All I/O is against the categories snapshot or the TownLoops health
+endpoint. There are no per-day POST caps: creates are bounded by the
+workqueue's hourly rate limits (engine/workqueue) and, in autonomous mode, by
+the submission gate's pending cap (engine/autonomy.GatedClient). Migration
+008's `post_counters` table is unused.
 
 Called from:
-  - engine/orchestrator.py — reserve_post_slot() before every ship
-  - engine/discovery.py    — firecrawl_bucket.wait() before every Firecrawl call
-  - skills/business/*      — has_category() before enqueueing kind-specific work
-  - engine/orchestrator.py — api_healthy() gates the shipping phase
+  - engine/discovery.py, research.py, event_extract.py — firecrawl_bucket.wait()
+    before every Firecrawl call
+  - engine/preflight.py    — has_category() on the profile's query groups
+  - engine/discovery.py    — is_high_confidence() before auto-promotion
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
-
-from engine.ingest_core import DEFAULT_TZ, _now_pt as _now_tz
-
-
-# --------------------------------------------------------------------------
-# Daily POST caps + onboarding ramp
-# --------------------------------------------------------------------------
-
-# Steady-state caps per (resource, day). Events left unbounded — event ingest
-# self-limits by source cadence.
-STEADY_CAPS: dict[str, int] = {
-    "businesses":  30,
-    "venues":      15,
-    "communities": 15,
-    "performers":  15,
-    "creators":    15,
-}
-
-
-def caps_for_day(days_since_start: int) -> dict[str, int]:
-    """Ramped caps: day 0 -> 5, day 1 -> 15, day 2+ -> STEADY_CAPS.
-
-    days_since_start is measured from agent_state.entered_at of the very
-    first phase (bootstrapping). Callers pass 0 for the first calendar day.
-    """
-    if days_since_start <= 0:
-        return {r: 5 for r in STEADY_CAPS}
-    if days_since_start == 1:
-        return {r: 15 for r in STEADY_CAPS}
-    return dict(STEADY_CAPS)
-
-
-def today_str() -> str:
-    return _now_tz().strftime("%Y-%m-%d")
-
-
-def reserve_post_slot(
-    conn: sqlite3.Connection,
-    resource: str,
-    days_since_start: int,
-    *,
-    day: Optional[str] = None,
-) -> tuple[bool, str]:
-    """Transactionally reserve one POST slot for (day, resource).
-
-    Returns (True, "") if the reservation succeeded; (False, reason)
-    otherwise. On True, the counter is already incremented — the caller MUST
-    proceed with the POST or eat a wasted slot (we don't refund; a wasted
-    slot per day is cheap insurance against the alternative).
-
-    Events bypass the cap (returns True immediately) — event ingest is
-    self-limiting per source and has no discovery-driven amplification.
-    """
-    if resource == "events":
-        return (True, "")
-
-    caps = caps_for_day(days_since_start)
-    if resource not in caps:
-        return (False, f"unknown resource {resource!r}")
-
-    day = day or today_str()
-    max_today = caps[resource]
-
-    # Serializable-ish: SQLite single-writer + IMMEDIATE keeps other writers
-    # blocked while we read-then-write the counter.
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        cur = conn.execute(
-            "SELECT count FROM post_counters WHERE day = ? AND resource = ?",
-            (day, resource),
-        )
-        row = cur.fetchone()
-        current = row[0] if row else 0
-        if current >= max_today:
-            conn.execute("ROLLBACK")
-            return (False, f"daily cap {max_today} reached for {resource}")
-        if row:
-            conn.execute(
-                "UPDATE post_counters SET count = count + 1 WHERE day = ? AND resource = ?",
-                (day, resource),
-            )
-        else:
-            conn.execute(
-                "INSERT INTO post_counters (day, resource, count) VALUES (?, ?, 1)",
-                (day, resource),
-            )
-        conn.execute("COMMIT")
-        return (True, "")
-    except Exception:
-        try:
-            conn.execute("ROLLBACK")
-        except sqlite3.OperationalError:
-            pass
-        raise
-
-
-def days_since(entered_at_iso: str) -> int:
-    """Whole calendar days between entered_at and now, in AGENT_TZ.
-
-    entered_at_iso should be an ISO-8601 string. Accepts both naive and
-    zone-aware; naive is treated as AGENT_TZ.
-    """
-    try:
-        started = datetime.fromisoformat(entered_at_iso.replace("Z", "+00:00"))
-    except ValueError:
-        return 999  # unparseable -> treat as steady state (no ramp restriction)
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=DEFAULT_TZ)
-    now = _now_tz()
-    return max(0, (now.date() - started.date()).days)
 
 
 # --------------------------------------------------------------------------

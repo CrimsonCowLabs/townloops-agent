@@ -94,7 +94,7 @@
     {
       "id": "org-harvest-weekly",
       "name": "Weekly organisation harvest (autonomous mode only: sweep + verify businesses, community groups, non-profits; approve verified; inactive in supervised mode)",
-      "schedule": "0 3 * * 3",
+      "schedule": "7 3 * * 3",
       "skills": ["business-discovery"],
       "deliver": "local",
       "no_agent": true,

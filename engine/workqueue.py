@@ -8,8 +8,16 @@ Semantics:
 - `fail(queue_id, error)`: increment attempts; if >= MAX_ATTEMPTS, mark
   the event stuck (via engine.event_state.mark_stuck) and resolve the row.
 
-Rate limiting is per-action + per-hour, read from town-profile.yaml if
-present. Defaults are conservative for a ChatGPT Plus tier.
+Rate limiting is per-action over the last hour (a sliding window), read
+from town-profile.yaml if present. Defaults are conservative for a ChatGPT
+Plus tier. An action may also set a `burst`: while its unresolved backlog is
+deeper than the hourly limit, the limit rises to the burst — the drain's own
+per-drain caps and time budget still bound every pass.
+
+Timestamps here are ISO ('2026-11-12T06:41:28+00:00'). A comparison against
+SQLite's datetime('now', …) ('2026-11-12 14:21:38') must normalise the column
+with datetime(col) first: as text 'T' sorts after ' ', so a raw comparison
+reads every claim earlier the same UTC day as within the last hour.
 
 Every claim/complete/fail also writes to `agent_activity` via engine.inspection
 so the dashboard's live ticker sees what's happening.
@@ -20,6 +28,7 @@ from __future__ import annotations
 import os
 import socket
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -32,7 +41,7 @@ MAX_ATTEMPTS = 3
 RC_DEFERRED = 75
 
 # Default per-action-per-hour limits. Overridden by town-profile.yaml
-# workqueue_rate_limits.<action>.
+# workqueue_rate_limits.<action>: a plain int, or {per_hour: N, burst: M}.
 _DEFAULT_RATE_LIMITS = {
     "read-detail":         30,
     "extract-venue":       50,
@@ -41,6 +50,18 @@ _DEFAULT_RATE_LIMITS = {
     "enrich-entities":    100,
     "ship":               100,
 }
+
+
+@dataclass(frozen=True)
+class RateLimit:
+    """Claims allowed in any one hour. `burst` (≥ per_hour) applies while the
+    action's backlog is deeper than per_hour, so a source that suddenly yields
+    hundreds of events drains in hours, not weeks."""
+    per_hour: int
+    burst: int
+
+    def cap(self, backlog: int) -> int:
+        return self.burst if backlog > self.per_hour else self.per_hour
 
 
 def _iso_utc_now() -> str:
@@ -52,7 +73,24 @@ def _worker_id() -> str:
     return f"{host}:{os.getpid()}"
 
 
-def _load_rate_limits() -> dict[str, int]:
+def _count(v) -> Optional[int]:
+    return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else None
+
+
+def _rate_limit(value, default: int) -> RateLimit:
+    """One action's town-profile entry → RateLimit; a bad value keeps the
+    default, a burst below the hourly limit is no burst."""
+    if isinstance(value, dict):
+        per_hour = _count(value.get("per_hour"))
+        per_hour = default if per_hour is None else per_hour
+        burst = _count(value.get("burst"))
+        return RateLimit(per_hour, max(per_hour, burst or 0))
+    per_hour = _count(value)
+    per_hour = default if per_hour is None else per_hour
+    return RateLimit(per_hour, per_hour)
+
+
+def _load_rate_limits() -> dict[str, RateLimit]:
     """Read workqueue_rate_limits from town-profile.yaml, falling back to
     the defaults for any missing action."""
     import yaml
@@ -62,17 +100,16 @@ def _load_rate_limits() -> dict[str, int]:
         os.path.join(os.environ.get("HERMES_HOME", "/home/agent/.hermes"),
                      "town-profile.yaml"),
     ))
+    limits = {k: RateLimit(v, v) for k, v in _DEFAULT_RATE_LIMITS.items()}
     if not p.exists():
-        return dict(_DEFAULT_RATE_LIMITS)
+        return limits
     try:
         doc = yaml.safe_load(p.read_text()) or {}
     except (OSError, yaml.YAMLError):
-        return dict(_DEFAULT_RATE_LIMITS)
-    limits = dict(_DEFAULT_RATE_LIMITS)
-    override = (doc.get("workqueue_rate_limits") or {})
-    for k, v in override.items():
-        if isinstance(v, int):
-            limits[k] = v
+        return limits
+    override = doc.get("workqueue_rate_limits") if isinstance(doc, dict) else None
+    for k, v in (override if isinstance(override, dict) else {}).items():
+        limits[k] = _rate_limit(v, _DEFAULT_RATE_LIMITS.get(k, 100))
     return limits
 
 
@@ -107,18 +144,28 @@ def _hour_window_usage(conn: sqlite3.Connection, action: str) -> int:
         SELECT COUNT(*) FROM event_workqueue
         WHERE next_action = ?
           AND claimed_at IS NOT NULL
-          AND claimed_at >= datetime('now', '-1 hour')
+          AND datetime(claimed_at) >= datetime('now', '-1 hour')
         """,
         (action,),
     ).fetchone()
     return row[0] if row else 0
 
 
+def _backlog(conn: sqlite3.Connection, action: str) -> int:
+    """Unresolved rows of this action that a claim could still take."""
+    return conn.execute(
+        "SELECT COUNT(*) FROM event_workqueue WHERE next_action = ? "
+        "AND resolved_at IS NULL AND attempts < ?",
+        (action, MAX_ATTEMPTS),
+    ).fetchone()[0]
+
+
 def claim(conn: sqlite3.Connection, action: str, limit: int = 5) -> list[dict]:
     """Claim up to `limit` unresolved rows for `action`, honoring per-hour
-    rate limit. Returns the claimed rows (with event details joined)."""
-    limits = _load_rate_limits()
-    hour_cap = limits.get(action, 100)
+    rate limit (its burst while the backlog is deep). Returns the claimed rows
+    (with event details joined)."""
+    limit_for = _load_rate_limits().get(action, RateLimit(100, 100))
+    hour_cap = limit_for.cap(_backlog(conn, action))
     already_this_hour = _hour_window_usage(conn, action)
     budget = max(0, hour_cap - already_this_hour)
     if budget == 0:
@@ -255,7 +302,7 @@ def reap_stale_claims(conn: sqlite3.Connection,
         SELECT queue_id FROM event_workqueue
         WHERE resolved_at IS NULL
           AND claimed_at IS NOT NULL
-          AND claimed_at < datetime('now', ?)
+          AND datetime(claimed_at) < datetime('now', ?)
         """,
         (f"-{int(older_than_minutes)} minutes",),
     ).fetchall()

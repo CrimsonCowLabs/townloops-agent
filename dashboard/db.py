@@ -453,7 +453,7 @@ def events_by_source(days: int = 30, limit: int = 10) -> list[dict]:
               (SELECT COUNT(*) FROM source_runs sr WHERE sr.source = e.source) AS total_runs
             FROM events e
             WHERE hidden = 0
-              AND e.first_seen_at >= datetime('now', '-{int(days)} days')
+              AND datetime(e.first_seen_at) >= datetime('now', '-{int(days)} days')
             GROUP BY e.source
             ORDER BY event_count DESC
             LIMIT ?
@@ -483,7 +483,7 @@ def silent_sources(days: int = 30) -> list[dict]:
             r["source"] for r in c.execute(
                 f"""
                 SELECT DISTINCT source FROM events
-                WHERE first_seen_at >= datetime('now', '-{int(days)} days')
+                WHERE datetime(first_seen_at) >= datetime('now', '-{int(days)} days')
                 """
             ).fetchall()
         }
@@ -522,7 +522,7 @@ def venues_without_events(limit: int = 20) -> list[dict]:
               AND entity_uid NOT IN (
                 SELECT DISTINCT v.entity_uid FROM venues v
                 JOIN events e ON (e.hosting_group = v.name OR e.venue_name = v.name)
-                WHERE e.first_seen_at >= datetime('now', '-30 days')
+                WHERE datetime(e.first_seen_at) >= datetime('now', '-30 days')
               )
             UNION ALL
             SELECT 'community' AS kind, entity_uid, name, website, source_url,
@@ -532,7 +532,7 @@ def venues_without_events(limit: int = 20) -> list[dict]:
               AND entity_uid NOT IN (
                 SELECT DISTINCT c.entity_uid FROM communities c
                 JOIN events e ON (e.hosting_group = c.name OR e.venue_name = c.name)
-                WHERE e.first_seen_at >= datetime('now', '-30 days')
+                WHERE datetime(e.first_seen_at) >= datetime('now', '-30 days')
               )
             ORDER BY name
             LIMIT ?
@@ -695,7 +695,7 @@ def recent_source_runs(hours: int = 24) -> list[dict]:
                    SUM(COALESCE(updated, 0))  AS updated,
                    MAX(error) AS sample_error
             FROM source_runs
-            WHERE started_at >= datetime('now', ?)
+            WHERE datetime(started_at) >= datetime('now', ?)
             GROUP BY source
             ORDER BY inserted DESC, updated DESC
             """,

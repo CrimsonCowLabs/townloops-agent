@@ -104,5 +104,6 @@ python sync.py list                                  # pending + flagged (read-o
 python sync.py clear --kind venue --entity-uid UID   # after the operator fixes it
 ```
 
-`run` takes the workqueue-drain lock (skips quietly while a drain runs) and
+`run` takes the workqueue-drain lock — waiting up to 20 min (`LOCK_WAIT_S`) for a
+running drain to finish, skipping quietly only if one outlasts that — and
 is a no-op without `TOWNLOOPS_API_*` env.

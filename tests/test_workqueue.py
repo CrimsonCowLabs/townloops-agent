@@ -68,6 +68,21 @@ class TestReapStaleClaims:
         assert row["resolved_at"] is None      # still below MAX_ATTEMPTS
         assert "stale claim" in (row["last_error"] or "")
 
+    def test_a_stale_claim_from_earlier_today_is_reaped(self, fresh_db):
+        # claim() writes ISO 'YYYY-MM-DDTHH:MM:SS+00:00'; as text it sorts
+        # after SQLite's 'YYYY-MM-DD HH:MM:SS' all day, so a claim orphaned
+        # earlier the same UTC day was never stale until midnight.
+        from datetime import datetime, timedelta, timezone
+        _insert_event(fresh_db, "e5")
+        _orphan_claim(fresh_db, "e5", claimed_at=(
+            datetime.now(timezone.utc) - timedelta(minutes=30)).isoformat(timespec="seconds"))
+        assert workqueue.reap_stale_claims(fresh_db, older_than_minutes=15) == 1
+
+    def test_a_fresh_iso_claim_is_not_reaped(self, fresh_db):
+        _insert_event(fresh_db, "e6")
+        _orphan_claim(fresh_db, "e6", claimed_at=workqueue._iso_utc_now())
+        assert workqueue.reap_stale_claims(fresh_db, older_than_minutes=15) == 0
+
     def test_fresh_claim_is_not_reaped(self, fresh_db):
         _insert_event(fresh_db, "e2")
         workqueue.enqueue(fresh_db, "e2", "extract-venue")

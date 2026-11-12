@@ -51,8 +51,12 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     rowcount 0 means another worker/operator already moved it and the loser skips silently. This is
     the entire concurrency-safety story.
   - `workqueue.py` — `event_workqueue` table. `enqueue` (idempotent via UNIQUE), `claim` (atomic,
-    per-action-per-hour rate limited via `town-profile.yaml` → `workqueue_rate_limits`), `complete`,
-    `fail` (after `MAX_ATTEMPTS=3`, marks the event `stuck-` and resolves the row).
+    per-action rate limited over the last hour via `town-profile.yaml` → `workqueue_rate_limits`: an int,
+    or `{per_hour: N, burst: M}` — the limit is `burst` while that action's unresolved backlog exceeds
+    `per_hour`; the drain's `workqueue_drain` caps and budget still bound each pass), `complete`,
+    `fail` (after `MAX_ATTEMPTS=3`, marks the event `stuck-` and resolves the row). Stored timestamps
+    are ISO (`…T06:41:28+00:00`); a window against SQLite's `datetime('now', …)` compares
+    `datetime(col)`, never the raw column ('T' > ' ' made every claim that UTC day "this hour").
   - `orchestrator.py` — `drain_workqueue()`: for each `next_action`, claim ≤5 items, `subprocess`-invoke
     the matching skill with `--event-uid <uid>`, advance state + enqueue the next action on rc 0, `fail`
     on nonzero, and **quietly skip (`rc==127`) skills that aren't implemented yet**. Wrapped in an
@@ -88,8 +92,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     the one editorial-path rule — blog/post/article/visitor guide — for discovery's link filter and `roundup_reason`),
     `listing_hosts.py` (the one directory/listing/aggregator host list — restaurantji, Yelp, maps, ticketing,
     Facebook events: evidence at most, never an entity's `website`; enrichment, discovery's blocklist, promote and
-    performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
-    `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
+    performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (Firecrawl token bucket, category guard; no per-day POST caps — creates are bounded by the workqueue rate limits and the autonomous submission gate),
+    `listmonk_api.py`, `lock.py` (flock advisory locks; a frequent job skips a held lock, a due daily/weekly job that shares one —
+    entity-live-sync behind the heartbeat drain, org harvest behind business-promote — passes a bounded `wait=` instead), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py` (also the one
     `extra_json` parser `parse_extra_json`, and `seed_ref`/`seed_name_of` for the `seed:<name>` reference),
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5

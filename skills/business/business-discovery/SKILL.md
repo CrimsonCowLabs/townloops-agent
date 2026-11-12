@@ -160,7 +160,9 @@ promote.
 - Sweeps are not scheduled: they spend Firecrawl budget, so they run when the
   operator asks (CLI, chat, or the dashboard's sweep action). `promote` is on
   cron (`business-promote`) but spends nothing unless something is approved.
-  sweep, verify and promote hold the `business-discovery` flock.
+  sweep, verify, promote and harvest hold the `business-discovery` flock: a
+  held lock skips sweep/verify/promote at once, while `harvest` waits up to
+  20 min (`HARVEST_LOCK_WAIT_S`) for a running promote rather than lose the week.
 - Firecrawl calls share `engine.policy.firecrawl_bucket`.
 
 ## Kinds and autonomous mode

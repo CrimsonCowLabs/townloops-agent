@@ -45,6 +45,10 @@ from engine import lock as _lock
 from engine.derive_helpers import load_town_profile, open_db, record_activity
 
 _WORKER = "business-discovery"
+# The weekly harvest shares the lock with the 15-min promote: it waits out a
+# promote run (≤3 candidates) instead of skipping the week. Promote, sweep
+# and verify still skip at once. The cron wrapper detaches the harvest.
+HARVEST_LOCK_WAIT_S = 20 * 60
 
 
 def _town_slug() -> str:
@@ -59,10 +63,10 @@ def _client(conn=None):
     return autonomy.gated(client, conn) if conn is not None else client
 
 
-def _locked_run(action: str, fn) -> int:
+def _locked_run(action: str, fn, *, wait: float = 0) -> int:
     conn = open_db()
     try:
-        with _lock.acquire(_WORKER):
+        with _lock.acquire(_WORKER, wait=wait):
             out = fn(conn, _client(conn), load_town_profile(), _town_slug())
     except _lock.LockHeld:
         print("previous business-discovery run still active — skipped")
@@ -106,7 +110,7 @@ def _harvest(args) -> int:
                          "approved": {k: v for k, v in approved.items() if k != "errors"}}
             out["errors"] += swept["errors"] + verified["errors"] + approved["errors"]
         return out
-    return _locked_run("harvested", run)
+    return _locked_run("harvested", run, wait=HARVEST_LOCK_WAIT_S)
 
 
 def _list(args) -> int:

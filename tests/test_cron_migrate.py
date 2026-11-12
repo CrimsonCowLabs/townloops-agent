@@ -7,6 +7,7 @@ import importlib.util
 import os
 import sqlite3
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -114,3 +115,35 @@ def test_exec_wrappers_default_or_pass_args_through(script, argv, expected, tmp_
     wrapper.main()
 
     assert execd[0][1:] == [str(skill), *expected]
+
+
+def _cron_scripts() -> list[str]:
+    """Every file a docker no_agent job hands the cron interpreter."""
+    import json
+    jobs = json.loads((ROOT / "cron" / "jobs.json").read_text())["jobs"]
+    seen = []
+    for job in jobs:
+        if not job.get("no_agent"):
+            continue
+        rel = job["prompt"].split()[1].removeprefix("/home/agent/.hermes/")
+        if rel not in seen:
+            seen.append(rel)
+    return seen
+
+
+@pytest.mark.parametrize("rel", _cron_scripts())
+def test_cron_script_imports_under_the_cron_interpreter(rel, tmp_path):
+    """Hermes runs no_agent scripts with its own venv and PYTHONPATH=/app
+    only — no system site-packages. A wrapper importing a dep only the system
+    python has (feedparser, via engine.orchestrator) fails every run. The
+    test command's extra dist-packages path would mask that, so the import
+    runs in a subprocess with the repo as the only PYTHONPATH."""
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["PYTHONPATH"] = str(ROOT)
+    env["HERMES_HOME"] = str(tmp_path)
+    code = ("import importlib.util, sys\n"
+            "spec = importlib.util.spec_from_file_location('cron_job', sys.argv[1])\n"
+            "spec.loader.exec_module(importlib.util.module_from_spec(spec))\n")
+    proc = subprocess.run([sys.executable, "-c", code, str(ROOT / rel)], cwd=tmp_path, env=env,
+                          capture_output=True, text=True, timeout=120)
+    assert proc.returncode == 0, proc.stderr[-2000:]

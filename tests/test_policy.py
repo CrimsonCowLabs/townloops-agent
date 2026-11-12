@@ -1,75 +1,11 @@
-"""engine/policy.py — daily caps + ramp + token bucket + confidence gate
-+ category resolution + category-exists guard.
-
-Uses `fresh_db` (all migrations applied) so post_counters exists.
-"""
+"""engine/policy.py — token bucket + confidence gate + category-exists guard."""
 
 from __future__ import annotations
 
 import json
 import time
-from datetime import datetime, timezone
 
 import pytest
-
-
-class TestCaps:
-    def test_ramp_day_zero(self):
-        from engine import policy
-        caps = policy.caps_for_day(0)
-        assert caps["businesses"] == 5
-        assert caps["venues"] == 5
-        assert caps["communities"] == 5
-
-    def test_ramp_day_one(self):
-        from engine import policy
-        caps = policy.caps_for_day(1)
-        assert caps["businesses"] == 15
-
-    def test_ramp_steady(self):
-        from engine import policy
-        assert policy.caps_for_day(2)["businesses"] == 30
-        assert policy.caps_for_day(30)["businesses"] == 30
-
-
-class TestReserveSlot:
-    def test_reserves_then_hits_cap(self, fresh_db):
-        from engine import policy
-        for i in range(5):
-            ok, why = policy.reserve_post_slot(fresh_db, "businesses", 0)
-            assert ok, f"iter {i}: {why}"
-        ok, why = policy.reserve_post_slot(fresh_db, "businesses", 0)
-        assert not ok
-        assert "daily cap" in why
-
-    def test_events_are_unbounded(self, fresh_db):
-        from engine import policy
-        # Way past any conceivable cap — events skip the counter.
-        for _ in range(1000):
-            ok, _ = policy.reserve_post_slot(fresh_db, "events", 0)
-            assert ok
-
-    def test_unknown_resource_rejected(self, fresh_db):
-        from engine import policy
-        ok, why = policy.reserve_post_slot(fresh_db, "widgets", 0)
-        assert not ok
-        assert "unknown" in why
-
-    def test_counters_are_per_resource(self, fresh_db):
-        from engine import policy
-        for _ in range(5):
-            policy.reserve_post_slot(fresh_db, "businesses", 0)
-        # venues share the same day but a different counter — not exhausted
-        ok, _ = policy.reserve_post_slot(fresh_db, "venues", 0)
-        assert ok
-
-    def test_counters_are_per_day(self, fresh_db):
-        from engine import policy
-        for _ in range(5):
-            policy.reserve_post_slot(fresh_db, "businesses", 0, day="2026-01-01")
-        # Different day → fresh counter
-        ok, _ = policy.reserve_post_slot(fresh_db, "businesses", 0, day="2026-01-02")
-        assert ok
 
 
 class TestTokenBucket:
@@ -165,15 +101,3 @@ class TestCategoryExistsGuard:
         snap = tmp_state_dir / "categories.json"
         snap.write_text("not json {")
         assert not policy.has_category("food", snap)
-
-
-class TestDaysSince:
-    def test_same_day(self):
-        from engine import policy
-        past = datetime.now(timezone.utc).isoformat()
-        assert policy.days_since(past) == 0
-
-    def test_unparseable(self):
-        from engine import policy
-        # Sentinel: unparseable → treat as steady state.
-        assert policy.days_since("not-a-date") == 999
