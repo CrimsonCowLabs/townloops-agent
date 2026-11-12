@@ -20,6 +20,8 @@ otherwise a placeholder bearer satisfies the API schema.
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlparse
 
 _CLOUD_HOST = "firecrawl.dev"
@@ -58,8 +60,49 @@ def base_url() -> str:
 
 
 def headers() -> dict:
+    """Request headers — built once per Firecrawl request, so this is where
+    a request is counted (`note_call`)."""
+    note_call()
     key = os.getenv("FIRECRAWL_API_KEY", "").strip()
     return {
         "Authorization": f"Bearer {key or 'self-hosted'}",
         "Content-Type": "application/json",
     }
+
+
+# --------------------------------------------------------------------------
+# Usage count — what the analyst run's budget reads (engine/analyst_runs).
+# One line per request in $HERMES_HOME/state/usage/firecrawl-<UTC day>.log;
+# an O_APPEND write of one short line needs no lock between processes.
+# Best-effort: counting never breaks a request.
+# --------------------------------------------------------------------------
+
+def _usage_dir() -> Path:
+    return Path(os.environ.get("HERMES_HOME", "/home/agent/.hermes")) / "state" / "usage"
+
+
+def note_call() -> None:
+    now = datetime.now(timezone.utc)
+    d = _usage_dir()
+    if not d.parent.is_dir():
+        return
+    try:
+        d.mkdir(exist_ok=True)
+        with open(d / f"firecrawl-{now:%Y-%m-%d}.log", "a") as fh:
+            fh.write(now.isoformat(timespec="seconds") + "\n")
+    except OSError:
+        pass
+
+
+def calls_since(since: str) -> int:
+    """Firecrawl requests counted since the ISO UTC instant `since`."""
+    d = _usage_dir()
+    n = 0
+    for f in sorted(d.glob("firecrawl-*.log")) if d.is_dir() else ():
+        if f.stem[len("firecrawl-"):] < since[:10]:
+            continue
+        try:
+            n += sum(1 for line in f.read_text().split() if line >= since)
+        except OSError:
+            pass
+    return n

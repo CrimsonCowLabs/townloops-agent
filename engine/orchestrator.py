@@ -22,9 +22,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-import requests
-
-from engine import autonomy, egress
+from engine import autonomy, egress, notify
 from engine import db as _db
 from engine.derive_helpers import load_town_profile, parse_extra_json
 from engine import event_detail, event_groups, event_provenance
@@ -119,18 +117,7 @@ def _iso_utc_now() -> str:
 # --------------------------------------------------------------------------
 
 def _telegram_notify(text: str) -> None:
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-    chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-    if not (token and chat):
-        return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{token}/sendMessage",
-            json={"chat_id": chat, "text": text},
-            timeout=10,
-        )
-    except requests.RequestException:
-        pass
+    notify.telegram(text)   # the one sender (engine/notify.py)
 
 
 # --------------------------------------------------------------------------

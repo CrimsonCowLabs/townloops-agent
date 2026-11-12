@@ -208,6 +208,10 @@ def _state_get(conn: sqlite3.Connection, key: str) -> Optional[dict]:
         return {"reason": row[0]}
 
 
+# The `at` of the opening the operator was last alerted about.
+CIRCUIT_ALERTED = "circuit-alerted"
+
+
 def circuit(conn: sqlite3.Connection) -> Optional[dict]:
     """{reason, evidence, at} while submissions are stopped, else None."""
     return _state_get(conn, "circuit")
@@ -226,16 +230,42 @@ def open_circuit(conn: sqlite3.Connection, reason: str, evidence: dict,
          iso_utc_now()))
     record(conn, "circuit", "submissions", Decision("open", reason, evidence))
     conn.commit()
-    (alert or _telegram)(
-        f"[{_town()}] autonomous submissions STOPPED — {reason}. "
-        f"{json.dumps(evidence, default=str)[:300]}\n"
-        "Collecting and enriching continue. Fix the cause, then `autonomy resume`.")
+    alert_circuit(conn, alert)
+    return True
+
+
+def circuit_text(c: dict) -> str:
+    """The open circuit as the operator is told it: reason, evidence, how to resume."""
+    return (f"autonomous submissions STOPPED since {c.get('at')} — {c.get('reason')}. "
+            f"Evidence: {json.dumps(c.get('evidence') or {}, default=str)[:300]}\n"
+            "Collecting and enriching continue. Fix the cause, then `autonomy resume`.")
+
+
+def alert_circuit(conn: sqlite3.Connection, alert: Callable[[str], None] | None = None) -> bool:
+    """Alert the operator once per opening of the circuit — also one written
+    straight into the DB, which no code path alerted (the heartbeat's tick,
+    engine/alerts). True when this sent the alert."""
+    c = circuit(conn)
+    sent = _state_get(conn, CIRCUIT_ALERTED)
+    if not c:
+        if sent:
+            conn.execute("DELETE FROM autonomy_state WHERE key = ?", (CIRCUIT_ALERTED,))
+            conn.commit()
+        return False
+    if sent and sent.get("at") == c.get("at"):
+        return False
+    (alert or _telegram)(f"[{_town()}] {circuit_text(c)}")
+    conn.execute(
+        "INSERT INTO autonomy_state (key, value, updated_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        (CIRCUIT_ALERTED, json.dumps({"at": c.get("at")}), iso_utc_now()))
+    conn.commit()
     return True
 
 
 def close_circuit(conn: sqlite3.Connection, by: str = "operator") -> bool:
     was = circuit(conn)
-    conn.execute("DELETE FROM autonomy_state WHERE key = 'circuit'")
+    conn.execute("DELETE FROM autonomy_state WHERE key IN ('circuit', ?)", (CIRCUIT_ALERTED,))
     if was:
         record(conn, "circuit", "submissions", Decision("closed", f"resumed by {by}",
                                                         {"was": was}))
@@ -982,8 +1012,5 @@ def _town() -> str:
 
 
 def _telegram(text: str) -> None:
-    try:
-        from engine.orchestrator import _telegram_notify
-    except Exception:  # noqa: BLE001 — alerts are best-effort
-        return
-    _telegram_notify(text)
+    from engine import notify   # stdlib only: an alert must not need the skill deps
+    notify.telegram(text)

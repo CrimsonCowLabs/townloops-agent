@@ -41,6 +41,7 @@ import time
 
 from engine import business_discovery as bd
 from engine import business_promote as bp
+from engine import job_health
 from engine import lock as _lock
 from engine.derive_helpers import load_town_profile, open_db, record_activity
 
@@ -70,7 +71,10 @@ def _locked_run(action: str, fn, *, wait: float = 0) -> int:
             out = fn(conn, _client(conn), load_town_profile(), _town_slug())
     except _lock.LockHeld:
         print("previous business-discovery run still active — skipped")
+        job_health.record(conn, f"{_WORKER} {action}", job_health.SKIPPED,
+                          detail=f"{_WORKER} lock held")
         return 0
+    job_health.record(conn, f"{_WORKER} {action}", job_health.OK)
     summary = {k: v for k, v in out.items() if k != "errors"}
     record_activity(conn, _WORKER, action, "batch", detail=json.dumps(summary),
                     ok=not out["errors"], error="; ".join(out["errors"])[:200] or None)
