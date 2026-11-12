@@ -118,7 +118,7 @@ def current_task() -> Optional[dict]:
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT * FROM agent_activity "
-            "WHERE ts >= datetime('now', '-90 seconds') "
+            "WHERE datetime(ts) >= datetime('now', '-90 seconds') "
             "ORDER BY ts DESC LIMIT 1"
         ).fetchone()
         conn.close()

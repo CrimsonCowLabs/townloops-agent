@@ -121,10 +121,11 @@ def profile(tmp_state_dir, monkeypatch):
     return path.write_text
 
 
-def _queue_detail_reads(conn, n: int, *, fetching: bool = True) -> list[str]:
+def _queue_detail_reads(conn, n: int, *, fetching: bool = True,
+                        prefix: str = "") -> list[str]:
     uids = []
     for i in range(n):
-        uid = f"d{i}" if fetching else f"n{i}"
+        uid = prefix + (f"d{i}" if fetching else f"n{i}")
         _insert_event(conn, uid, state="approved")
         if fetching:   # a detail page of its own → a scrape + an LLM call
             conn.execute("UPDATE events SET source_url = ? WHERE event_uid = ?",
@@ -221,6 +222,68 @@ class TestReadDetailThroughput:
         orchestrator.drain_workqueue(fresh_db, clock=clock)
 
         assert len(clock.calls) == 2
+
+    def test_claims_from_earlier_hours_do_not_count_against_this_hour(
+            self, fresh_db, profile, monkeypatch):
+        # claimed_at is ISO ('…T06:41:28+00:00'); compared as text to SQLite's
+        # datetime('now', '-1 hour') ('… 14:21:38') every claim earlier the
+        # same UTC day counted as this hour — the "hourly" cap was per day.
+        profile("workqueue_drain:\n  read_detail_per_drain: 6\n"
+                "workqueue_rate_limits:\n  read-detail: 2\n")
+        from datetime import datetime, timedelta, timezone
+        earlier = (datetime.now(timezone.utc) - timedelta(minutes=70)).isoformat(timespec="seconds")
+        for uid in _queue_detail_reads(fresh_db, 2, prefix="old"):
+            fresh_db.execute("UPDATE event_workqueue SET claimed_at = ?, resolved_at = ? "
+                             "WHERE event_uid = ?", (earlier, earlier, uid))
+        fresh_db.commit()
+        _queue_detail_reads(fresh_db, 3)
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert len(clock.calls) == 2
+
+    def test_a_deep_backlog_raises_the_hourly_limit_to_its_burst(self, fresh_db, profile,
+                                                                 monkeypatch):
+        profile("workqueue_drain:\n  read_detail_per_drain: 6\n"
+                "workqueue_rate_limits:\n  read-detail: {per_hour: 2, burst: 4}\n")
+        _queue_detail_reads(fresh_db, 5)          # backlog 5 > per_hour 2
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert len(clock.calls) == 4
+
+    def test_a_shallow_backlog_keeps_the_plain_hourly_limit(self, fresh_db, profile,
+                                                            monkeypatch):
+        profile("workqueue_drain:\n  read_detail_per_drain: 6\n"
+                "workqueue_rate_limits:\n  read-detail: {per_hour: 3, burst: 10}\n")
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        for uid in _queue_detail_reads(fresh_db, 2, prefix="done"):
+            fresh_db.execute("UPDATE event_workqueue SET claimed_at = ?, resolved_at = ? "
+                             "WHERE event_uid = ?", (now, now, uid))
+        fresh_db.commit()
+        _queue_detail_reads(fresh_db, 3)          # backlog 3, not over per_hour 3
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert len(clock.calls) == 1              # 3 per hour, 2 already used
+
+    def test_burst_is_still_bounded_by_the_drain(self, fresh_db, profile, monkeypatch):
+        profile("workqueue_drain:\n  read_detail_per_drain: 3\n"
+                "workqueue_rate_limits:\n  read-detail: {per_hour: 2, burst: 50}\n")
+        _queue_detail_reads(fresh_db, 10)
+        clock = _Clock(per_call=1)
+        monkeypatch.setattr(orchestrator, "_invoke_skill", clock.invoke)
+
+        orchestrator.drain_workqueue(fresh_db, clock=clock)
+
+        assert len(clock.calls) == 3
 
     def test_detail_fetches_start_only_in_the_first_half_of_the_budget(
             self, fresh_db, profile, monkeypatch):

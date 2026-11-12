@@ -58,7 +58,9 @@ first) exits 75 — not now — so the drain never advances it unread.
 
 One Firecrawl scrape + one Codex call per approved event. Skipped with no fetch
 (`no-detail-page`) when `source_url` is missing or is the seed's listing page.
-Hourly cap: `workqueue_rate_limits.read-detail` (default 30). The heartbeat
+Hourly cap: `workqueue_rate_limits.read-detail` (default 30 claims in any one
+hour; `{per_hour: 30, burst: 120}` lifts it to the burst while the read-detail
+backlog is deeper than 30). The heartbeat
 drain runs detached, so it fetches up to `workqueue_drain.read_detail_per_drain`
 pages (default 6) per 10-min drain, started only in the first half of the
 drain's `budget_seconds` (default 420) so the rest of the pipeline keeps the

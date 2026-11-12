@@ -51,8 +51,12 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     rowcount 0 means another worker/operator already moved it and the loser skips silently. This is
     the entire concurrency-safety story.
   - `workqueue.py` — `event_workqueue` table. `enqueue` (idempotent via UNIQUE), `claim` (atomic,
-    per-action-per-hour rate limited via `town-profile.yaml` → `workqueue_rate_limits`), `complete`,
-    `fail` (after `MAX_ATTEMPTS=3`, marks the event `stuck-` and resolves the row).
+    per-action rate limited over the last hour via `town-profile.yaml` → `workqueue_rate_limits`: an int,
+    or `{per_hour: N, burst: M}` — the limit is `burst` while that action's unresolved backlog exceeds
+    `per_hour`; the drain's `workqueue_drain` caps and budget still bound each pass), `complete`,
+    `fail` (after `MAX_ATTEMPTS=3`, marks the event `stuck-` and resolves the row). Stored timestamps
+    are ISO (`…T06:41:28+00:00`); a window against SQLite's `datetime('now', …)` compares
+    `datetime(col)`, never the raw column ('T' > ' ' made every claim that UTC day "this hour").
   - `orchestrator.py` — `drain_workqueue()`: for each `next_action`, claim ≤5 items, `subprocess`-invoke
     the matching skill with `--event-uid <uid>`, advance state + enqueue the next action on rc 0, `fail`
     on nonzero, and **quietly skip (`rc==127`) skills that aren't implemented yet**. Wrapped in an

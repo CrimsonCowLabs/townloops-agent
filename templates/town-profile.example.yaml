@@ -82,13 +82,18 @@ discovery:
 # Workqueue drain (engine/orchestrator.drain_settings). The 10-min heartbeat
 # runs detached, bounded by these; read on every drain. Detail-page reads
 # (Firecrawl + Codex, ~100s worst case) start only in the first half of the
-# budget; no skill starts once it is spent. workqueue_rate_limits (hourly,
-# per action; read-detail defaults to 30) still bound every claim.
+# budget; no skill starts once it is spent. workqueue_rate_limits (claims per
+# action in any one hour; read-detail defaults to 30) still bound every claim.
+# An action may set a burst: while its unresolved backlog is deeper than
+# per_hour, the limit rises to burst — still bounded by the drain above (6
+# reads × 6 drains = 36/hour at the defaults; raise read_detail_per_drain to
+# use a larger read-detail burst).
 # workqueue_drain:
 #   read_detail_per_drain: 6   # 1–20
 #   budget_seconds: 420        # 60–660; keep budget + 120s under the 10-min tick
 # workqueue_rate_limits:
-#   read-detail: 30
+#   read-detail: {per_hour: 30, burst: 120}   # or a plain int: read-detail: 30
+#   ship: 100
 
 # Operating mode (engine/autonomy.py). `supervised` (the default) is the
 # operator-gated pipeline: seeds, events, business candidates and
