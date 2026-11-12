@@ -47,13 +47,13 @@
       "prompt": "python /home/agent/.hermes/scripts/event_reconcile.py"
     },
     {
-      "id": "event-seed-discovery-weekly",
-      "name": "Weekly seed discovery (LLM proposes seed URLs → operator approves)",
-      "schedule": "0 4 * * 0",
+      "id": "event-seed-hunt",
+      "name": "Daily seed hunt (web search, known organisations' calendars, sites events link to, weekly the model-memory proposer; ≤40 Firecrawl calls, ≤10 new seeds, proposed for the 04:45 review; detached)",
+      "schedule": "15 4 * * *",
       "skills": ["event-seed-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py"
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_hunt.py"
     },
     {
       "id": "event-seed-probe",
@@ -71,7 +71,7 @@
       "skills": ["event-seed-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py review"
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py review --trials 8"
     },
     {
       "id": "performer-research",
@@ -92,9 +92,9 @@
       "prompt": "python /home/agent/.hermes/scripts/business_promote.py --limit 3"
     },
     {
-      "id": "org-harvest-weekly",
-      "name": "Weekly organisation harvest (autonomous mode only: sweep + verify businesses, community groups, non-profits; approve verified; inactive in supervised mode)",
-      "schedule": "0 3 * * 3",
+      "id": "org-harvest-daily",
+      "name": "Daily organisation harvest (autonomous mode only: sweep + verify businesses, community groups, non-profits and venues on rotating gap-driven terms; approve verified; inactive in supervised mode; off the business-promote */15 grid)",
+      "schedule": "7 3 * * *",
       "skills": ["business-discovery"],
       "deliver": "local",
       "no_agent": true,

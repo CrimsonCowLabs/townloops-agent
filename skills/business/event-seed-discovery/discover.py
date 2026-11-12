@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""event-seed-discovery — LLM proposes seed source URLs; HEAD-verified; inserted as proposed.
+"""event-seed-discovery — find event sources; verified; inserted as proposed.
+
+`hunt` (daily cron, engine/seed_hunt) finds them from evidence within a
+Firecrawl budget: web search, the calendars on known organisations' sites,
+the sites events link to, and — at most weekly — `discover`, the original
+Codex-from-memory proposer.
 
 Autonomous mode adds `review` (engine/seeds, judged by engine/autonomy):
 proposed seeds are dry-run and approved only when the run yields at least one real upcoming in-town
@@ -37,7 +42,8 @@ from urllib.parse import urlparse
 
 import yaml
 
-from engine import autonomy, event_dedup, inspection, seed_adapters, source_health
+from engine import autonomy, event_dedup, inspection, seed_adapters, seed_hunt, source_health
+from engine import lock as _lock
 from engine import seeds as seed_ops
 from engine.event_extract import firecrawl_listing as _listing_fetch   # move: event-find's read
 from engine.event_extract import firecrawl_markdown as _trial_fetch
@@ -198,6 +204,55 @@ def _valid_url(url: str) -> bool:
     except Exception:
         return False
     return p.scheme in ("http", "https") and bool(p.netloc)
+
+
+def _memory_proposals(profile: dict) -> list[dict]:
+    """The Codex-from-memory proposer as one hunt input ([] when it fails)."""
+    ok, out, _ = _codex_exec(_build_prompt(profile))
+    return _parse_json_array(out) if ok else []
+
+
+def _hunt_search(query: str) -> list[dict]:
+    from engine.discovery import firecrawl_search
+    return firecrawl_search(query, limit=seed_hunt.SEARCH_RESULTS)
+
+
+def _site_scrape(url: str) -> dict:
+    from engine.discovery import firecrawl_scrape
+    return firecrawl_scrape(url)
+
+
+def cmd_hunt(args) -> int:
+    """Daily: find seeds from search, known organisations' sites, the sites
+    events link to (and weekly, model memory) — at most --max-firecrawl
+    Firecrawl calls, --max-proposals new seeds."""
+    profile = _load_town_profile()
+    if not profile.get("name") and not profile.get("slug"):
+        print(json.dumps({"error": "town-profile.yaml missing name/slug"}))
+        return 2
+    inputs = tuple(i.strip() for i in args.inputs.split(",") if i.strip())
+    unknown = sorted(set(inputs) - set(seed_hunt.INPUTS))
+    if unknown:
+        print(json.dumps({"error": f"unknown input(s) {unknown}; known: {list(seed_hunt.INPUTS)}"}))
+        return 2
+    tools = seed_hunt.Tools(search=_hunt_search, scrape=_site_scrape, verify=_scrape_page,
+                            memory=lambda: _memory_proposals(profile))
+    try:
+        with _lock.acquire("event-seed-hunt"):
+            conn = sqlite3.connect(_DB_PATH)
+            try:
+                out = seed_hunt.hunt(conn, profile, tools, max_firecrawl=args.max_firecrawl,
+                                     max_proposals=args.max_proposals, inputs=inputs,
+                                     record_feed=seed_ops.record_feed)
+            finally:
+                conn.close()
+    except _lock.LockHeld:
+        print(json.dumps({"skipped": "previous hunt still running"}))
+        return 0
+    inspection.record(worker="event-seed-discovery", action="skill-invoke", target="hunt",
+                      detail=json.dumps({k: v for k, v in out.items() if k != "seeds"}), ok=True)
+    print(json.dumps(out))
+    return 0
 
 
 def cmd_discover(args) -> int:
@@ -575,6 +630,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     d.add_argument("--limit", type=int, default=15)
     d.add_argument("--dry-run", action="store_true")
     d.set_defaults(func=cmd_discover)
+    hu = sub.add_parser("hunt", help="find seeds from search, known sites and event links "
+                                     "(daily; budgeted)")
+    hu.add_argument("--max-firecrawl", type=int, default=40,
+                    help="Firecrawl calls this run (searches, homepage scrapes, verifies)")
+    hu.add_argument("--max-proposals", type=int, default=10, help="new seeds this run")
+    hu.add_argument("--inputs", default=",".join(seed_hunt.DEFAULT_INPUTS),
+                    help=f"comma-separated, of {', '.join(seed_hunt.INPUTS)} "
+                         "(memory runs at most weekly)")
+    hu.set_defaults(func=cmd_hunt)
     pr = sub.add_parser("probe", help="detect machine-readable feeds on seed pages")
     pr.add_argument("--seed-id", type=int, help="probe one seed (even if probed before)")
     pr.add_argument("--all", action="store_true", help="re-probe every non-rejected seed")
