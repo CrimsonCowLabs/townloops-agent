@@ -13,6 +13,9 @@ wrapper returns immediately. The drain bounds itself (the town's
 colliding; this wrapper doesn't even start one while a drain holds it.
 Output goes to state/logs/workqueue-heartbeat-<date>.log.
 
+Before that, in the foreground, the immediate-alert tick (engine/alerts):
+an open circuit not yet alerted, a cron job failing twice in a row.
+
 `--drain` runs the drain in this process (what the detached child runs; also
 the standalone entry point for non-cron use).
 """
@@ -38,11 +41,27 @@ def drain() -> int:
     return 0 if not result.get("error") else 1
 
 
+def alert_tick() -> None:
+    """The immediate alerts (engine/alerts.tick: an open circuit, a cron job
+    failing or skipped twice in a row) — every 10 minutes, here in the
+    foreground. Best-effort: an alert problem never stops the drain."""
+    try:
+        from engine import alerts
+        conn = db.connect(db.db_path_from_env())
+        try:
+            alerts.tick(conn)
+        finally:
+            conn.close()
+    except Exception as e:  # noqa: BLE001
+        print(f"alert tick failed: {e}", file=sys.stderr)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv[:1] == ["--drain"]:
         return drain()
     db.migrate()  # a code update must not meet an older schema
+    alert_tick()
     try:
         with lock.acquire("workqueue-drain"):
             pass

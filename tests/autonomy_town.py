@@ -95,6 +95,7 @@ class Town:
         import engine.townloops_api as tl
         monkeypatch.setattr(tl, "Client", lambda *a, **k: self.api)
         monkeypatch.setattr("engine.orchestrator._telegram_notify", self.telegrams.append)
+        monkeypatch.setattr("engine.notify.telegram", self.telegrams.append)
         monkeypatch.setattr("engine.event_detail.firecrawl_markdown", self._fetch_detail)
         monkeypatch.setattr("engine.event_detail.codex_exec", self._codex)
         monkeypatch.setattr("engine.event_people.codex_exec", self._codex)
@@ -249,6 +250,33 @@ class Town:
         with contextlib.redirect_stdout(io.StringIO()):
             out = orchestrator.summary(self.conn, hours=24)
         return out, Path(out["report_path"]).read_text(), self.telegrams[-1]
+
+    def report(self, *argv: str) -> dict:
+        """town-report's CLI (the daily report, the analyst-run budget):
+        its exit code and its JSON answer."""
+        mod = load(SKILLS / "town-report" / "report.py", "town_report_cli")
+        self.conn.commit()   # it opens its own connection
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = mod.main(list(argv))
+        text = out.getvalue()
+        return {"rc": rc, **(json.loads(text[text.index("{"):]) if "{" in text else {})}
+
+    def heartbeat(self) -> None:
+        """The 10-minute heartbeat wrapper's own work — migrate, then the
+        standing-alert tick; its detached drain is not started here."""
+        import subprocess
+
+        class NoDrain:
+            pid = 0
+
+            def __init__(self, *a, **k):
+                pass
+        mod = load(ROOT / "scripts" / "workqueue_heartbeat.py", "town_heartbeat")
+        self.mp.setattr(subprocess, "Popen", NoDrain)
+        self.conn.commit()
+        with contextlib.redirect_stdout(io.StringIO()):
+            assert mod.main([]) == 0
 
     def seed_row(self, name: str) -> dict:
         cur = self.conn.cursor()

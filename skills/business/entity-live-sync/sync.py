@@ -28,7 +28,7 @@ import json
 import os
 import sys
 
-from engine import autonomy, entity_ship, entity_sync, ref_adoption, series_sync
+from engine import autonomy, entity_ship, entity_sync, job_health, ref_adoption, series_sync
 from engine import lock as _lock
 from engine.derive_helpers import open_db
 
@@ -62,8 +62,11 @@ def _run(args) -> int:
             series_counts = series_sync.sweep(client, conn, limit=args.limit)
     except _lock.LockHeld:
         print("workqueue drain running — sync skipped this time")
+        job_health.record(conn, "entity-live-sync", job_health.SKIPPED,
+                          detail="workqueue-drain lock held")
         return 0
     conn.commit()
+    job_health.record(conn, "entity-live-sync", job_health.OK)
     print(json.dumps({**(counts or {"synced": 0}), "released": released,
                       "refs": refs, "series": series_counts}))
     return 0

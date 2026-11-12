@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 028).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 031).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -266,6 +266,23 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     dashboard, supervised ⇒ `DASHBOARD_PASSWORD`), open `autonomy_state` circuit verbatim (DB opened `mode=ro`),
     Firecrawl via `firecrawl_env`, Codex login presence, `AGENT_TZ`, Listmonk/Telegram as warnings. Never
     writes or probes by create — a new check stays read-only and cheap).
+    `notify.py` (the one Telegram sender, stdlib only — `orchestrator._telegram_notify` and the circuit alert
+    delegate to it; tests patch both), `alerts.py` (standing alerts, the one place: `standing(conn)` → `Alert`s,
+    `needs_you` first — open circuit (reason + evidence + `autonomy resume`), API freeze, pause, cron jobs failing,
+    held events, unconfirmed cancellations; then source health, a failed/interrupted analyst run. The daily report
+    and the nightly digest's "Needs attention" read it. `tick` = the immediate half, run by the heartbeat wrapper's
+    foreground: `autonomy.alert_circuit` (once per opening, keyed on its `at` — also a circuit written by hand) +
+    `job_health.scan_hermes`), `job_health.py` (a job failed or skipped on 2 runs in a row → one alert, "ok again"
+    on recovery; table `job_health`; fed by Hermes' `$HERMES_HOME/cron/output/<job>/<stamp>.md` Status lines
+    (`cron:<id>`) and by skills that skip on a lock — entity-live-sync, business-discovery — calling `record`),
+    `town_report.py` (the daily report: `run` → `state/reports/<date>-analyst.md` + short Telegram; sources/events/
+    entities (dedups name the live slug)/holds/failures/analyst runs, counts + examples; skill `town-report`),
+    `analyst_runs.py` (table `analyst_runs`; budget = town-profile `analyst:` over `DEFAULTS`; `start` backs up,
+    marks a run past its `max_minutes` `interrupted`, refuses while one is live; used = minutes, Firecrawl requests
+    since start (`firecrawl_env.note_call` per request → `state/usage/`), `submissions` rows since start),
+    `local_data.py` (schema reference → `skills/business/local-data/references/schema.md`, regenerate after a
+    migration or the test fails; `log_edit` = `agent_activity` `local-edit`; `backup` = online backup to
+    `state/backups/`, last 7).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -363,6 +380,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   alert is held against the average it dropped from (`health_baseline`) so a lasting drop neither
   re-alerts nor clears itself. A recorded `feed_url` is evidence for the source-automation review,
   not a switch — event-find still scrapes the seed URL unless the seed has an adapter (`set-adapter`).
+- **Alerts are transition-only and repeat in every daily report while they stand.** A new reason to
+  stop or warn goes into `engine/alerts.standing` (the daily report and nightly digest read it); an
+  immediate alert goes through `alerts.tick` (heartbeat). Never a second Telegram sender — `engine/notify`.
 - **Autonomous mode is a per-town switch; supervised stays the default.** `operating_mode:
   autonomous` (town-profile.yaml) moves every local gate into `engine/autonomy.py` and makes the
   TownLoops admin moderation queue the only human gate: creates go through `GatedClient` and

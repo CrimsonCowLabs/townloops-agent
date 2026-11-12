@@ -266,20 +266,16 @@ def digest(conn: sqlite3.Connection, since: str, series_report: Optional[dict] =
     accepted = decided.get("published", 0) + decided.get("merged", 0)
     n = accepted + decided.get("rejected", 0)
     seeds = [d for d in log if d["subject"] == "seed"]
-    attention: list[str] = []
-    c = autonomy.circuit(conn)
-    if c:
-        attention.append(f"submissions stopped: {c.get('reason')} (since {c.get('at')}) — "
-                         "`autonomy resume` once fixed")
+    # Standing alerts (engine/alerts) the operator must clear — the circuit, an
+    # API freeze, a pause, failing cron jobs, unconfirmed cancellations; held
+    # events have their own digest sections.
+    from engine import alerts
+    attention: list[str] = [a.text for a in alerts.standing(conn)
+                            if a.needs_you and a.kind != "held"]
     for r in _rows(conn, "SELECT resource, slug FROM submissions WHERE status = 'gone' "
                          "AND decided_at >= ?", (since,)):
         attention.append(f"{r['resource']} {r['slug']} left the queue but no surviving "
                          "record was found — check whether it was merged or deleted")
-    for r in _rows(conn, "SELECT COALESCE(title, name) AS title, date_local, townloops_slug, "
-                         "cancel_note FROM events WHERE cancel_status = 'possibly-cancelled' "
-                         "ORDER BY date_utc"):
-        attention.append(f"possibly cancelled (not acted on): {r['title']} {r['date_local'] or ''}"
-                         f" ({r['townloops_slug']}) — {r['cancel_note']}")
     for d in log:
         if d["subject"] == "seed" and d["verdict"] in seed_ops.URL_CHANGES:
             attention.append(f"seed {seed_name_of(d['target']) or d['target']} moved: "
