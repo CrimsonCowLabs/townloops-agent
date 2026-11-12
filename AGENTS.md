@@ -93,7 +93,8 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     `listing_hosts.py` (the one directory/listing/aggregator host list — restaurantji, Yelp, maps, ticketing,
     Facebook events: evidence at most, never an entity's `website`; enrichment, discovery's blocklist, promote and
     performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
-    `listmonk_api.py`, `lock.py` (flock advisory locks), `log.py` (JSON structured logging),
+    `listmonk_api.py`, `lock.py` (flock advisory locks; a frequent job skips a held lock, a due daily/weekly job that shares one —
+    entity-live-sync behind the heartbeat drain, org harvest behind business-promote — passes a bounded `wait=` instead), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py` (also the one
     `extra_json` parser `parse_extra_json`, and `seed_ref`/`seed_name_of` for the `seed:<name>` reference),
     `entity_enrich.py` (budgeted local → live → new entity resolution, per-kind `SPECS` for all 5

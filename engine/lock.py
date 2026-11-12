@@ -15,19 +15,30 @@ Usage inside a skill's cron entry point:
         sys.stderr.write(f"[event-ingest] previous run still active: {e}\\n")
         sys.exit(0)   # exit 0 — this is expected under overlap, not a failure
 
+A frequent job (the 10-min heartbeat, the 15-min promote) skips: its next
+fire comes soon. A daily or weekly job that shares a lock with one passes
+`wait=` seconds instead and queues behind the holder — bounded, so a stuck
+holder still ends in LockHeld rather than a pile of waiting processes. Only
+detached runs may wait (Hermes kills a cron script after 120s).
+
 Backing store: $TOWNLOOPS_LOCK_DIR (default $HERMES_HOME/state/locks/, or
 /tmp/townloops-locks if HERMES_HOME is unset). Lock is `fcntl.flock`
-LOCK_EX | LOCK_NB — held for the lifetime of the context manager; released
-even on process crash (kernel-level).
+LOCK_EX | LOCK_NB (retried every POLL_S while waiting) — held for the
+lifetime of the context manager; released even on process crash
+(kernel-level).
 """
 
 from __future__ import annotations
 
 import fcntl
 import os
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+# How often a waiting acquire retries the lock.
+POLL_S = 1.0
 
 
 class LockHeld(RuntimeError):
@@ -48,19 +59,30 @@ def _lock_dir() -> Path:
     return Path("/tmp/townloops-locks")
 
 
+def _try_lock(fd: int) -> bool:
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
 @contextmanager
-def acquire(name: str):
+def acquire(name: str, *, wait: float = 0):
     """Acquire an exclusive lock scoped to `name`. Raises LockHeld if another
-    process already holds it. On success, records `<pid>|<iso_ts>` inside the
-    lockfile for postmortem attribution."""
+    process still holds it after `wait` seconds (0: at once). On success,
+    records `<pid>|<iso_ts>` inside the lockfile for postmortem attribution."""
     base = _lock_dir()
     base.mkdir(parents=True, exist_ok=True)
     path = base / f"{name}.lock"
     fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o644)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
+        deadline = time.monotonic() + max(0.0, wait)
+        while not _try_lock(fd):
+            left = deadline - time.monotonic()
+            if left > 0:
+                time.sleep(min(POLL_S, left))
+                continue
             # Read existing holder metadata for the error message.
             try:
                 os.lseek(fd, 0, os.SEEK_SET)

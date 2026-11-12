@@ -9,12 +9,12 @@ What runs when for a town (the schedule itself is `cron/jobs.json`; trust it ove
 | Every 20 min | Performer/creator research (`performer-research`, ≤3) | no |
 | Every 30 min | Mark operator-confirmed cancellations on TownLoops (autonomous: submit page-evidenced ones for merge) | no |
 | 06:00 & 18:00 daily | Event-find over approved seeds | yes |
-| 03:30 daily | Entity live sync (resync, fill live blanks, verify; adopt Ingest Refs on pre-ref rows) | no |
+| 03:30 daily | Entity live sync (resync, fill live blanks, verify; adopt Ingest Refs on pre-ref rows; waits out a running drain) | no |
 | 04:15 daily | TownLoops API snapshot + breaking-change check | no |
 | 04:30 daily | Feed probe on never-probed seeds | no |
 | 04:45 daily | Seed review — autonomous: assign feed-matched adapters, trial proposed seeds, classify, retire/relocate; supervised: only propose adapters | yes |
 | hourly :05 | Moderation feedback — autonomous only: read back TownLoops outcomes | no |
-| 03:00 Wednesday | Organisation harvest — autonomous only: sweep, verify, approve | no |
+| 03:07 Wednesday | Organisation harvest — autonomous only: sweep, verify, approve (off the 15-min promote's minute; waits out a running promote) | no |
 | 21:00 daily | Nightly digest (events by state, workqueue depth, seeds) | no |
 | 02:00 Sunday | Weekly reconcile against seeds + live | yes |
 | 04:00 Sunday | Event-seed discovery | yes |

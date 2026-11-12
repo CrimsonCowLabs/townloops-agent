@@ -32,6 +32,11 @@ from engine import autonomy, entity_ship, entity_sync, ref_adoption, series_sync
 from engine import lock as _lock
 from engine.derive_helpers import open_db
 
+# The nightly run shares `workqueue-drain` with the 10-min heartbeat, whose
+# drain is clamped under 15 min (engine/orchestrator): wait out one drain
+# rather than skip the day. The cron wrapper detaches this run.
+LOCK_WAIT_S = 20 * 60
+
 
 def _run(args) -> int:
     if not all(os.environ.get(k) for k in
@@ -43,7 +48,7 @@ def _run(args) -> int:
     try:
         # Same lock as the workqueue drain, so event-ship never syncs the
         # same entity at the same time.
-        with _lock.acquire("workqueue-drain"):
+        with _lock.acquire("workqueue-drain", wait=LOCK_WAIT_S):
             client = Client()
             counts = entity_sync.sweep(client, conn, limit=args.limit,
                                        kinds=tuple(args.kind or entity_sync.RESOURCES))
@@ -61,7 +66,7 @@ def _run(args) -> int:
                                               kinds=tuple(args.kind or ref_adoption.RESOURCES))
             series_counts = series_sync.sweep(client, conn, limit=args.limit)
     except _lock.LockHeld:
-        print("workqueue drain running — sync skipped this time")
+        print(f"workqueue drain still running after {LOCK_WAIT_S:g}s — sync skipped this time")
         return 0
     conn.commit()
     print(json.dumps({**(counts or {"synced": 0}), "released": released,
