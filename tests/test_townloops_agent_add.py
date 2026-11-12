@@ -393,7 +393,8 @@ def test_rerender_leaves_an_emptied_follower_schedule(env, town):
 def test_rerender_leaves_a_follower_bound_by_override(env, town):
     (town / "docker-compose.override.yml").write_text(
         "services:\n  agent:\n    volumes:\n"
-        "      - ./cron/jobs.empty.json:/home/agent/.hermes/cron/jobs.json:ro\n")
+        "      - ./cron/jobs.empty.json:/home/agent/.hermes/cron/jobs.json:ro\n"
+        "  dashboard:\n    profiles: [\"supervised-dashboard\"]\n")   # an autonomous town
     jobs = town / "cron" / "jobs.json"
     jobs.write_text('{"version": 1, "jobs": [{"id": "old-job"}]}\n')
     r = run(env, "testtown", "--rerender")
