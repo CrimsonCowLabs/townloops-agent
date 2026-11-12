@@ -18,9 +18,9 @@ through engine/entity_ship — the same create-or-adopt + sync path event-ship
 uses. A ship that fails or an enrichment that couldn't read the site leaves
 the row `approved` for the next run.
 
-The same path promotes community-group and non-profit candidates
-(`kind`): they ship as communities, a non-profit with community kind
-'nonprofit'. In autonomous mode the agent approves verified candidates
+The same path promotes community-group, non-profit and venue candidates
+(`kind`): the first two ship as communities, a non-profit with community
+kind 'nonprofit'; a venue ships as a venue. In autonomous mode the agent approves verified candidates
 itself (`auto_approve`, engine/autonomy) and the client is a GatedClient, so
 what ships lands `pending` in the TownLoops moderation queue; a create the
 gate holds ends the run (`held`), the candidate still approved, no attempt
@@ -142,7 +142,7 @@ def propose(conn: sqlite3.Connection, town_slug: str, kind: ProposalKind,
 
 def entity_kind(kind: str) -> str:
     """The local/TownLoops entity kind a candidate kind ships as."""
-    return bd.KIND if kind == bd.KIND else "community"
+    return kind if kind in (bd.KIND, bd.VENUE) else "community"
 
 
 def auto_approve(conn: sqlite3.Connection, town_slug: str, kind: str = bd.KIND,
@@ -197,7 +197,7 @@ def promote_approved(conn: sqlite3.Connection, client, town_slug: str, *,
         if gate.verdict != "submit":   # no enrichment spent on what can't ship now
             out["held"] = gate.reason
             return out
-    index = bd.LiveIndex.from_api(client, kind)
+    index = bd.live_index(client, kind)
     ekind = entity_kind(kind)
     for cand in approved:
         out["processed"] += 1

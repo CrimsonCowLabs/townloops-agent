@@ -93,15 +93,30 @@ def _harvest(args) -> int:
         return 0
 
     def run(conn, client, profile, slug):
+        from engine import harvest_terms
+        from engine.discovery_checks import mark, recently_checked
         out: dict = {"errors": []}
-        for kind in bd.configured_kinds(profile):
+        configured = bd.configured_kinds(profile)
+        for kind in bd.KINDS:
+            index = bd.live_index(client, kind)
+            terms = harvest_terms.pick(conn, kind, harvest_terms.pool(
+                conn, kind, bd.profile_terms(profile, kind), index), args.terms)
+            # Seed directories and Facebook list much the same each day: weekly.
+            dirs_key = f"directories:{kind}"
+            directories = kind in configured and not recently_checked(conn, dirs_key, 7)
+            if not terms and not directories:
+                continue
             swept = bd.run_sweep(conn, client, profile, slug, per_source=args.per_source,
-                                 kind=kind)
+                                 kind=kind, terms=terms, index=index, directories=directories)
+            harvest_terms.mark_searched(conn, kind, terms)
+            if directories:
+                mark(conn, dirs_key, "swept")
             verified = bd.run_verify(conn, client, profile, slug, limit=args.limit, kind=kind)
             approved = bp.auto_approve(
                 conn, slug, kind, reverify=bd.reverifier(client, profile, slug, kind),
                 reverify_limit=args.limit)
-            out[kind] = {"swept": {k: v for k, v in swept.items() if k != "errors"},
+            out[kind] = {"terms": terms,
+                         "swept": {k: v for k, v in swept.items() if k != "errors"},
                          "verified": {k: v for k, v in verified.items() if k != "errors"},
                          "approved": {k: v for k, v in approved.items() if k != "errors"}}
             out["errors"] += swept["errors"] + verified["errors"] + approved["errors"]
@@ -205,6 +220,10 @@ def main(argv=None) -> int:
     harvest = sub.add_parser("harvest")
     harvest.add_argument("--per-source", type=int, default=15)
     harvest.add_argument("--limit", type=int, default=10)
+    harvest.add_argument("--terms", type=int, default=4,
+                         help="search terms a kind this run (rotated: least recently searched "
+                              "first — event hosts with no entity, the profile's terms, "
+                              "categories thin on live)")
     for sp, kinds in ((sweep, bd.KINDS), (verify, bd.KINDS), (ls, bd.KINDS), (stats, bd.KINDS),
                       (promote, (*bd.KINDS, "all"))):
         sp.add_argument("--kind", default="all" if sp is promote else bd.KIND,

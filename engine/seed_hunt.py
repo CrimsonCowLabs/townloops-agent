@@ -39,13 +39,13 @@ import re
 import sqlite3
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
 from typing import Callable, Iterator, Optional
 from urllib.parse import urlparse, urlunparse
 
 from engine import autonomy, categories, listing_hosts, own_site
 from engine.derive_helpers import iso_utc_now, seed_ref
 from engine.discovery import canonicalize_url, same_site
+from engine.discovery_checks import checked_at, mark, recently_checked
 
 INPUTS = ("domains", "sites", "search", "memory")
 DEFAULT_INPUTS = INPUTS
@@ -111,34 +111,6 @@ class Lead:
     kind: str
     via: str                     # discovered_by: domain | site | search | llm
     evidence: dict = field(default_factory=dict)
-
-
-# --------------------------------------------------------------------------
-# discovery_checks
-# --------------------------------------------------------------------------
-
-def checked_at(conn: sqlite3.Connection, key: str) -> Optional[str]:
-    row = conn.execute("SELECT checked_at FROM discovery_checks WHERE key = ?", (key,)).fetchone()
-    return row[0] if row else None
-
-
-def recently_checked(conn: sqlite3.Connection, key: str, days: int,
-                     now: Optional[datetime] = None) -> bool:
-    at = checked_at(conn, key)
-    if not at:
-        return False
-    since = (now or datetime.now(timezone.utc)) - timedelta(days=days)
-    return at >= since.isoformat(timespec="seconds")
-
-
-def mark(conn: sqlite3.Connection, key: str, outcome: str, detail: Optional[dict] = None) -> None:
-    conn.execute("INSERT INTO discovery_checks (key, checked_at, outcome, detail) "
-                 "VALUES (?, ?, ?, ?) ON CONFLICT(key) DO UPDATE SET "
-                 "checked_at = excluded.checked_at, outcome = excluded.outcome, "
-                 "detail = excluded.detail",
-                 (key, iso_utc_now(), outcome,
-                  json.dumps(detail, ensure_ascii=False) if detail else None))
-    conn.commit()
 
 
 # --------------------------------------------------------------------------

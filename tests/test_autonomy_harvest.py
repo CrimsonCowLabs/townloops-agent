@@ -51,8 +51,10 @@ def harvest(town, monkeypatch):
     town.set_profile(profile, entity_moderation=True)
     results: dict[str, list[dict]] = {}
     sites: dict[str, str] = {}
+    town.searched = []
 
     def search(q, limit=5, raise_on_error=False):
+        town.searched.append(q)
         return next((v for k, v in results.items() if q.startswith(k)), [])
 
     def scrape(url, raise_on_error=False):
@@ -163,7 +165,9 @@ class TestOrganisations:
 
         results["coffee shops"] = [{"url": "https://newcafe-tahoe.example/", "title": "New Cafe"}]
         sites["https://newcafe-tahoe.example"] = "New Cafe, South Lake Tahoe. Menu, hours."
-        discovery(town, "harvest")
+        town.searched.clear()
+        discovery(town, "harvest", "--terms", "100")   # every term again, not the rotation's
+        assert any(q.startswith("coffee shops") for q in town.searched)
         discovery(town, "promote")
         assert len(posts(town, "businesses")) == 1
 
@@ -248,6 +252,100 @@ class TestOrganisations:
     def test_harvest_is_inactive_in_supervised_mode(self, town, harvest):
         town.set_profile({**town.profile, "operating_mode": "supervised"})
         assert '"inactive": true' in discovery(town, "harvest")
+
+
+def event_at(town, uid, title, *, host=None, venue=None):
+    """A local event naming its host / venue, neither derived to an entity."""
+    row = {"event_uid": uid, "source": "seed:Arena", "source_kind": "seed", "name": title,
+           "title": title, "date": soon(5), "date_day": soon(5)[:10], "first_seen_at": "x",
+           "last_seen_at": "x", "content_hash": "h", "last_modified_at": "x",
+           "hosting_group": host, "venue_name": venue}
+    town.conn.execute(f"INSERT INTO events ({', '.join(row)}) "
+                      f"VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+    town.conn.commit()
+
+
+def searched_terms(town, *terms) -> set[str]:
+    return {t for t in terms if any(q.startswith(t + " ") for q in town.searched)}
+
+
+class TestDailyHarvest:
+    """Issue #64: the weekly harvest searched the same 10 profile terms every
+    week and found nothing new after Nov 4. The daily harvest searches
+    what the town is missing — hosts its events name with no entity,
+    categories thin on live — with the profile's terms, rotated so
+    successive days search something new; and it discovers venues too."""
+
+    def test_terms_rotate_so_successive_days_search_something_new(self, town, harvest):
+        terms = ["bakeries", "bookstores", "breweries", "florists", "galleries", "outfitters"]
+        town.set_profile({**PROFILE, "discovery": {"business": {"category_query_terms": terms}}},
+                         entity_moderation=True)
+        (town.state / "categories.json").write_text("[]")
+        discovery(town, "harvest", "--terms", "3")
+        first = searched_terms(town, *terms)
+        town.searched.clear()
+        discovery(town, "harvest", "--terms", "3")
+        second = searched_terms(town, *terms)
+        assert len(first) == len(second) == 3 and not first & second
+
+    def test_hosts_named_in_events_with_no_entity_are_looked_for(self, town, harvest):
+        results, sites = harvest
+        town.api.tables["businesses"] = {
+            "aleworx": {"id": 1, "slug": "aleworx", "name": "Aleworx Stateline",
+                        "website": "https://aleworx.example", "status": "published"}}
+        for i in range(3):
+            event_at(town, f"p{i}", f"Putt Night {i}", host="Tipsy Putt Tahoe")
+        event_at(town, "a1", "Trivia", host="AleWorx Stateline")      # live already
+        results["Tipsy Putt Tahoe"] = [{"url": "https://tipsyputt.example/",
+                                        "title": "Tipsy Putt Tahoe"}]
+        sites["https://tipsyputt.example"] = ("Tipsy Putt Tahoe, South Lake Tahoe. "
+                                              "Book now — hours and menu.")
+        discovery(town, "harvest")
+        assert searched_terms(town, "Tipsy Putt Tahoe") == {"Tipsy Putt Tahoe"}
+        assert not searched_terms(town, "AleWorx Stateline")
+        discovery(town, "promote", "--limit", "5")
+        assert [p["name"] for p in posts(town, "businesses")] == ["Tipsy Putt Tahoe"]
+
+    def test_categories_thin_on_live_are_searched_and_full_ones_are_not(self, town, harvest):
+        (town.state / "categories.json").write_text(json.dumps(
+            [{"slug": "food-drink", "name": "Food & Drink"}, {"slug": "arts", "name": "Arts"}]))
+        town.api.tables["businesses"] = {
+            f"cafe-{i}": {"id": i, "slug": f"cafe-{i}", "name": f"Cafe {i}",
+                          "category_slug": "food-drink", "status": "published"}
+            for i in range(3)}
+        discovery(town, "harvest", "--terms", "50")
+        assert searched_terms(town, "gallery", "museum")
+        assert not searched_terms(town, "restaurant", "bakery", "cafe")
+
+    def test_a_venue_events_happen_at_is_discovered_deduped_and_submitted_pending(
+            self, town, harvest):
+        results, sites = harvest
+        town.api.tables["venues"] = {
+            "lake-tahoe-arena": {"id": 5, "slug": "lake-tahoe-arena", "name": "Lake Tahoe Arena",
+                                 "website": "https://arena.example", "status": "published"}}
+        town.api.tables["businesses"] = {
+            "edgewood": {"id": 6, "slug": "edgewood", "name": "Edgewood Tahoe Resort",
+                         "website": "https://edgewood.example", "status": "published"}}
+        for i in range(2):
+            event_at(town, f"l{i}", f"Concert {i}", venue="Lakeview Commons")
+            event_at(town, f"a{i}", f"Show {i}", venue="Lake Tahoe Arena")
+            event_at(town, f"e{i}", f"Gala {i}", venue="The Edge at Edgewood")
+        results["Lakeview Commons"] = [{"url": "https://lakeviewcommons.example/",
+                                        "title": "Lakeview Commons"}]
+        results["The Edge at Edgewood"] = [{"url": "https://edgewood.example/",
+                                            "title": "Edgewood Tahoe Resort"}]
+        sites["https://lakeviewcommons.example"] = (
+            "Lakeview Commons, South Lake Tahoe's lakeside park. Upcoming events and "
+            "directions to the beach.")
+        discovery(town, "harvest")
+        assert searched_terms(town, "Lakeview Commons") == {"Lakeview Commons"}
+        assert not searched_terms(town, "Lake Tahoe Arena")      # a live venue already
+        assert _status(town, "https://edgewood.example/") == "already-live"   # a live business
+        discovery(town, "promote", "--limit", "5")
+        [venue] = posts(town, "venues")
+        assert venue["name"] == "Lakeview Commons"
+        slug = town.api.created_slug("venues", 0)
+        assert town.api.tables["venues"][slug]["status"] == "pending"
 
 
 class TestHostsAndPeople:

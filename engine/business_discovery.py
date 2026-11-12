@@ -1,6 +1,6 @@
 """Organisation discovery for this town: sweep the web for local businesses,
-community groups and non-profits (`KINDS`), verify each candidate's page,
-and never propose one that is already on TownLoops.
+community groups, non-profits and venues (`KINDS`), verify each candidate's
+page, and never propose one that is already on TownLoops.
 
 The sweeps and the page verifier are the `engine/discovery.py` kernel
 (Firecrawl, no LLM). This module owns what the kernel deliberately doesn't:
@@ -23,7 +23,10 @@ Candidate statuses:
 
 Every function takes the candidate `kind` ('business' by default); a
 community group and a non-profit both ship as a community (a non-profit with
-community `kind` 'nonprofit'). A live match counts whatever its TownLoops
+community `kind` 'nonprofit'), a venue as a venue. A venue candidate is
+deduped against live venues first, then against live businesses and
+communities (`live_index`): a place already listed as an organisation is
+never proposed again as a venue. A live match counts whatever its TownLoops
 status: a pending one is `already-live` (already submitted), a rejected one
 is `rejected` with a `townloops` reason.
 
@@ -58,7 +61,9 @@ from engine.derive_helpers import entity_richness, iso_utc_now, normalize_name
 
 KIND = "business"
 # Candidate kind → the TownLoops resource it ships as.
-KINDS = {"business": "businesses", "community": "communities", "nonprofit": "communities"}
+KINDS = {"business": "businesses", "community": "communities", "nonprofit": "communities",
+         "venue": "venues"}
+VENUE = "venue"
 FUZZY_NAME_RATIO = 0.85
 OPERATOR_REASON = "operator"
 TOWNLOOPS_REASON = "townloops"
@@ -189,6 +194,34 @@ class LiveIndex:
                 if len(site_path) > best_len:
                     best, best_len = row, len(site_path)
         return best
+
+
+class VenueIndex:
+    """A venue candidate's live dedup: the town's live venues, then its live
+    businesses and communities (`orgs`) — the same match rules as
+    LiveIndex."""
+
+    def __init__(self, venues: LiveIndex, orgs: LiveIndex):
+        self.rows, self.venues, self._v, self._orgs = venues.rows, None, venues, orgs
+
+    def match(self, canonical_url: str, name: Optional[str]) -> Optional[LiveMatch]:
+        m = self._v.match(canonical_url, name)
+        if m:
+            return m
+        o = self._orgs.match(canonical_url, name)
+        return o and LiveMatch(o.slug, o.name,
+                               f"matches live organisation {o.slug}: {o.reason}")
+
+
+def live_index(client, kind: str = KIND):
+    """The live dedup index for a candidate `kind` (read from TownLoops)."""
+    if kind != VENUE:
+        return LiveIndex.from_api(client, kind)
+    venues = [v for v in client.paginate("venues") if v.get("status") != "rejected"]
+    orgs = [*client.paginate("businesses"), *client.paginate("communities")]
+    return VenueIndex(LiveIndex.build(venues, VENUE),
+                      LiveIndex.build([o for o in orgs if o.get("status") != "rejected"],
+                                      "organisation"))
 
 
 # --------------------------------------------------------------------------
@@ -414,15 +447,24 @@ def configured_kinds(profile: dict) -> list[str]:
 # Search shapes that land on an organisation's own site, never a roundup:
 # no "best"/"top"/"in {town}" (those rank listicles first). One shape adds
 # what an own site carries for its kind; the other asks for the site itself.
-OWN_SITE_SIGNAL = {"business": "hours contact", "community": "about us", "nonprofit": "donate"}
+OWN_SITE_SIGNAL = {"business": "hours contact", "community": "about us", "nonprofit": "donate",
+                   "venue": "events directions"}
 
 
-def query_templates(profile: dict, town_name: str, region: str, kind: str = KIND) -> list[str]:
-    loc = f"{town_name}, {region}".strip(", ")
+def profile_terms(profile: dict, kind: str = KIND) -> list[str]:
+    """The kind's search terms from town-profile.yaml → `discovery`."""
     cfg = _kind_profile(profile, kind)
     terms = list(cfg.get("category_query_terms") or [])
     for group in cfg.get("query_groups") or []:
         terms += list((group or {}).get("terms") or [])
+    return terms
+
+
+def query_templates(profile: dict, town_name: str, region: str, kind: str = KIND,
+                    terms: Optional[list[str]] = None) -> list[str]:
+    """Two searches a term — `terms`, else the profile's."""
+    loc = f"{town_name}, {region}".strip(", ")
+    terms = profile_terms(profile, kind) if terms is None else terms
     return [q for term in terms for q in (
         f"{term} {loc} {OWN_SITE_SIGNAL[kind]}", f"{term} {town_name} official website")]
 
@@ -435,18 +477,21 @@ def seed_directory_hosts(profile: dict) -> list[str]:
 
 
 def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
-              *, per_source: int = 25, kind: str = KIND) -> dict:
+              *, per_source: int = 25, kind: str = KIND, terms: Optional[list[str]] = None,
+              index=None, directories: bool = True) -> dict:
     """Web search + seed directories (+ Facebook when the profile lists
     `facebook_terms`) from town-profile.yaml → `discovery.business`, deduped
-    against live. The live list is read first: no Firecrawl spend when
-    TownLoops can't answer."""
-    index = LiveIndex.from_api(client, kind)
+    against live. `terms` replaces the profile's search terms (the harvest's
+    rotation, engine/harvest_terms); `directories=False` skips the seed
+    directories and Facebook. The live list is read first (unless `index`
+    is given): no Firecrawl spend when TownLoops can't answer."""
+    index = index if index is not None else live_index(client, kind)
     town_name = profile.get("name") or town_slug
     region = profile.get("region") or ""
-    cfg = _kind_profile(profile, kind)
+    cfg = _kind_profile(profile, kind) if directories else {}
     errors: list[str] = []
     found: list[discovery.Candidate] = []
-    templates = query_templates(profile, town_name, region, kind)
+    templates = query_templates(profile, town_name, region, kind, terms)
     if templates:
         found += discovery.sweep_web_search(town_name, region, templates, kind=kind,
                                             per_source=per_source,
@@ -462,9 +507,9 @@ def run_sweep(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
         found += discovery.sweep_facebook(town_name, cfg["facebook_terms"], kind=kind,
                                           per_source=per_source, error_sink=errors)
     counts = record_sweep(conn, town_slug, found, index, kind)
-    live_key = "live_businesses" if kind == KIND else "live_communities"
-    return {**counts, live_key: len(index.rows),
-            "live_venues": len(index.venues.rows) if index.venues else 0, "errors": errors}
+    live_key = {KIND: "live_businesses", VENUE: "live_venues"}.get(kind, "live_communities")
+    return {**counts, "live_venues": len(index.venues.rows) if index.venues else 0,
+            live_key: len(index.rows), "errors": errors}
 
 
 def _verify(cand: dict, profile: dict, town_slug: str, kind: str) -> dict:
@@ -482,7 +527,7 @@ def run_verify(conn: sqlite3.Connection, client, profile: dict, town_slug: str,
                *, limit: int = 20, kind: str = KIND) -> dict:
     """Verify up to `limit` `new` candidates. A verifier crash (Firecrawl
     down) leaves the candidate `new` for the next run rather than rejecting it."""
-    index = LiveIndex.from_api(client, kind)
+    index = live_index(client, kind)
     out = {"processed": 0, "verified": 0, "rejected": 0, "already_live": 0,
            "deferred": 0, "errors": []}
     for cand in pending_verify(conn, town_slug, limit, kind):
@@ -514,6 +559,6 @@ def reverifier(client, profile: dict, town_slug: str,
         if draft := (cand.get("verify") or {}).get("draft"):
             verdict = {**verdict, "draft": draft}
         if not index:
-            index.append(LiveIndex.from_api(client, kind))
+            index.append(live_index(client, kind))
         return record_verdict(conn, cand, verdict, index[0], from_status="verified")
     return run
