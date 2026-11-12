@@ -8,11 +8,17 @@ the town's copy — the `town-analyst` job's schedule:
     (after the morning event-find and the 03:00–05:00 jobs, before the
     nightly digest).
 
-Nothing else in the file changes (a text substitution, so the formatting is
-the repo's). Run on the host by the scaffolder (python3, stdlib — PyYAML when
+`render` changes nothing else (a text substitution). `for_hermes` then
+writes the schedule in the shape Hermes' scheduler runs — the repo's file is
+shorthand it doesn't schedule: a cron string becomes `{kind: cron, expr}`, and a
+script job's `python …/scripts/<wrapper>.py` prompt its `script:` (Hermes runs a
+script with no arguments, so a script job's prompt is the bare wrapper — the
+wrapper carries the defaults). Hermes' run state (next/last run, pauses) is
+carried over by job id from the town's previous file, so a rerender doesn't
+reset it. Run on the host by the scaffolder (python3, stdlib — PyYAML when
 present, else a line scan for the one key):
 
-    python3 -m engine.analyst_schedule SRC_JOBS SLUG PROFILE  > DEST_JOBS
+    python3 -m engine.analyst_schedule SRC_JOBS SLUG PROFILE [PREVIOUS_JOBS] > DEST_JOBS
 """
 
 from __future__ import annotations
@@ -86,12 +92,70 @@ def read_profile(path: Path) -> dict:
         return {}
 
 
+SCRIPTS = "/home/agent/.hermes/scripts/"
+# Hermes' own bookkeeping on a job, kept across a rerender.
+RUN_STATE = ("enabled", "state", "paused_at", "paused_reason", "next_run_at", "last_run_at",
+             "last_status", "last_error", "last_delivery_error", "repeat")
+
+
+def _script(job: dict) -> str:
+    """A script job's wrapper: `python /home/agent/.hermes/scripts/<name>.py`, nothing more."""
+    words = (job.get("prompt") or "").split()
+    if len(words) != 2 or words[0] != "python" or not words[1].startswith(SCRIPTS):
+        raise ValueError(f"cron job {job.get('id')!r}: a script job's prompt must be "
+                         f"`python {SCRIPTS}<wrapper>.py` (Hermes passes no arguments; "
+                         f"put defaults in the wrapper), got {job.get('prompt')!r}")
+    return words[1][len(SCRIPTS):]
+
+
+def for_hermes(jobs_text: str, previous_text: Optional[str] = None) -> str:
+    """The schedule as Hermes' scheduler stores and runs it."""
+    doc = json.loads(jobs_text)
+    previous = {}
+    if previous_text:
+        try:
+            previous = {j.get("id"): j for j in json.loads(previous_text).get("jobs", [])}
+        except (ValueError, AttributeError):
+            previous = {}
+    out = []
+    for job in doc.get("jobs", []):
+        job = dict(job)
+        expr = job.get("schedule")
+        if isinstance(expr, str):
+            job["schedule"] = {"kind": "cron", "expr": expr}
+            job["schedule_display"] = expr
+        if job.get("no_agent"):
+            job["script"] = _script(job)
+            job.pop("prompt", None)
+        job.setdefault("enabled", True)
+        job.setdefault("state", "scheduled")
+        old = previous.get(job.get("id")) or {}
+        if old.get("schedule") == job["schedule"]:
+            job.update({k: old[k] for k in RUN_STATE if k in old})
+        out.append(job)
+    doc["jobs"] = out
+    return json.dumps(doc, indent=2) + "\n"
+
+
 def main(argv: list[str]) -> int:
-    if len(argv) != 3:
-        print("usage: python3 -m engine.analyst_schedule SRC_JOBS SLUG PROFILE", file=sys.stderr)
+    if len(argv) not in (3, 4):
+        print("usage: python3 -m engine.analyst_schedule SRC_JOBS SLUG PROFILE [PREVIOUS_JOBS]",
+              file=sys.stderr)
         return 2
-    src, slug, profile = argv
-    sys.stdout.write(render(Path(src).read_text(), slug, read_profile(Path(profile))))
+    src, slug, profile = argv[:3]
+    previous = None
+    if len(argv) == 4:
+        try:
+            previous = Path(argv[3]).read_text()
+        except OSError:
+            previous = None
+    try:
+        text = for_hermes(render(Path(src).read_text(), slug, read_profile(Path(profile))),
+                          previous)
+    except ValueError as e:
+        print(e, file=sys.stderr)
+        return 3
+    sys.stdout.write(text)
     return 0
 
 

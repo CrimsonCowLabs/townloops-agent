@@ -176,12 +176,13 @@ is_follower_town() {  # cron is switched off: the override binds jobs.empty.json
 # The repo's schedule as this town runs it: verbatim but for the town-analyst
 # job's start time — town-profile.yaml `analyst.schedule`, else derived from
 # the slug, so towns sharing a host don't start their analyst runs together.
-render_cron() {  # <town dir> <dest>
+render_cron() {  # <town dir> <dest> — Hermes' format, run state kept from the town's jobs.json
   if [[ ! -f "$REPO/cron/jobs.json" ]]; then
     echo "missing schedule: $REPO/cron/jobs.json" >&2; exit 4
   fi
   PYTHONPATH="$REPO" "${PYTHON:-python3}" -m engine.analyst_schedule \
-    "$REPO/cron/jobs.json" "$SLUG" "$1/town-profile.yaml" > "$2"
+    "$REPO/cron/jobs.json" "$SLUG" "$1/town-profile.yaml" "$1/cron/jobs.json" > "$2" || {
+    rm -f "$2"; echo "could not render $REPO/cron/jobs.json for Hermes" >&2; exit 4; }
 }
 
 refresh_cron() {  # a leader town's cron/jobs.json ← the repo's schedule
@@ -204,7 +205,7 @@ refresh_cron() {  # a leader town's cron/jobs.json ← the repo's schedule
     backup="$jobs.bak-$(date +%Y%m%d-%H%M%S)"
     cp -p "$jobs" "$backup"
     echo "refreshed $jobs from $REPO/cron/jobs.json (previous: $backup)."
-    echo "Hermes' run state in it (next/last run, pauses) starts over; apply with: cd $town && docker compose restart agent"
+    echo "Hermes' run state (next/last run, pauses) is kept for unchanged jobs; apply with: cd $town && docker compose restart agent"
   else
     echo "wrote $jobs from $REPO/cron/jobs.json"
   fi

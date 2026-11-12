@@ -62,7 +62,7 @@
       "skills": ["event-seed-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py probe --limit 4"
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_probe.py"
     },
     {
       "id": "event-seed-review",
@@ -71,7 +71,7 @@
       "skills": ["event-seed-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/scripts/event_seed_discovery.py review --trials 8"
+      "prompt": "python /home/agent/.hermes/scripts/event_seed_review.py"
     },
     {
       "id": "performer-research",
@@ -80,7 +80,7 @@
       "skills": ["performer-research"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/scripts/performer_research.py --limit 3"
+      "prompt": "python /home/agent/.hermes/scripts/performer_research.py"
     },
     {
       "id": "business-promote",
@@ -89,7 +89,7 @@
       "skills": ["business-discovery"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/scripts/business_promote.py --limit 3"
+      "prompt": "python /home/agent/.hermes/scripts/business_promote.py"
     },
     {
       "id": "org-harvest-daily",
@@ -134,7 +134,7 @@
       "skills": ["townloops-api"],
       "deliver": "local",
       "no_agent": true,
-      "prompt": "python /home/agent/.hermes/skills/business/townloops-api/api.py check"
+      "prompt": "python /home/agent/.hermes/scripts/api_check.py"
     },
     {
       "id": "nightly-digest",

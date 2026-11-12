@@ -209,16 +209,17 @@ def test_scaffolded_town_schedules_only_what_the_repo_has(env, tmp_path):
 
 def _rendered_schedule(slug: str, profile: dict | None = None) -> str:
     from engine import analyst_schedule
-    return analyst_schedule.render((ROOT / "cron" / "jobs.json").read_text(), slug, profile)
+    return analyst_schedule.for_hermes(
+        analyst_schedule.render((ROOT / "cron" / "jobs.json").read_text(), slug, profile))
 
 
 def _analyst_time(jobs_path: Path) -> str:
     jobs = json.loads(jobs_path.read_text())["jobs"]
-    return next(j["schedule"] for j in jobs if j["id"] == "town-analyst")
+    return next(j["schedule"]["expr"] for j in jobs if j["id"] == "town-analyst")
 
 
 def test_scaffolded_town_installs_the_repos_schedule(env, tmp_path):
-    """Verbatim but for the analyst run's start time."""
+    """The repo's schedule in Hermes' format, but for the analyst run's start time."""
     assert run(env, "testtown").returncode == 0
     cron = tmp_path / "towns" / "testtown" / "cron"
     assert (cron / "jobs.json").read_text() == _rendered_schedule("testtown")
@@ -420,3 +421,16 @@ def test_a_repo_path_with_a_colon_is_refused(env, tmp_path):
     assert r.returncode != 0
     assert "':'" in r.stderr
     assert not (tmp_path / "towns" / "testtown").exists()
+
+
+def test_rerender_keeps_hermes_run_state(env, town):
+    jobs_path = town / "cron" / "jobs.json"
+    doc = json.loads(jobs_path.read_text())
+    beat = next(j for j in doc["jobs"] if j["id"] == "workqueue-heartbeat")
+    beat.update(next_run_at="2026-11-12T21:40:00+00:00", last_status="ok")
+    jobs_path.write_text(json.dumps(doc))
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    beat = next(j for j in json.loads(jobs_path.read_text())["jobs"]
+                if j["id"] == "workqueue-heartbeat")
+    assert beat["next_run_at"] == "2026-11-12T21:40:00+00:00" and beat["last_status"] == "ok"

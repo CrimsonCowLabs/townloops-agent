@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from engine import analyst_schedule as sched
+from engine import analyst_schedule
 
 ROOT = Path(__file__).resolve().parent.parent
 JOBS = (ROOT / "cron" / "jobs.json").read_text()
@@ -57,3 +58,56 @@ def test_render_changes_only_the_analyst_schedule():
 def test_render_leaves_a_schedule_without_the_job_alone():
     empty = '{ "version": 1, "jobs": [] }\n'
     assert sched.render(empty, "slt", {}) == empty
+
+
+class TestForHermes:
+    """The repo's shorthand schedule → the shape Hermes' scheduler runs."""
+
+    def _jobs(self, *jobs):
+        return json.dumps({"jobs": list(jobs)})
+
+    def test_every_repo_job_converts(self):
+        repo = (ROOT / "cron" / "jobs.json").read_text()
+        jobs = json.loads(analyst_schedule.for_hermes(repo))["jobs"]
+        for job in jobs:
+            assert job["schedule"]["kind"] == "cron" and job["schedule"]["expr"], job["id"]
+            assert job["enabled"] is True and job["state"] == "scheduled"
+            if job.get("no_agent"):
+                assert (ROOT / "scripts" / job["script"]).is_file(), job["id"]
+                assert "prompt" not in job
+            else:
+                assert job["prompt"]
+
+    def test_a_script_job_runs_its_wrapper(self):
+        out = json.loads(analyst_schedule.for_hermes(self._jobs(
+            {"id": "beat", "schedule": "*/10 * * * *", "no_agent": True,
+             "prompt": "python /home/agent/.hermes/scripts/workqueue_heartbeat.py"})))
+        [job] = out["jobs"]
+        assert job["script"] == "workqueue_heartbeat.py"
+        assert job["schedule"] == {"kind": "cron", "expr": "*/10 * * * *"}
+        assert job["schedule_display"] == "*/10 * * * *"
+
+    def test_a_script_job_with_arguments_is_refused(self):
+        with pytest.raises(ValueError, match="no arguments"):
+            analyst_schedule.for_hermes(self._jobs(
+                {"id": "x", "schedule": "0 1 * * *", "no_agent": True,
+                 "prompt": "python /home/agent/.hermes/scripts/business_promote.py --limit 3"}))
+
+    def test_run_state_is_kept_for_an_unchanged_job_only(self):
+        repo = self._jobs({"id": "a", "schedule": "0 1 * * *", "no_agent": True,
+                           "prompt": "python /home/agent/.hermes/scripts/event_find.py"},
+                          {"id": "b", "schedule": "0 3 * * *", "prompt": "hi"})
+        previous = json.dumps({"jobs": [
+            {"id": "a", "schedule": {"kind": "cron", "expr": "0 1 * * *"},
+             "next_run_at": "N", "last_status": "ok", "enabled": False, "state": "paused"},
+            {"id": "b", "schedule": {"kind": "cron", "expr": "0 2 * * *"}, "next_run_at": "OLD"}]})
+        a, b = json.loads(analyst_schedule.for_hermes(repo, previous))["jobs"]
+        assert (a["next_run_at"], a["last_status"], a["enabled"], a["state"]) == \
+            ("N", "ok", False, "paused")
+        assert "next_run_at" not in b
+
+    def test_the_analyst_job_stays_an_agent_job(self):
+        out = analyst_schedule.for_hermes(analyst_schedule.render(
+            (ROOT / "cron" / "jobs.json").read_text(), "slt"))
+        job = next(j for j in json.loads(out)["jobs"] if j["id"] == "town-analyst")
+        assert job["prompt"] and job["skills"] and "script" not in job

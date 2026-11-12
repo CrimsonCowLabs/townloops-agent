@@ -11,7 +11,7 @@ from pathlib import Path
 from engine import db
 
 SKILL = Path("/home/agent/.hermes/skills/business/event-seed-discovery/discover.py")
-DEFAULT_ARGS = ["review"]
+DEFAULT_ARGS = ["review", "--trials", "8"]
 
 
 def main() -> int:
