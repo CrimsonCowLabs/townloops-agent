@@ -185,12 +185,22 @@ class TestEventDomains:
             town.conn.execute(f"INSERT INTO events ({', '.join(row)}) "
                               f"VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
         town.conn.commit()
+        for i in range(3):   # a feed host serves many organisations: never a seed
+            row = {"event_uid": f"g{i}", "source": "seed:Visit Tahoe", "source_kind": "seed",
+                   "name": f"Talk {i}", "title": f"Talk {i}", "date": soon(5),
+                   "date_day": soon(5)[:10], "first_seen_at": "x", "last_seen_at": "x",
+                   "content_hash": "h", "last_modified_at": "x",
+                   "source_url": f"https://calendar.google.com/calendar/event?eid={i}"}
+            town.conn.execute(f"INSERT INTO events ({', '.join(row)}) "
+                              f"VALUES ({', '.join('?' * len(row))})", tuple(row.values()))
+        town.conn.commit()
         hunt.sites["https://theatre.example/events"] = {"markdown": "Shows"}
 
         hunt.run("--inputs", "domains")
 
         seed = seeds(town)["https://theatre.example/events"]
         assert (seed["status"], seed["discovered_by"]) == ("proposed", "domain")
+        assert len(seeds(town)) == 2      # Visit Tahoe + the theatre; no Google Calendar seed
         [d] = town.decisions("seed")
         assert d["evidence"]["events"] == 3
 

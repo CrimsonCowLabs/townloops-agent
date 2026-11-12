@@ -76,6 +76,10 @@ _KIND_HINTS = (
                              re.IGNORECASE)),
     ("tourism", re.compile(r"\bvisit\b|\btourism\b|\bvisitors?\b", re.IGNORECASE)),
 )
+# Hosts (with their subdomains) that serve many organisations' pages — a
+# Google Calendar event, a link page: never one organisation's calendar site
+# (a calendar feed on one is found by probing the organisation's own page).
+_SHARED_HOSTS = ("google.com", "goo.gl", "linktr.ee", "bit.ly")
 _TITLE_SPLIT = re.compile(r"\s+[|\-–—:]\s+")
 _GENERIC_TITLE = re.compile(r"^(?:home|events?|calendars?|events? calendar|upcoming events"
                             r"|what'?s on|welcome)$", re.IGNORECASE)
@@ -152,6 +156,9 @@ def not_a_source(url: str) -> Optional[str]:
         return "a listing/aggregator page"
     if own_site.platform(url):
         return "a social platform page"
+    host = listing_hosts.bare_host(url)
+    if any(host == h or host.endswith("." + h) for h in _SHARED_HOSTS):
+        return "a host many organisations share"
     if own_site.is_article_page(url):
         return "an article"
     return None
