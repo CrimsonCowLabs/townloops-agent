@@ -296,6 +296,7 @@ class TestDailyHarvest:
         for i in range(3):
             event_at(town, f"p{i}", f"Putt Night {i}", host="Tipsy Putt Tahoe")
         event_at(town, "a1", "Trivia", host="AleWorx Stateline")      # live already
+        event_at(town, "v1", "Market", host="Heavenly Village", venue="Heavenly Village")
         results["Tipsy Putt Tahoe"] = [{"url": "https://tipsyputt.example/",
                                         "title": "Tipsy Putt Tahoe"}]
         sites["https://tipsyputt.example"] = ("Tipsy Putt Tahoe, South Lake Tahoe. "
@@ -303,6 +304,9 @@ class TestDailyHarvest:
         discovery(town, "harvest")
         assert searched_terms(town, "Tipsy Putt Tahoe") == {"Tipsy Putt Tahoe"}
         assert not searched_terms(town, "AleWorx Stateline")
+        # A host that is the event's venue is the venue kind's to look for, once.
+        heavenly = [q for q in town.searched if q.startswith("Heavenly Village ")]
+        assert heavenly and all("hours contact" not in q for q in heavenly)
         discovery(town, "promote", "--limit", "5")
         assert [p["name"] for p in posts(town, "businesses")] == ["Tipsy Putt Tahoe"]
 

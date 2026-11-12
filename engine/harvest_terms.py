@@ -49,8 +49,9 @@ GAP_CONCEPTS = {
 }
 _FUZZY = 0.85
 # Event "hosts"/"venues" that name no organisation.
-_NOT_A_NAME = re.compile(r"^(?:online|virtual|zoom|tba|tbd|various|multiple|see .*|n/?a)$"
-                         r"|\bzoom\b|\bonline\b|\bvirtual\b", re.IGNORECASE)
+_NOT_A_NAME = re.compile(r"^(?:online|virtual|zoom|tba|tbd|see .*|n/?a)$"
+                         r"|\b(?:zoom|online|virtual|various|multiple|participating|locations)\b",
+                         re.IGNORECASE)
 _COMMUNITY = re.compile(r"\b(?:library|foundation|non-?profit|association|society|club|church"
                         r"|rotary|city of|county|town of|district|council|alliance|league"
                         r"|friends of|coalition|guild)\b", re.IGNORECASE)
@@ -76,12 +77,17 @@ def _is_known(name: str, known: list[str], index) -> bool:
     return bool(index is not None and index.match("", name))
 
 
+_VENUE_SQL = ("SELECT COALESCE(NULLIF(TRIM(venue_name), ''), TRIM(venue_raw)) FROM events "
+              "WHERE derived_venue_uid IS NULL")
+
+
 def host_terms(conn: sqlite3.Connection, kind: str, index=None) -> list[str]:
     """Names events give their host (venue, for kind `venue`) that no
-    entity, live row or candidate has — busiest first."""
+    entity, live row or candidate has — busiest first. A host that is also
+    an event's venue (the extractor often names the place as the host) is
+    left to the venue kind, so one place isn't searched for twice."""
     if kind == "venue":
-        sql = ("SELECT COALESCE(NULLIF(TRIM(venue_name), ''), TRIM(venue_raw)) FROM events "
-               "WHERE derived_venue_uid IS NULL")
+        sql = _VENUE_SQL
     elif kind in ("business", "community"):
         sql = "SELECT TRIM(hosting_group) FROM events WHERE derived_host_uid IS NULL"
     else:
@@ -89,6 +95,8 @@ def host_terms(conn: sqlite3.Connection, kind: str, index=None) -> list[str]:
     counts = Counter(n for (n,) in conn.execute(sql)
                      if n and len(n) >= 4 and not _NOT_A_NAME.search(n))
     known = _known_names(conn)
+    if kind != "venue":
+        known += [n for n in (normalize_name(v or "") for (v,) in conn.execute(_VENUE_SQL)) if n]
     out = []
     for name, _ in counts.most_common():
         if kind != "venue" and (kind == "community") != bool(_COMMUNITY.search(name)):
