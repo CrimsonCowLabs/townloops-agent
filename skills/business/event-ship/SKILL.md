@@ -255,7 +255,7 @@ When the town is finally registered on TownLoops, an operator-triggered
 
 The client is an `engine/autonomy.GatedClient`:
 
-- **Gate first**: paused, circuit open or `autonomy.max_pending` reached →
+- **Gate first**: paused, circuit open or the pending cap reached (`autonomy.max_pending`, else scaled from moderation throughput) →
   exit 75; the drainer releases the claim without spending an attempt (it
   doesn't even claim `ship` while the gate is shut).
 - **Fail closed**: every create must come back `pending`. A `published`

@@ -36,6 +36,7 @@ def _status(args) -> int:
     print(json.dumps({
         "mode": s.mode, "settings": asdict(s), "circuit": autonomy.circuit(conn),
         "gate": asdict(autonomy.submission_gate(conn, s)),
+        "pending": autonomy.pending_count(conn), "pending_cap": autonomy.pending_cap(conn, s),
         "last_24h": moderation.outcomes_since(conn, since),
     }, indent=2, default=str))
     return 0

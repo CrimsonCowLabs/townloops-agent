@@ -8,13 +8,16 @@ canned pages and replies at their usual monkeypatch points, and look only at
 what reached TownLoops, what didn't, the recorded decisions and the digest.
 
 The drain runs each workqueue skill's `main()` in-process (instead of a
-subprocess) so it shares the fake API.
+subprocess) so it shares the fake API. `cli(skill, *argv)` runs any skill's
+CLI the same way (what cron and the analyst run call); `run_day()` runs a
+whole day of the deterministic schedule, ending in the daily report.
 """
 
 from __future__ import annotations
 
 import contextlib
 import importlib.util
+import inspect
 import io
 import json
 import re
@@ -60,6 +63,22 @@ def as_listed(value) -> str:
            f"{'PM' if dt.hour >= 12 else 'AM'}"
 
 
+def _answer(text: str) -> dict:
+    """A CLI's JSON answer: the whole output, else from its first `{`, else
+    its last JSON line; a list comes back as {"items": [...]}."""
+    candidates = [text.strip()]
+    if "{" in text:
+        candidates.append(text[text.index("{"):].strip())
+    candidates += [line for line in reversed(text.splitlines()) if line.startswith(("{", "["))]
+    for c in candidates:
+        try:
+            doc = json.loads(c)
+        except ValueError:
+            continue
+        return doc if isinstance(doc, dict) else {"items": doc}
+    return {"output": text}
+
+
 def load(path: Path, name: str):
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
@@ -82,6 +101,10 @@ class Town:
         self.telegrams: list[str] = []
         self.search: dict[str, list[dict]] = {}
         self.redirects: dict[str, str] = {}
+        self.web: dict[str, list[dict]] = {}    # web search results by query prefix
+        self.sites: dict[str, dict] = {}        # site pages {markdown, links} for discovery
+        self.searched: list[str] = []
+        self.commands: list[tuple[str, ...]] = []   # every `cli` call, as (skill, *argv)
         self._skills: dict[str, object] = {}
         db = tmp_state_dir / "townloops.db"
         self.profile_path = tmp_state_dir.parent / "town-profile.yaml"
@@ -296,6 +319,119 @@ class Town:
         """A find, then drains until the approved events are through."""
         self.find()
         self.drain_all()
+
+    # --- any skill's CLI, and a whole day ------------------------------------
+
+    def cli(self, skill: str, *argv: str) -> dict:
+        """A skill's CLI as cron or the analyst run calls it (`python
+        <skill>/<entry>.py ARGV`), in-process with the town's fakes: its exit
+        code and its (last) JSON answer."""
+        [entry] = [p for p in (SKILLS / skill).glob("*.py")]
+        mod = load(entry, f"town_cli_{skill.replace('-', '_')}")
+        self._fake_network(skill, mod)
+        self.conn.commit()   # the CLI opens its own connection
+        self.mp.setattr(sys, "argv", [entry.name, *argv])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
+            try:
+                rc = (mod.main(list(argv)) if inspect.signature(mod.main).parameters
+                      else mod.main())
+            except SystemExit as e:
+                rc = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+        self.commands.append((skill, *argv))
+        return {"rc": rc or 0, **_answer(out.getvalue())}
+
+    def _fake_network(self, skill: str, mod) -> None:
+        if skill == "event-seed-discovery":
+            for name, fake in (("_DB_PATH", self.state / "townloops.db"),
+                               ("_trial_fetch", self._fetch), ("_codex_exec", self._codex),
+                               ("_scrape_page", self._verify), ("_hunt_search", self._web_search),
+                               ("_site_scrape", self._site_scrape),
+                               ("_site_search", lambda q: self.search.get(q, []))):
+                self.mp.setattr(mod, name, fake)
+        elif skill == "event-find":
+            self.mp.setattr(mod, "_DB_PATH", self.state / "townloops.db")
+            self.mp.setattr(mod, "_firecrawl_listing", self._fetch)
+            self.mp.setattr(mod, "_codex_exec", self._codex)
+        elif skill in ("business-discovery", "performer-research", "entity-live-sync"):
+            self.mp.setattr("engine.discovery.firecrawl_search",
+                            lambda q, limit=5, raise_on_error=False: self._web_search(q))
+            self.mp.setattr("engine.discovery.firecrawl_scrape",
+                            lambda url, raise_on_error=False: self._site_scrape(url))
+            self.mp.setattr("engine.discovery.BETWEEN_QUERIES_S", 0)
+            self.mp.setattr("engine.research.fetch_html", self._site_html)
+            self.mp.setattr("engine.research.firecrawl_fetch", lambda url: (None, None))
+
+    def _web_search(self, query: str) -> list[dict]:
+        """Web search (Firecrawl/SearXNG): results by query prefix."""
+        self.searched.append(query)
+        return next((v for k, v in self.web.items() if query.startswith(k)), [])
+
+    def _site_scrape(self, url: str) -> dict:
+        return self.sites.get(url.rstrip("/")) or self.sites.get(url) or {}
+
+    def _site_html(self, url: str, timeout: float = 20.0):
+        md = self._site_scrape(url).get("markdown")
+        return (f"<html><body><p>{md}</p></body></html>", url) if md else (None, None)
+
+    def _verify(self, url: str):
+        """A seed URL's rawHtml verify: a canned page or site answers 200."""
+        final = self.redirects.get(url, url)
+        ok = final in self.pages or url.rstrip("/") in self.sites or url in self.redirects
+        return ok, 200 if ok else 404, "<html></html>", final
+
+    def advance(self, minutes: int = 10) -> None:
+        """Move the workqueue `minutes` into the past: its hourly rate windows
+        (engine/workqueue) see the claims as that much older."""
+        self.conn.execute(
+            "UPDATE event_workqueue SET claimed_at = "
+            "strftime('%Y-%m-%dT%H:%M:%S+00:00', datetime(claimed_at, ?)) "
+            "WHERE claimed_at IS NOT NULL", (f"-{minutes} minutes",))
+        self.conn.commit()
+
+    def queue_open(self) -> int:
+        from engine.workqueue import MAX_ATTEMPTS
+        return self.conn.execute("SELECT COUNT(*) FROM event_workqueue WHERE resolved_at IS NULL "
+                                 "AND attempts < ?", (MAX_ATTEMPTS,)).fetchone()[0]
+
+    def run_day(self, *, ticks: int = 144,
+                moderate: Optional[Callable[["Town"], None]] = None) -> dict:
+        """One day of the town's deterministic schedule (cron/jobs.json), in
+        its order: organisation harvest, entity live sync, seed hunt and
+        review, the morning event-find, then 10-minute ticks — a drain each
+        (time moves on 10 minutes, `advance`), and hourly the moderator's
+        turn (`moderate`), the moderation poll, business promote and the
+        heartbeat's alert tick — until the queue is empty at an hour's end;
+        then the daily report (`town-report build --send`). Returns each
+        step's answer and the ticks it took."""
+        out = {"harvest": self.cli("business-discovery", "harvest"),
+               "live_sync": self.cli("entity-live-sync", "run"),
+               "hunt": self.cli("event-seed-discovery", "hunt"),
+               "review": self.cli("event-seed-discovery", "review", "--trials", "8"),
+               "find": self.find()}
+        tick = 0
+        for tick in range(1, ticks + 1):
+            if self.queue_open():
+                self.drain()
+            if tick % 6 == 0:
+                if moderate:
+                    moderate(self)
+                out["poll"] = self.cli("moderation-feedback")
+                out["promote"] = self.cli("business-discovery", "promote", "--limit", "3")
+                self.heartbeat()
+                if not self.queue_open():
+                    break
+            self.advance(10)
+        out["ticks"] = tick
+        out["report"] = self.report("build", "--send")
+        return out
+
+    def publish_all(self) -> None:
+        """The moderator publishes everything pending."""
+        for resource, slug in self.api.created:
+            row = self.api.tables.get(resource, {}).get(slug)
+            if row and row.get("status") == "pending":
+                self.api.approve(resource, slug)
 
     # --- outcomes ------------------------------------------------------------
 

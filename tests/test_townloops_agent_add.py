@@ -110,14 +110,17 @@ OVERRIDE_LINE = 'services: {dashboard: {profiles: ["supervised-dashboard"]}}'
 
 
 def test_supervised_town_gets_no_override(env, tmp_path):
-    assert run(env, "testtown").returncode == 0
+    assert run(env, "testtown", "--supervised").returncode == 0
     target = tmp_path / "towns" / "testtown"
     assert not (target / "docker-compose.override.yml").exists()
-    assert "\noperating_mode: autonomous" not in (target / "town-profile.yaml").read_text()
+    profile = yaml.safe_load((target / "town-profile.yaml").read_text())
+    assert profile["operating_mode"] == "supervised"
 
 
-def test_autonomous_town_is_scaffolded_without_the_dashboard(env, tmp_path):
-    r = run(env, "testtown", "--autonomous")
+@pytest.mark.parametrize("flags", [(), ("--autonomous",)])
+def test_a_new_town_is_autonomous_without_the_dashboard(env, tmp_path, flags):
+    """The moderation queue is the gate in every new town (#64)."""
+    r = run(env, "testtown", *flags)
     assert r.returncode == 0, r.stderr
     target = tmp_path / "towns" / "testtown"
     assert OVERRIDE_LINE in (target / "docker-compose.override.yml").read_text()
@@ -204,11 +207,41 @@ def test_scaffolded_town_schedules_only_what_the_repo_has(env, tmp_path):
     assert not missing, f"scheduled skill files not in skills/business/: {missing}"
 
 
+def _rendered_schedule(slug: str, profile: dict | None = None) -> str:
+    from engine import analyst_schedule
+    return analyst_schedule.render((ROOT / "cron" / "jobs.json").read_text(), slug, profile)
+
+
+def _analyst_time(jobs_path: Path) -> str:
+    jobs = json.loads(jobs_path.read_text())["jobs"]
+    return next(j["schedule"] for j in jobs if j["id"] == "town-analyst")
+
+
 def test_scaffolded_town_installs_the_repos_schedule(env, tmp_path):
+    """Verbatim but for the analyst run's start time."""
     assert run(env, "testtown").returncode == 0
     cron = tmp_path / "towns" / "testtown" / "cron"
-    assert (cron / "jobs.json").read_text() == (ROOT / "cron" / "jobs.json").read_text()
+    assert (cron / "jobs.json").read_text() == _rendered_schedule("testtown")
     assert json.loads((cron / "jobs.empty.json").read_text()) == {"version": 1, "jobs": []}
+
+
+def test_towns_on_one_host_start_their_analyst_runs_at_different_times(env, tmp_path):
+    for slug in ("slt", "truckee"):
+        assert run(env, slug).returncode == 0
+    towns = tmp_path / "towns"
+    assert _analyst_time(towns / "slt" / "cron" / "jobs.json") != \
+        _analyst_time(towns / "truckee" / "cron" / "jobs.json")
+
+
+def test_rerender_applies_the_profiles_analyst_schedule(env, town):
+    profile = town / "town-profile.yaml"
+    profile.write_text(profile.read_text() + '\nanalyst:\n  schedule: "45 13 * * *"\n')
+    r = run(env, "testtown", "--rerender")
+    assert r.returncode == 0, r.stderr
+    assert _analyst_time(town / "cron" / "jobs.json") == "45 13 * * *"
+    assert "restart agent" in r.stdout
+    r = run(env, "testtown", "--rerender")
+    assert "jobs.json is up to date" in r.stdout
 
 
 def _host_paths(compose: str) -> list[str]:
@@ -341,7 +374,7 @@ def test_rerender_refreshes_a_leader_towns_cron_from_the_repo(env, town, tmp_pat
     jobs.write_text('{"version": 1, "jobs": [{"id": "old-job"}]}\n')
     r = run(env, "testtown", "--rerender")
     assert r.returncode == 0, r.stderr
-    assert jobs.read_text() == (tmp_path / "repo" / "cron" / "jobs.json").read_text()
+    assert jobs.read_text() == _rendered_schedule("testtown")
     [backup] = (town / "cron").glob("jobs.json.bak-*")
     assert "old-job" in backup.read_text()
     assert "restart agent" in r.stdout
@@ -360,7 +393,8 @@ def test_rerender_leaves_an_emptied_follower_schedule(env, town):
 def test_rerender_leaves_a_follower_bound_by_override(env, town):
     (town / "docker-compose.override.yml").write_text(
         "services:\n  agent:\n    volumes:\n"
-        "      - ./cron/jobs.empty.json:/home/agent/.hermes/cron/jobs.json:ro\n")
+        "      - ./cron/jobs.empty.json:/home/agent/.hermes/cron/jobs.json:ro\n"
+        "  dashboard:\n    profiles: [\"supervised-dashboard\"]\n")   # an autonomous town
     jobs = town / "cron" / "jobs.json"
     jobs.write_text('{"version": 1, "jobs": [{"id": "old-job"}]}\n')
     r = run(env, "testtown", "--rerender")

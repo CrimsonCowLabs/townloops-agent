@@ -328,7 +328,10 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     since start (`firecrawl_env.note_call` per request → `state/usage/`), `submissions` rows since start),
     `local_data.py` (schema reference → `skills/business/local-data/references/schema.md`, regenerate after a
     migration or the test fails; `log_edit` = `agent_activity` `local-edit`; `backup` = online backup to
-    `state/backups/`, last 7).
+    `state/backups/`, last 7),
+    `analyst_schedule.py` (the `town-analyst` job's start time per town: profile `analyst.schedule`, else
+    slug-hashed 08:00–10:59; `render` rewrites only that job's `schedule` in a jobs.json text; host-side
+    `python3 -m engine.analyst_schedule SRC SLUG PROFILE`, stdlib only — what the scaffolder runs).
 
 - **`skills/business/<skill>/`** — one dir per skill, each with `SKILL.md` (Hermes-discovered contract)
   + a Python entry script. Skills are invoked three ways: by cron (`cron/jobs.json`), by the
@@ -432,7 +435,9 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Alerts are transition-only and repeat in every daily report while they stand.** A new reason to
   stop or warn goes into `engine/alerts.standing` (the daily report and nightly digest read it); an
   immediate alert goes through `alerts.tick` (heartbeat). Never a second Telegram sender — `engine/notify`.
-- **Autonomous mode is a per-town switch; supervised stays the default.** `operating_mode:
+- **Autonomous mode is a per-town switch; the moderation queue is a new town's gate.** The template's
+  `operating_mode: autonomous` makes every scaffolded town autonomous (`--supervised` opts out); in code a profile
+  without the key is still supervised, so existing towns keep their mode. `operating_mode:
   autonomous` (town-profile.yaml) moves every local gate into `engine/autonomy.py` and makes the
   TownLoops admin moderation queue the only human gate: creates go through `GatedClient` and
   must come back `pending` (a `published` answer opens the circuit and stops all submissions —
@@ -441,7 +446,8 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
   events then ship with the venue's name only). Changes to published
   values (date/venue, cancellations) are pending submissions for the merge flow, never PATCHes;
   fill-blank PATCHes still go live. Exit 75 (`workqueue.RC_DEFERRED`) from a workqueue skill = "not now" (claim released, no
-  attempt). Only the operator closes the circuit (`autonomy resume`). Supervised-only proposers
+  attempt). The pending cap is `autonomy.max_pending` when set, else max(100, 3 × moderator decisions in
+  7 days) (`autonomy.pending_cap`). Only the operator closes the circuit (`autonomy resume`). Supervised-only proposers
   answer `inactive`. Gate code paths on `autonomy.settings()` / `is_autonomous()` — never cache it.
   Tests drive whole towns in-process through `tests/autonomy_town.py`.
 - **Newsletter push is operator-gated.** `newsletter.py push` defaults to preview-only; real send needs
@@ -451,8 +457,19 @@ Skill CLIs follow a `<script>.py <subcommand> [--flags]` shape; run with `--help
 - **Leader/follower for HA.** Two hosts can share a slug; only the leader runs cron (follower binds
   `cron/jobs.empty.json` over `cron/jobs.json` via a gitignored `docker-compose.override.yml`). Server-side
   Idempotency-Key dedup makes duplicate POSTs safe. See README §"Second instance / failover".
+- **The daily analyst run is the agent's LLM turn.** Cron job `town-analyst` (an agent job, not
+  `no_agent`; `skills: ["town-analyst"]`, deliver local) runs `skills/business/town-analyst/SKILL.md`: the brief +
+  run order (budget start → review → hunt/trial/adapters → event-find + holds → harvest → live sync / enrichment →
+  one drain → narrative + `town-report build --narrative --send` → budget finish), notebook
+  `$HERMES_HOME/analyst/notebook.md`, playbooks in its `references/`. It drives existing CLIs only — new capability
+  goes into engine/ and a skill, then a line in the brief. Every backticked `<skill> <verb> --flag` the brief cites
+  must resolve (`tests/test_town_analyst_brief.py` runs each `--help`); `tests/test_town_analyst_run.py` walks the
+  run order with a scripted stand-in (`-m integration`: a real run, opt-in in a town container). On demand:
+  Telegram `/town_analyst` or `hermes cron run town-analyst`. Whole-day behaviour is tested through
+  `tests/autonomy_town.Town.run_day()` (`tests/test_town_day.py`); `Town.cli(skill, *argv)` runs any skill CLI
+  in-process with the town's fakes.
 - **The scaffolder hands out the repo's own artifacts.** `bin/townloops-agent-add <slug>` copies `cron/jobs.json`
-  verbatim (no second schedule — per-town divergence goes in the town's `docker-compose.override.yml`) and
+  verbatim but for the `town-analyst` job's time (`engine/analyst_schedule`; no second schedule — per-town divergence goes in the town's `docker-compose.override.yml`) and
   renders `{{SLUG}}`/`{{REPO}}`/`{{CODEX_HOME}}` (repo it runs from, `$CODEX_HOME` else `$HOME/.codex`; a `:` in
   either path is refused) — never a host path in `templates/`; `--rerender` re-applies them and refreshes a
   leader town's `cron/jobs.json` from the repo (a follower's — `jobs.empty.json` bound by the override, or an

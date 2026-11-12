@@ -16,10 +16,11 @@ What runs when for a town (the schedule itself is `cron/jobs.json`; trust it ove
 | 04:45 daily | Seed review — autonomous: assign feed-matched adapters, trial proposed seeds, classify, retire/relocate; supervised: only propose adapters | yes |
 | hourly :05 | Moderation feedback — autonomous only: read back TownLoops outcomes | no |
 | 03:07 daily | Organisation harvest — autonomous only: businesses, communities, non-profits, venues on rotating gap-driven terms; sweep, verify, approve (off the 15-min promote's minute; waits out a running promote) | no |
+| 08:00–10:59 daily (per town) | **Analyst run** (`town-analyst`): a budgeted LLM session — review yesterday, hunt + trial sources, event-find, resolve holds, harvest organisations, live sync + enrichment, one drain, the daily report (`state/reports/<date>-analyst.md` + Telegram). Time: `analyst.schedule`, else derived from the slug by `bin/townloops-agent-add`. On demand: Telegram `/town_analyst`, or `hermes cron run town-analyst` | **agent** |
 | 21:00 daily | Nightly digest (events by state, workqueue depth, seeds) | no |
 | 02:00 Sunday | Weekly reconcile against seeds + live | yes |
 | 08:00 Sunday | Newsletter compose (draft) | yes |
 | 20:00 Sunday | Newsletter push reminder | yes |
 | 10:00 Monday | Sponsor placement audit | yes |
 
-All jobs except the newsletter and sponsor digests run as raw subprocesses (`no_agent: true`) — no LLM turn per invocation. "yes" means the script calls the Codex CLI directly (extraction, research); *enrichment inside the drain/promote can call it too when a category needs classifying. Human-facing digests (newsletter, sponsor audit) route through the LLM.
+All jobs except the analyst run and the newsletter and sponsor digests run as raw subprocesses (`no_agent: true`) — no LLM turn per invocation; the analyst run is a full Hermes agent turn with its tools. "yes" means the script calls the Codex CLI directly (extraction, research); *enrichment inside the drain/promote can call it too when a category needs classifying. Human-facing digests (newsletter, sponsor audit) route through the LLM.

@@ -89,24 +89,27 @@ discovery:
 #   read-detail: {per_hour: 30, burst: 120}   # or a plain int: read-detail: 30
 #   ship: 100
 
-# Operating mode (engine/autonomy.py). `supervised` (the default) is the
-# operator-gated pipeline: seeds, events, business candidates and
-# cancellations wait for approval in the local dashboard. `autonomous`
-# makes those calls in the agent — judging every extracted event, trialling
-# and retiring seeds, harvesting organisations — and submits everything to
-# TownLoops through an `api_ingest` key with NO publish permission, so it
-# lands `pending` in the TownLoops admin moderation queue: that is the only
-# human gate. A create that comes back `published` stops all submissions
-# (fail closed). The dashboard isn't run for an autonomous town (see the
-# compose `dashboard` profile); the nightly Telegram digest and
-# `autonomy why <id>` are the operator surfaces. Read on every cron run.
-# operating_mode: autonomous
+# Operating mode (engine/autonomy.py). A new town is `autonomous`: the
+# agent judges every extracted event, trials and retires seeds and
+# harvests organisations itself, and submits everything to TownLoops
+# through an `api_ingest` key with NO publish permission, so it lands
+# `pending` in the TownLoops admin moderation queue: that is the only human
+# gate. A create that comes back `published` stops all submissions (fail
+# closed). The dashboard isn't run for an autonomous town (see the compose
+# `dashboard` profile); the daily analyst report, the nightly Telegram
+# digest and `autonomy why <id>` are the operator surfaces. `supervised`
+# (`bin/townloops-agent-add --supervised`, and any profile without this key)
+# keeps the operator-gated pipeline: seeds, events, business candidates and
+# cancellations wait for approval in the local dashboard. Read on every
+# cron run. Cancellations stay operator-confirmed in both modes.
+operating_mode: autonomous
 # autonomy:
 #   paused: false              # true stops submissions at once (collecting goes on)
 #   entity_moderation: true    # new venues, hosts and organisations are submitted
 #                              # pending (TownLoops entity gate); false holds them and
 #                              # events ship with the venue's name for the curate-venue flow
-#   max_pending: 100           # cap on our submissions pending in TownLoops at once
+#   max_pending: 300           # cap on our submissions pending in TownLoops at once;
+#                              # unset = max(100, 3 × what the moderator decided in 7 days)
 #   horizon_days: 120          # events further out are dropped
 #   circuit_breaker:           # stop submitting when the moderator rejects too much
 #     reject_rate: 0.5         #   rejected share of …
@@ -137,6 +140,20 @@ discovery:
 #                              # verify verdict this recent; an older one (or one the CMO
 #                              # import copied in) is re-verified first
 # zip_codes: ["96150"]         # optional: a listed ZIP outside these is out of town
+
+# The daily analyst run (skills/business/town-analyst, cron job
+# `town-analyst`): one LLM turn a day that reviews yesterday, hunts sources,
+# works events and organisations, enriches and reports. Its budget
+# (engine/analyst_runs; `town-report budget status` reads it) and its start
+# time: `schedule` is a 5-field cron expression; unset, bin/townloops-agent-add
+# derives one from the slug between 08:00 and 10:59 so towns sharing a host
+# don't start together. Applied to cron/jobs.json by the scaffolder and by
+# `--rerender` (then `docker compose restart agent`).
+# analyst:
+#   schedule: "20 9 * * *"
+#   max_minutes: 90        # wall time
+#   max_firecrawl: 300     # Firecrawl requests
+#   max_submissions: 150   # creates/changes sent to TownLoops
 
 # enrichment:
 #   retry_not_found_days: 14   # entity-live-sync researches an entity that came back

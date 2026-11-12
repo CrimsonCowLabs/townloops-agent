@@ -5,10 +5,11 @@ description: Autonomous mode — explain any decision the agent made on its own 
 
 # autonomy
 
-A town runs **supervised** (default — the operator approves seeds, events,
-candidates and cancellations locally) or **autonomous** (`operating_mode:
-autonomous` in town-profile.yaml — the agent makes those calls itself and the
-TownLoops admin moderation queue is the only human gate). Logic:
+A town runs **autonomous** (`operating_mode: autonomous` in town-profile.yaml,
+the default for a new town — the agent makes the calls itself and the
+TownLoops admin moderation queue is the only human gate) or **supervised**
+(a profile without the key — the operator approves seeds, events, candidates
+locally). Cancellations are operator-confirmed in both. Logic:
 `engine/autonomy.py`.
 
 Every autonomous decision is recorded with a reason code and its evidence
@@ -17,14 +18,20 @@ Every autonomous decision is recorded with a reason code and its evidence
 ## Usage
 
 ```bash
-python autonomy/autonomy.py status                 # mode, knobs, circuit, pending, last 24h
+python autonomy/autonomy.py status                 # mode, knobs, circuit, pending + cap, last 24h
 python autonomy/autonomy.py why "Jazz Night"       # an event by title words or uid prefix
 python autonomy/autonomy.py why 12                 # a seed by id (or by name)
 python autonomy/autonomy.py why hermes-slt-1a2b    # a TownLoops slug we submitted
 python autonomy/autonomy.py resume                 # close the circuit (operator only)
 python autonomy/autonomy.py accept 3f2a9c           # ship an event held for a source mismatch or implausible time as is
-python autonomy/autonomy.py decline 3f2a9c          # or decline it (operator only, held events only)
+python autonomy/autonomy.py decline 3f2a9c          # or decline it (held events only)
 ```
+
+`accept`/`decline` are the operator's, and the daily analyst run's
+(`town-analyst`) once it has re-read the event's page and the page settles
+it — with `--note` saying what did. The 10-minute pipeline never decides a
+hold. The pending cap is `autonomy.max_pending` when set, else max(100, 3 ×
+what the moderator decided in the last 7 days).
 
 ## Reason codes
 
@@ -46,8 +53,8 @@ python autonomy/autonomy.py decline 3f2a9c          # or decline it (operator on
   `moderator-gone`. Changes: `published-value-changed` (a date/venue change
   submitted for merge). Cancellations: `page-states-cancelled`.
 - Provenance: `provenance-mismatch` (hold) — the listing card or detail page
-  doesn't vouch for the event (#45). It waits for the operator (`accept` /
-  `decline`, listed in every nightly digest); the agent never decides it.
+  doesn't vouch for the event (#45). It waits for `accept` / `decline`
+  (listed in every nightly digest and daily report).
 - Times: `implausible-time` (hold) — a pre-dawn start, an end before its
   start or a duration over the limit (engine/time_plausibility, #46). Same
   contract: the operator's `accept` ships it with those times (a real 05:30
