@@ -7,9 +7,10 @@ only after a dry run through it returns events; review's `assign_adapters`
 does the same for a seed whose probed feed an adapter reads — assigning it
 in autonomous mode, proposing it (nightly digest) in supervised mode.
 
-Maintenance (`move`, `hold`, `release`, `restore`) is how an agent or the
-operator fixes a seed — never raw SQL: each change is reversible and its
-decision recorded (`autonomy why <seed>`). A `held` seed is out of service
+Maintenance (`move`, `hold`, `release`, `restore`) is the recorded way an
+agent or the operator fixes a seed: each change is reversible and its
+decision recorded (`autonomy why <seed>`). The agent owns its local DB and
+may also edit a seed with SQL; that edit just isn't recorded. A `held` seed is out of service
 on purpose (`HOLD_REASONS`): event-find never scrapes it and `review` never
 touches it — except to assign an `awaiting-adapter` seed the adapter it
 waits for, which releases it.

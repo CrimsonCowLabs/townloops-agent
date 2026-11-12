@@ -179,9 +179,10 @@ an alert; `health --ack N` accepts a seed's new level (also the dashboard's **Ac
 
 ## Seed maintenance: move, hold, release
 
-How a seed is fixed — by the agent or the operator. **Never edit `event_seeds` with SQL**, and
-no ad-hoc DB backup is needed: every change below is reversible and recorded as a decision in
-`agent_activity`, so `autonomy why <seed id or name>` explains it (verdict, reason, evidence).
+How a seed is fixed — by the agent or the operator. Every change below is reversible and recorded
+as a decision in `agent_activity`, so `autonomy why <seed id or name>` explains it (verdict, reason,
+evidence). The agent owns its local DB and may also change `event_seeds` with SQL when it judges
+that necessary; such an edit just isn't recorded.
 
 - **`move --seed-id N --url URL [--note …]`** — correct a seed's URL. The new URL is read first
   the way event-find will read it: an adapter seed (`set-adapter`) through its adapter at the new
