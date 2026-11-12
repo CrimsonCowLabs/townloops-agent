@@ -63,12 +63,6 @@ discovery:
           - "community association"
     seed_directories: []
 
-# Optional overrides for engine/policy caps. Omit for defaults
-# (businesses=30/day, venues=15, communities=15, performers=15, creators=15).
-# post_caps:
-#   businesses: 20
-#   communities: 10
-
 # Optional source-health alert tuning (engine/source_health.py). An approved
 # seed whose latest successful event-find lists 0 events, or under
 # (100 - drop_pct)% of its trailing average, alerts the operator once

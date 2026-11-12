@@ -92,7 +92,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     the one editorial-path rule — blog/post/article/visitor guide — for discovery's link filter and `roundup_reason`),
     `listing_hosts.py` (the one directory/listing/aggregator host list — restaurantji, Yelp, maps, ticketing,
     Facebook events: evidence at most, never an entity's `website`; enrichment, discovery's blocklist, promote and
-    performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (per-day POST caps + Firecrawl token bucket),
+    performer research all check it (the listing-website audit too) — extend it, don't add another), `research.py`, `policy.py` (Firecrawl token bucket, category guard; no per-day POST caps — creates are bounded by the workqueue rate limits and the autonomous submission gate),
     `listmonk_api.py`, `lock.py` (flock advisory locks; a frequent job skips a held lock, a due daily/weekly job that shares one —
     entity-live-sync behind the heartbeat drain, org harvest behind business-promote — passes a bounded `wait=` instead), `log.py` (JSON structured logging),
     `inspection.py` (writes `agent_activity` for the dashboard ticker), `derive_helpers.py` (also the one
