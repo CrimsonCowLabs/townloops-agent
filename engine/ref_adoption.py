@@ -42,7 +42,7 @@ import sqlite3
 from collections import Counter
 
 from engine import entity_sync, ingest_ref
-from engine.derive_helpers import record_activity
+from engine.derive_helpers import parse_extra_json, record_activity
 from engine.live_lookup import get_live, is_not_found
 
 
@@ -101,11 +101,13 @@ def adopt_row(client, conn: sqlite3.Connection, kind: str, row: dict) -> str:
 def adopt_shipped(client, conn: sqlite3.Connection, limit: int = 25,
                   kinds: tuple[str, ...] = tuple(RESOURCES)) -> dict[str, int]:
     """Adopt refs for up to `limit` pre-ref rows across `kinds`, never-tried
-    and oldest-shipped first. Commits per row. Returns a count per outcome
-    (empty when there was nothing to adopt)."""
+    and oldest-shipped first; a kind the API takes no refs for
+    (`ingest_ref.supported`, #64) is skipped. Commits per row. Returns a
+    count per outcome (empty when there was nothing to adopt)."""
     if limit <= 0:
         return {}
-    pool = [(kind, r) for kind in kinds for r in _candidates(conn, kind, limit)]
+    pool = [(kind, r) for kind in kinds if ingest_ref.supported(kind)
+            for r in _candidates(conn, kind, limit)]
     if not pool:
         return {}
     client.verify_town()
@@ -118,3 +120,60 @@ def adopt_shipped(client, conn: sqlite3.Connection, limit: int = 25,
                     detail=json.dumps(dict(counts), sort_keys=True))
     conn.commit()
     return dict(counts)
+
+
+# --------------------------------------------------------------------------
+# Bindings an ignored ref filter may have made (#64) — read-only
+# --------------------------------------------------------------------------
+
+def audit_bindings(client, conn: sqlite3.Connection) -> list[dict]:
+    """Local entities whose live binding a ref lookup may have made against a
+    server ignoring `?ingest_ref=` (SLT bound unrelated venues to
+    `aleworx-stateline` that way, then synced onto it). Suspect when:
+    - `ref-unsupported` — a ref remembered for a kind the API takes no refs
+      for (`ingest_ref.supported`): only such a lookup or adoption set it;
+    - `ref-not-carried` — the live row doesn't carry the remembered ref;
+    - `shared-slug` — several local rows of the kind bound to one live row.
+    Each suspect: its live row's name and ref (one GET, no merge-following,
+    no re-point; `live_unread` on failure), the local rows sharing it, and
+    the `entity-sync` activities that pushed fields to it (`patched`). Live
+    mirrors are skipped. GET only — writes nothing."""
+    client.verify_town()
+    out = []
+    for kind, table in entity_sync.RESOURCES.items():
+        rows = [dict(r) for r in conn.execute(
+            f"SELECT entity_uid, name, townloops_slug, ingest_ref, extra_json FROM {table} "
+            "WHERE townloops_slug IS NOT NULL AND COALESCE(source_kind, '') != 'live' "
+            "ORDER BY townloops_slug, entity_uid")]
+        by_slug: dict[str, list[str]] = {}
+        for r in rows:
+            by_slug.setdefault(r["townloops_slug"], []).append(r["entity_uid"])
+        supported = ingest_ref.supported(kind)
+        for r in rows:
+            shared = [u for u in by_slug[r["townloops_slug"]] if u != r["entity_uid"]]
+            if not (r["ingest_ref"] or shared):
+                continue
+            reasons = ["shared-slug"] if shared else []
+            if r["ingest_ref"] and not supported:
+                reasons.append("ref-unsupported")
+            entry = {"kind": kind, "entity_uid": r["entity_uid"], "name": r["name"],
+                     "slug": r["townloops_slug"], "ingest_ref": r["ingest_ref"],
+                     "live_id": parse_extra_json(r["extra_json"]).get("live_id"),
+                     "shares_with": shared}
+            try:
+                live = client.get(table, r["townloops_slug"]) or {}
+                entry.update(live_name=live.get("name"), live_ingest_ref=live.get("ingest_ref"))
+                if r["ingest_ref"] and live.get("ingest_ref") != r["ingest_ref"]:
+                    reasons.append("ref-not-carried")
+            except Exception as e:  # noqa: BLE001 — reported, never acted on
+                entry["live_unread"] = str(e)[:200]
+            if not reasons:
+                continue
+            entry["reasons"] = reasons
+            entry["patched"] = [
+                {"ts": a[0], "detail": a[1]} for a in conn.execute(
+                    "SELECT ts, detail FROM agent_activity WHERE worker = 'entity-sync' "
+                    "AND action = 'synced' AND target = ? AND detail NOT LIKE '%pushed -' "
+                    "ORDER BY ts", (f"{kind}:{r['entity_uid']}",))]
+            out.append(entry)
+    return out

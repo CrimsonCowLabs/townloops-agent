@@ -382,7 +382,7 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
     from datetime import timedelta
     from engine import autonomy, event_detail
     from engine.ingest_ref import (
-        adopt_before_submission, cancel_ref_for, read_live_event, taken_slug,
+        adopt_before_submission, cancel_ref_for, read_live_event, taken_slug, with_ref,
     )
     now = now or datetime.now(timezone.utc)
     out = {"checked": 0, "submitted": 0, "no_statement": 0, "errors": []}
@@ -419,7 +419,7 @@ def submit_evidenced(conn: sqlite3.Connection, client, fetch, limit: int = 3,
                                             "accessibility_notes") if live.get(k) is not None}
             payload.update(cancelled_overrides(live))
             # Its own row (never the event's ref); TownLoops derives the slug.
-            payload["ingest_ref"] = cancel_ref_for(uid)
+            with_ref("events", payload, cancel_ref_for(uid))
             client.context.update(kind="cancellation", target_slug=slug, local_uid=uid)
             created = client.create("events", payload,
                                     idempotency_key=f"hermes-{os.environ.get('TOWNLOOPS_TOWN_SLUG', '?')}:cancel:event:{uid[:16]}")

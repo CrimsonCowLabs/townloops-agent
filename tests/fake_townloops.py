@@ -25,6 +25,15 @@ create's `venue_ingest_ref` binds the venue after `venue_id`, before
 `venue_name`. `rename` moves a row to a new slug (the old one 404s, no
 survivor named).
 
+Which resources take refs mirrors the real API (#64): `ref_resources`, events
+only by default. Elsewhere a create's `ingest_ref` is dropped (nothing stored,
+no 409), the set-once PATCH is silently ignored, the `?ingest_ref=` filter is
+ignored (the list answers unrelated rows, as SLT's entity lists did), and an
+event's `venue_ingest_ref` binds nothing unless venues take refs.
+`ignored_filters` ({resource: {param, ...}}) makes a list ignore those
+params even where declared. `openapi()` is the matching OpenAPI document
+(`write_openapi` puts it where engine/ingest_ref reads it).
+
 Series (ADR 0007, townloops `app/services/series.py` + the ingest API's
 `series` routes): every event carries `series_slug`/`series_id` (null for a
 singleton); `create` auto-links to an *active* Series in the town whose title
@@ -52,6 +61,7 @@ or deleted record GETs as a 404 and no longer lists.
 from __future__ import annotations
 
 import copy
+import json
 import re
 from datetime import datetime, timezone
 
@@ -66,12 +76,19 @@ EVENT_PATCH_FIELDS = {
 }
 
 
+REF_RESOURCES = ("events", "venues", "businesses", "communities", "performers", "creators")
+
+
 class FakeAPI:
     town_slug = "slt"
+    # The real API's today: only events take refs. The `refs_everywhere`
+    # fixture (tests/conftest.py) makes it every resource.
+    DEFAULT_REF_RESOURCES = ("events",)
 
     def __init__(self, events=None, venues=None, ignore=(), create_drops=(),
                  entities=None, categories=None, series=None,
-                 event_status="published", entity_status=None):
+                 event_status="published", entity_status=None,
+                 ref_resources=None, ignored_filters=None):
         self.events = {e["slug"]: {"series_slug": None, "series_id": None, **copy.deepcopy(e)}
                        for e in (events or [])}
         self.venues = {v["slug"]: dict(v) for v in (venues or [])}
@@ -89,6 +106,34 @@ class FakeAPI:
         self.deleted: dict[tuple[str, str], dict] = {}
         self.merged_into: dict[tuple[str, str], str] = {}
         self.created: list[tuple[str, str]] = []   # (resource, slug) of each successful create
+        self._posted: list[tuple[str, dict, str]] = []   # (resource, payload, slug) per create
+        self.ref_resources = set(self.DEFAULT_REF_RESOURCES if ref_resources is None else ref_resources)
+        self.ignored_filters = {r: set(p) for r, p in (ignored_filters or {}).items()}
+
+    def takes_refs(self, resource):
+        return resource in self.ref_resources
+
+    def openapi(self) -> dict:
+        """The OpenAPI document this fake answers to: per resource, the list's
+        `ingest_ref` query param and the create payload's `ingest_ref` only
+        where it takes refs; the event payload's `venue_ingest_ref` only when
+        venues do."""
+        paths, schemas = {}, {}
+        for resource in REF_RESOURCES:
+            name = f"{resource.title()}Payload"
+            params = [{"name": "town_slug", "in": "path"}, {"name": "limit", "in": "query"}]
+            props = {"title" if resource == "events" else "name": {"type": "string"}}
+            if self.takes_refs(resource):
+                params.append({"name": "ingest_ref", "in": "query"})
+                props["ingest_ref"] = {"type": "string"}
+            if resource == "events" and self.takes_refs("venues"):
+                props["venue_ingest_ref"] = {"type": "string"}
+            schemas[name] = {"type": "object", "properties": props}
+            paths["/api/v1/towns/{town_slug}/" + resource] = {
+                "get": {"parameters": params},
+                "post": {"requestBody": {"content": {"application/json": {
+                    "schema": {"$ref": f"#/components/schemas/{name}"}}}}}}
+        return {"openapi": "3.1.0", "paths": paths, "components": {"schemas": schemas}}
 
     def verify_town(self, *a, **k):
         return {"town_slug": "slt"}
@@ -117,7 +162,8 @@ class FakeAPI:
             rows = [r for r in rows if s and s["town"] == "slt" and r.get("series_slug") == s["slug"]]
         if params.get("status"):
             rows = [r for r in rows if r.get("status", "published") == params["status"]]
-        if "ingest_ref" in params:
+        if "ingest_ref" in params and self.takes_refs(resource) \
+                and "ingest_ref" not in self.ignored_filters.get(resource, ()):
             rows = [r for r in rows if r.get("ingest_ref") == params["ingest_ref"]]
         rows = sorted(rows, key=lambda r: r["start_at"]) if resource == "events" else rows
         lo, hi = _instant(params.get("from")), _instant(params.get("to"))
@@ -137,9 +183,12 @@ class FakeAPI:
 
     def create(self, resource, payload, idempotency_key=None):
         self.calls.append(("POST", resource, copy.deepcopy(payload)))
+        posted = self.calls[-1][2]
         _no_series_writes(resource)
         assert "slug" not in payload, f"a {resource} create proposed a slug: {payload['slug']!r}"
         table = self.tables.setdefault(resource, {})
+        if not self.takes_refs(resource):
+            payload = {k: v for k, v in payload.items() if k != "ingest_ref"}   # dropped
         ref = payload.get("ingest_ref")
         holder = self.ref_holder(resource, ref)
         if holder:
@@ -147,6 +196,7 @@ class FakeAPI:
                                  {"ingest_ref": ref, "slug": holder})
         slug = self._new_slug(resource, payload.get("title") or payload.get("name"))
         self.created.append((resource, slug))
+        self._posted.append((resource, posted, slug))
         if resource != "events":
             row = {**copy.deepcopy(payload), "slug": slug, "id": 1000 + len(table)}
             if self.entity_status:
@@ -201,8 +251,9 @@ class FakeAPI:
                     e["venue_slug"] = new
 
     def _set_ref(self, resource, slug, row, ref):
-        """The set-once PATCH of `ingest_ref`."""
-        if ref is None:
+        """The set-once PATCH of `ingest_ref` (silently ignored where the
+        resource takes no refs)."""
+        if ref is None or not self.takes_refs(resource):
             return
         if row.get("ingest_ref") and row["ingest_ref"] != ref:
             raise TownloopsError(422, "validation_error", "ingest_ref is set once")
@@ -220,7 +271,7 @@ class FakeAPI:
         if venue_id is not None:
             v = next((v for v in self.venues.values()
                       if v["id"] == venue_id and v.get("town", "slt") == town), None)
-        elif venue_ref and any(x.get("ingest_ref") == venue_ref for x in self.venues.values()):
+        elif venue_ref and self.takes_refs("venues") and any(x.get("ingest_ref") == venue_ref for x in self.venues.values()):
             v = next(x for x in self.venues.values() if x.get("ingest_ref") == venue_ref)
         elif not venue_name:
             pass
@@ -326,14 +377,23 @@ class FakeAPI:
         return [s for r, s in self.created if r == resource][i]
 
     def posted_slug(self, resource, payload):
-        """The slug of the row a create `payload` made (found by its ingest_ref)."""
-        return self.ref_holder(resource, payload["ingest_ref"])
+        """The slug of the row a create `payload` made (by its ingest_ref, or —
+        where the resource takes none — the create that sent it)."""
+        if payload.get("ingest_ref") and self.takes_refs(resource):
+            return self.ref_holder(resource, payload["ingest_ref"])
+        return next((slug for r, p, slug in self._posted if r == resource and p == payload), None)
 
     def ref_of(self, resource, slug):
         return self.tables[resource][slug].get("ingest_ref")
 
     def creates(self):
         return [c[2] for c in self.calls if c[0] == "POST"]
+
+
+def write_openapi(api: FakeAPI, state_dir) -> None:
+    """Put `api`'s OpenAPI document at `<state_dir>/openapi.json` — where
+    engine/ingest_ref reads which resources take refs ($HERMES_HOME/state)."""
+    (state_dir / "openapi.json").write_text(json.dumps(api.openapi()))
 
 
 def _no_series_writes(resource):

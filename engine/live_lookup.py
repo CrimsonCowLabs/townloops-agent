@@ -6,8 +6,11 @@ a create is only sent after a lookup comes back empty.
 
 Every row the agent ships carries its Ingest Ref (engine/ingest_ref, townloops
 ADR 0011), so a lookup goes by ref first — one `?ingest_ref=` list read that
-survives a wiped local cache and a TownLoops-side rename. The rest is the
-fallback for rows shipped before refs: an event is looked up by slug
+survives a wiped local cache and a TownLoops-side rename — only for a resource
+the API takes refs on (`ingest_ref.supported`, the OpenAPI snapshot; events
+today), and only a row carrying the ref matches (`ingest_ref.lookup_by_ref`).
+The rest is the fallback for rows shipped before refs (and for resources
+without refs): an event is looked up by slug
 (GET); then, when the Series it will join is known, by that Series'
 occurrences on the same town-local date (`?series=` + the day — the
 strongest "already live" signal: a second source's copy of one evening is

@@ -17,6 +17,10 @@ from engine.event_extract import event_uid, upsert_event
 from tests.fake_townloops import FakeAPI
 from tests.test_live_lookup import _use, conn, ship, snapshot  # noqa: F401 — fixtures
 
+# An API whose every resource takes refs; the real one today (events only)
+# is tests/test_ingest_ref_support.py (#64).
+pytestmark = pytest.mark.usefixtures("refs_everywhere")
+
 
 EVENTS = [
     {"title": "Jazz Night", "date": "2026-10-09T20:00:00", "description": "Weekly jazz.",

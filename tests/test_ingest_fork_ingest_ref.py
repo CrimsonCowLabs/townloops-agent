@@ -21,6 +21,10 @@ from engine import ingest_ref
 from engine.derive_helpers import insert_entity
 from engine.event_extract import event_uid, upsert_event
 
+# An API whose every resource takes refs (tests/test_ingest_ref_support.py:
+# where one doesn't, #64).
+pytestmark = pytest.mark.usefixtures("refs_everywhere")
+
 
 def _load_ingest():
     path = Path(__file__).resolve().parent.parent / "skills/business/event-ingest/ingest.py"

@@ -23,6 +23,9 @@ Fork changes:
     unanswered lookup fails the row, never a miss; resync matches by ref
     first and, on a name + date match, adopts it via
     `ingest_ref.adopt_and_remember` — never onto a live mirror's row.
+    Only for the kinds the API takes refs for (#64, `ingest_ref.supported` /
+    `accepts_venue_ref`, from the OpenAPI snapshot): elsewhere no ref is
+    sent, looked up or adopted.
 """
 from __future__ import annotations
 
@@ -700,8 +703,9 @@ def _row_to_townloops_entry(row: sqlite3.Row, conn: sqlite3.Connection | None = 
     `409 ingest_ref_taken` naming the existing row — 'already shipped'.
     """
     payload = _row_to_event_payload(row)
-    payload["ingest_ref"] = _ref_for_row(row, "event")
-    venue_ref = _venue_ref(conn, row)
+    ingest_ref.with_ref("events", payload, _ref_for_row(row, "event"))
+    # Only where the event payload declares it (#64, the OpenAPI snapshot).
+    venue_ref = _venue_ref(conn, row) if ingest_ref.accepts_venue_ref() else None
     if venue_ref:
         payload["venue_ingest_ref"] = venue_ref
     return {
@@ -811,7 +815,8 @@ def _row_to_bulk_entry(row: sqlite3.Row, kind: str, conn: sqlite3.Connection | N
     if kind == "event":
         return _row_to_townloops_entry(row, conn)
     payload = _row_to_entity_payload(row, kind)
-    payload["ingest_ref"] = _ref_for_row(row, kind)
+    # No ref where the API takes none for the kind (#64).
+    ingest_ref.with_ref(kind, payload, _ref_for_row(row, kind))
     return {
         "entity_type": kind,
         "payload": payload,
@@ -916,8 +921,9 @@ def _bulk_post(
                 returned = taken or ((item.get("data") or {}).get("slug")) or ""
                 if returned:
                     _capture_townloops_slug(conn, kind, uid_col, row[uid_col], returned)
-                with conn:
-                    ingest_ref.remember(conn, kind, row[uid_col], _ref_for_row(row, kind))
+                if ingest_ref.supported(kind):   # the ref was sent
+                    with conn:
+                        ingest_ref.remember(conn, kind, row[uid_col], _ref_for_row(row, kind))
                 shipped += 1
             else:
                 failed += 1
@@ -1721,7 +1727,7 @@ def _resync_kind(
             if adoption.status == "adopted":
                 refs_adopted += 1
                 chosen["ingest_ref"] = ref  # a same-key local row can't adopt it too
-            elif adoption.status != "already":
+            elif adoption.status not in ("already", "unsupported"):
                 adopt_failures.append({"slug": chosen["slug"], "ref": ref,
                                        "status": adoption.status, "detail": adoption.detail})
                 print(f"[warn] adopt {kind} {chosen['slug']} <- {ref}: {adoption.status} "

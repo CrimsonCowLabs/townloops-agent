@@ -143,7 +143,9 @@ class TestVenues:
         assert [c[1] for c in town.api.calls if c[0] == "POST"] == ["venues", "events"]
         venue, event = (c[2] for c in town.api.calls if c[0] == "POST")
         assert "slug" not in venue and "slug" not in event
-        assert event["venue_ingest_ref"] == venue["ingest_ref"]
+        # Venues take no refs on the real API (#64): bound by the created id.
+        assert "ingest_ref" not in venue and "venue_ingest_ref" not in event
+        assert event["venue_id"] == town.api.venues[town.api.posted_slug("venues", venue)]["id"]
         # Followed by the slug TownLoops derived, not one the agent proposed.
         subs = {r[0] for r in town.conn.execute("SELECT slug FROM submissions")}
         assert subs == {town.api.posted_slug("venues", venue), town.api.posted_slug("events", event)}

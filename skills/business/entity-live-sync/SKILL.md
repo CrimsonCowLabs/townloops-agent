@@ -80,6 +80,21 @@ the ship paths use too — and one `sweep` summary):
 
 Each marks `extra_json.ref_adoption = {status, at, detail}`.
 
+Only kinds the API takes refs for (`ingest_ref.supported`, read from the
+OpenAPI snapshot — today events only) are adopted; the rest are skipped.
+
+## Ref binding audit (read-only)
+
+`audit-refs` (`engine/ref_adoption.audit_bindings`) lists local entities a ref
+lookup may have bound to the wrong live row — before #64 a server ignoring
+`?ingest_ref=` on entity lists answered unrelated rows and the first one was
+taken (SLT: three venues bound to `aleworx-stateline`, then synced onto it).
+Reasons: `ref-unsupported` (a ref remembered for a kind that takes none),
+`ref-not-carried` (live doesn't carry it), `shared-slug` (several local rows
+on one live row). Each shows the live name, the rows sharing it and the
+`entity-sync` pushes to it (`patched`) — what to check or put back live. GET
+only; nothing is changed. Fixing a binding is the operator's call.
+
 ## Series pass
 
 After the entity sweep, under the same lock (`engine/series_sync.py`):
@@ -102,6 +117,7 @@ After the entity sweep, under the same lock (`engine/series_sync.py`):
 python sync.py run [--limit 25] [--kind venue ...]   # cron: daily 03:30, --limit 15
 python sync.py list                                  # pending + flagged (read-only)
 python sync.py clear --kind venue --entity-uid UID   # after the operator fixes it
+python sync.py audit-refs                            # suspect ref bindings (read-only)
 ```
 
 `run` takes the workqueue-drain lock (skips quietly while a drain runs) and

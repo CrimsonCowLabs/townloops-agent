@@ -19,6 +19,8 @@ Subcommands:
                                    ref adoption and Series passes (cron, daily)
   list                             pending + operator-flagged entities (read-only)
   clear --kind K --entity-uid UID  operator: unflag after looking at it
+  audit-refs                       entities a ref lookup may have bound to the
+                                   wrong live row (#64; read-only, GET only)
 """
 
 from __future__ import annotations
@@ -94,6 +96,12 @@ def _clear(args) -> int:
     return 0 if ok else 1
 
 
+def _audit_refs(args) -> int:
+    from engine.townloops_api import Client
+    print(json.dumps(ref_adoption.audit_bindings(Client(), open_db()), indent=2))
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(prog="entity-live-sync")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -104,8 +112,10 @@ def main() -> int:
     clear = sub.add_parser("clear")
     clear.add_argument("--kind", required=True, choices=sorted(entity_sync.RESOURCES))
     clear.add_argument("--entity-uid", required=True)
+    sub.add_parser("audit-refs")
     args = ap.parse_args()
-    return {"run": _run, "list": _list, "clear": _clear}[args.cmd](args)
+    return {"run": _run, "list": _list, "clear": _clear,
+            "audit-refs": _audit_refs}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -178,6 +178,7 @@ class TestVerifyAndFlags:
         assert res.status == "missing" and api.creates() == []
         assert json.loads(row(conn)["extra_json"])["live_sync"]["status"] == "missing"
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_renamed_live_is_found_by_its_ref_and_repointed(self, conn):
         """A 404 naming no survivor is not "gone" until the Ingest Ref says
         so: a row renamed on TownLoops is found by it and synced there."""
@@ -192,6 +193,7 @@ class TestVerifyAndFlags:
         assert api.venues["riva-renamed"]["phone"] == "530-555-0100"
         assert r["pushed_hash"] == r["content_hash"]
 
+    @pytest.mark.usefixtures("refs_everywhere")
     def test_renamed_between_read_and_patch_is_followed_by_ref(self, conn):
         from engine.ingest_ref import ref_for
         api = FakeAPI(venues=[live_venue(ingest_ref=ref_for("v-uid"))])
