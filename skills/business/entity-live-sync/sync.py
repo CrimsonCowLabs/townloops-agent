@@ -2,6 +2,12 @@
 """entity-live-sync — bring local entity changes (enrichment) to the live
 TownLoops rows they belong to. Logic: engine/entity_sync.py.
 
+First, entities that came back `not-found` at least
+`enrichment.retry_not_found_days` (town-profile.yaml, default 14) ago are
+researched again, up to --limit (engine/entity_enrich.retry_not_found). The
+sweep covers live mirrors too: what enrichment found for one (an image
+proposal included) fills its live blanks (engine/entity_sync).
+
 Then the release pass (engine/entity_ship.ship_released): performers/creators
 event-ship held back for research that research or the operator has since
 released are created live when one of their events is already live.
@@ -30,7 +36,9 @@ import json
 import os
 import sys
 
-from engine import autonomy, entity_ship, entity_sync, job_health, ref_adoption, series_sync
+from engine import (
+    autonomy, entity_enrich, entity_ship, entity_sync, job_health, ref_adoption, series_sync,
+)
 from engine import lock as _lock
 from engine.derive_helpers import open_db
 
@@ -52,8 +60,13 @@ def _run(args) -> int:
         # same entity at the same time.
         with _lock.acquire("workqueue-drain", wait=LOCK_WAIT_S):
             client = Client()
-            counts = entity_sync.sweep(client, conn, limit=args.limit,
-                                       kinds=tuple(args.kind or entity_sync.RESOURCES))
+            # Misses from N+ days ago get another look first, so what it
+            # finds syncs in this run (engine/entity_enrich.retry_not_found).
+            kinds = tuple(args.kind or entity_sync.RESOURCES)
+            reenriched = {}
+            if set(kinds) & set(entity_enrich.TABLES):
+                reenriched = entity_enrich.retry_not_found(conn, _enricher(), limit=args.limit)
+            counts = entity_sync.sweep(client, conn, limit=args.limit, kinds=kinds)
             conn.commit()
             # Performers/creators event-ship held for research that research
             # (or the operator) has since released — creates, so gated.
@@ -75,8 +88,14 @@ def _run(args) -> int:
     conn.commit()
     job_health.record(conn, "entity-live-sync", job_health.OK)
     print(json.dumps({**(counts or {"synced": 0}), "released": released,
-                      "refs": refs, "series": series_counts}))
+                      "refs": refs, "series": series_counts, "reenriched": reenriched}))
     return 0
+
+
+def _enricher():
+    """entity_enrich.enrich_entity under one budget (event-enrich-entities')."""
+    from engine.listing_website_cleanup import enricher
+    return enricher()
 
 
 def _list(args) -> int:

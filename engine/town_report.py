@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from engine import alerts, analyst_runs
+from engine import alerts, analyst_runs, live_index
 from engine.derive_helpers import dict_rows as _rows
 
 EXAMPLES = 5
@@ -44,7 +44,7 @@ def build(conn: sqlite3.Connection, since: str, *, narrative: Optional[str] = No
     other = [a for a in standing if not a.needs_you]
     c = {"sources": _sources(conn, since), "events": _events(conn, since),
          "entities": _entities(conn, since), "holds": _holds(conn),
-         "failures": _failures(conn, since)}
+         "failures": _failures(conn, since), "ambiguous": _ambiguous(conn)}
     runs = analyst_runs.recent(conn, since)
 
     md = [f"# {town} — analyst report {now:%Y-%m-%d}",
@@ -92,6 +92,11 @@ def build(conn: sqlite3.Connection, since: str, *, narrative: Optional[str] = No
            f"- seeds held: {h['seeds']}"]
     md += [f"- held seed: {x}" for x in h["seed_examples"]]
 
+    amb = c["ambiguous"]
+    md += ["", "## Ambiguous live matches",
+           "_Not created, not bound: decide which live record each one is._"]
+    md += [f"- {x}" for x in amb] or ["- none"]
+
     f = c["failures"]
     md += ["", "## Failures",
            f"- stuck events: {f['stuck']}; workqueue errors: {f['workqueue_errors']}; "
@@ -114,6 +119,8 @@ def build(conn: sqlite3.Connection, since: str, *, narrative: Optional[str] = No
            f"{n['enriched']} ({n['with_image']} with an image)",
            f"holds: {h['events']} events, {h['seeds']} seeds; failures: stuck {f['stuck']}, "
            f"source runs {f['source_runs_failed']}"]
+    if amb:
+        tg.append(f"ambiguous live matches: {len(amb)}")
     if other:
         tg.append(f"standing alerts: {len(other)}")
     return Report("\n".join(md) + "\n", "\n".join(tg), c, alerts.as_dicts(standing))
@@ -212,9 +219,14 @@ def _events(conn: sqlite3.Connection, since: str) -> dict:
 def _entities(conn: sqlite3.Connection, since: str) -> dict:
     found = dict(conn.execute("SELECT kind, COUNT(*) FROM discovery_candidates "
                               "WHERE first_seen_at >= ? GROUP BY kind", (since,)).fetchall())
-    deduped = _rows(conn, "SELECT display_name, canonical_url, live_slug FROM discovery_candidates "
-                          "WHERE status = 'already-live' AND last_seen_at >= ? "
-                          "ORDER BY last_seen_at DESC", (since,))
+    deduped = [f"{r['display_name'] or r['canonical_url']} → {r['live_slug']}" for r in _rows(
+        conn, "SELECT display_name, canonical_url, live_slug FROM discovery_candidates "
+              "WHERE status = 'already-live' AND last_seen_at >= ? "
+              "ORDER BY last_seen_at DESC", (since,))]
+    # Creates skipped at ship for a live record (engine/live_index).
+    deduped += [f"{_target_name(conn, r['target'])}: {r['detail']}" for r in _rows(
+        conn, "SELECT target, detail FROM agent_activity WHERE worker = ? AND action = ? "
+              "AND ts >= ? ORDER BY ts DESC", (live_index.WORKER, live_index.DEDUPED, since))]
     new, enriched, images = Counter(), Counter(), 0
     for kind, table in ENTITY_TABLES.items():
         new[kind] = _count(conn, f"SELECT COUNT(*) FROM {table} WHERE first_seen_at >= ? "
@@ -228,12 +240,31 @@ def _entities(conn: sqlite3.Connection, since: str) -> dict:
         "discovered": sum(found.values()), "discovered_by_kind": found,
         "new_by_kind": {k: v for k, v in new.items() if v},
         "deduped": len(deduped),
-        "deduped_examples": [f"{r['display_name'] or r['canonical_url']} → {r['live_slug']}"
-                             for r in deduped[:EXAMPLES]],
+        "deduped_examples": deduped[:EXAMPLES],
         "enriched": sum(enriched.values()),
         "enriched_by_kind": {k: v for k, v in enriched.items() if v},
         "with_image": images,
     }
+
+
+def _target_name(conn: sqlite3.Connection, target: str) -> str:
+    """An activity target (an event_uid, or `<kind>:<entity_uid>`) by name."""
+    kind, _, uid = target.partition(":") if ":" in target else ("event", "", target)
+    if kind == "event":
+        row = conn.execute("SELECT COALESCE(title, name) FROM events WHERE event_uid = ?",
+                           (uid,)).fetchone()
+    elif kind in ENTITY_TABLES:
+        row = conn.execute(f"SELECT name FROM {ENTITY_TABLES[kind]} WHERE entity_uid = ?",
+                           (uid,)).fetchone()
+    else:
+        row = None
+    return f"{kind} {row[0] if row and row[0] else uid[:12]}"
+
+
+def _ambiguous(conn: sqlite3.Connection) -> list[str]:
+    return [f"{a['kind']} {a['name'] or a['uid'][:12]} — may be live as "
+            f"{', '.join(a.get('candidates') or [])} ({a.get('matched_by') or '?'})"
+            for a in live_index.ambiguous(conn)]
 
 
 def _holds(conn: sqlite3.Connection) -> dict:

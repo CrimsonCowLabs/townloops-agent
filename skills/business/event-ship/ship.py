@@ -48,11 +48,12 @@ from typing import Any, Optional
 from engine import autonomy
 from engine import categories as cats
 from engine import event_dedup, event_detail, event_state, event_tickets, images, time_plausibility
+from engine import live_index
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
     seed_name_of,
 )
-from engine.entity_ship import AwaitingResearch, ship_entity as _ship_entity
+from engine.entity_ship import AmbiguousLiveMatch, AwaitingResearch, ship_entity as _ship_entity
 from engine import ingest_ref
 from engine.ingest_ref import change_ref_for, ref_for, remember, taken_slug
 from engine.event_extract import has_clock_time, town_tz_name, utc_times
@@ -331,24 +332,36 @@ def _ship_event(client, conn, event: dict, venue_slug: Optional[str]) -> Optiona
         found = find_live_event(client, ingest_ref=ref, slug=legacy_slug,
                                 source_url=payload.get("source_url"),
                                 start_at=payload["start_at"], series_slug=decision.series_slug,
-                                tz=_town_tz())
+                                tz=_town_tz(), titles=(source_title, decision.title),
+                                venue_id=payload.get("venue_id"), venue_slug=venue_slug,
+                                venue_name=payload.get("venue_name"))
     except Exception as e:  # noqa: BLE001 — rc=1 → workqueue retry; never create blind
         msg = f"look up live event failed: {str(e)[:200]}"
         record_activity(conn, _WORKER, "find-live-event", event_uid, ok=False, error=msg)
         print(f"event {event_uid[:12]}: {msg}", file=sys.stderr)
         return None
     if found.ambiguous:
-        slugs = ", ".join(sorted(r.get("slug") or "?" for r in found.ambiguous))
-        why = (f"Series {decision.series_slug} already has several occurrences on this date"
-               if found.matched_by == "series-day" else
-               f"several live events share source_url {payload.get('source_url')} at this time")
+        slugs = sorted(r.get("slug") or "?" for r in found.ambiguous)
+        why = {"series-day": f"Series {decision.series_slug} already has several occurrences "
+                             "on this date",
+               "title-day": "several live events of this title are on this date"}.get(
+            found.matched_by,
+            f"several live events share source_url {payload.get('source_url')} at this time")
+        # Recorded for the analyst run and the daily report; nothing created.
+        live_index.mark_ambiguous(conn, "events", "event_uid", event_uid, "event", slugs,
+                                  found.matched_by or "?")
         _park_for_review(conn, event_uid, "find-live-event",
-                         f"{why}: {slugs} — duplicate for the operator")
+                         f"{why}: {', '.join(slugs)} — duplicate for the operator")
         return None
     if found.row and isinstance(client, autonomy.GatedClient) \
             and found.row.get("status") == "rejected":
         return _decline_rejected(conn, event_uid, found)
     if found.row:
+        live_index.clear_ambiguous(conn, "events", "event_uid", event_uid)
+        if found.matched_by in ("series-day", "source_url", "title-day"):
+            # Not ours by ref or slug: a create skipped for a live record.
+            live_index.record_dedup(conn, event_uid, "event", found.row["slug"],
+                                    found.matched_by)
         _bind_ref(client, conn, event, found.row)
         if isinstance(client, autonomy.GatedClient) and found.row.get("status") == "pending":
             # Adopting a pending record (ours from an earlier run, or another
@@ -1008,11 +1021,12 @@ def _ship(client, conn, event: dict) -> int:
         for lk in by_kind[kind]:
             try:
                 slug = _ship_entity(client, conn, kind, lk["entity_uid"])
-            except (autonomy.SubmissionsHeld, AwaitingResearch) as e:
-                # Not submitted now (no entity moderation yet, or a bare
-                # performer research hasn't verified): the event still ships,
-                # naming its venue; the entity waits. A released performer
-                # of a live event ships on entity-live-sync.
+            except (autonomy.SubmissionsHeld, AwaitingResearch, AmbiguousLiveMatch) as e:
+                # Not submitted now (no entity moderation yet, a bare
+                # performer research hasn't verified, or several live rows
+                # it may be): the event still ships, naming its venue; the
+                # entity waits. A released performer of a live event ships
+                # on entity-live-sync.
                 record_activity(conn, _WORKER, f"ship-{kind}", event_uid,
                                 detail=f"{lk['entity_uid'][:12]} held ({e.reason})")
                 continue

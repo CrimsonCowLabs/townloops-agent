@@ -9,7 +9,8 @@ the seed extractions, this module decides what each extraction *is*:
 
 Matching order (first hit wins):
   1. `source_url` — canonicalized; the strongest key, most live rows have one.
-  2. Title similarity (normalized SequenceMatcher ≥ TITLE_MATCH_RATIO).
+  2. Title similarity (`live_index.titles_match` — normalized SequenceMatcher
+     ≥ TITLE_MATCH_RATIO; event-ship's last live lookup uses it too).
 
 Recurring events share a title and often a source_url across occurrences, so
 a key match on a *different* day is not automatically a date change. Where
@@ -29,7 +30,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone, tzinfo
-from difflib import SequenceMatcher
 from typing import Any, Iterable, Optional
 
 from dateutil import parser as _dtparser
@@ -37,10 +37,8 @@ from dateutil import parser as _dtparser
 from engine.derive_helpers import names_match, normalize_name
 from engine.discovery import canonicalize_url
 from engine.event_extract import day_and_clock, has_clock_time, page_times
+from engine.live_index import TITLE_MATCH_RATIO, VENUE_MATCH_RATIO, titles_match  # noqa: F401
 
-
-TITLE_MATCH_RATIO = 0.88
-VENUE_MATCH_RATIO = 0.80
 # A start-time shift smaller than this is treated as rounding noise between
 # the source page and what was published (e.g. "doors 6:45 / show 7").
 TIME_TOLERANCE = timedelta(minutes=30)
@@ -155,9 +153,7 @@ class LiveIndex:
         t = normalize_name(extracted.get("title") or "")
         if not t:
             return [], None
-        hits = [e for e in self.events
-                if e["_title_norm"]
-                and SequenceMatcher(None, t, e["_title_norm"]).ratio() >= TITLE_MATCH_RATIO]
+        hits = [e for e in self.events if titles_match(t, e["_title_norm"])]
         return hits, ("title" if hits else None)
 
 

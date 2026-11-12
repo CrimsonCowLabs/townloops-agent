@@ -4,8 +4,9 @@ five entity kinds from its own site to fill blank fields, under a lookup
 budget.
 
 Never writes to TownLoops. Live rows are mirrored locally; an image found for
-a live row without one is staged as a proposal (`image-proposed`) for the
-operator, never filled into other fields; a live row whose site shows no
+a live row without one is staged (`image-proposed`, its fields recorded as
+the mirror's fills) and entity-live-sync fills it into the live row's blank
+image (engine/entity_sync), never into other fields; a live row whose site shows no
 image (`image-not-found`) is looked at again only after
 LIVE_IMAGE_RETRY_DAYS. A lookup the budget cut short leaves the entity
 `pending` for the next run. Researched values are verbatim from
@@ -36,9 +37,9 @@ from urllib.parse import urlparse
 from engine import entity_classify, listing_hosts, page_extract
 from engine.derive_helpers import (
     best_name_match, insert_entity, iso_utc_now, mint_entity_uid, mirror_live_entity,
-    names_match, normalize_name,
+    names_match, normalize_name, parse_extra_json,
 )
-from engine.entity_sync import refresh_content_hash
+from engine.entity_sync import MIRROR_FILLS, refresh_content_hash
 
 
 @dataclass(frozen=True)
@@ -470,6 +471,12 @@ def fill_blanks(conn: sqlite3.Connection, kind: str, entity_uid: str, payload: d
     if filled:
         sets.append("last_modified_at = ?")
         vals.append(iso_utc_now())
+    if filled and row.get("source_kind") == "live" and "extra_json" in cols:
+        # A live mirror's fills are what entity_sync may send to its blanks.
+        extra = parse_extra_json(row.get("extra_json"))
+        extra[MIRROR_FILLS] = sorted(set(extra.get(MIRROR_FILLS) or []) | set(filled))
+        sets.append("extra_json = ?")
+        vals.append(json.dumps(extra))
     if sets:
         conn.execute(f"UPDATE {table} SET {', '.join(sets)} WHERE entity_uid = ?",
                      (*vals, entity_uid))
@@ -615,3 +622,62 @@ def resolve_entity(conn: sqlite3.Connection, kind: str, name: str, event: dict,
     status = conn.execute(f"SELECT enrichment_status FROM {table} WHERE entity_uid = ?",
                           (entity_uid,)).fetchone()[0]
     return Resolution(entity_uid, "created", filled, status=status)
+
+
+# --------------------------------------------------------------------------
+# Re-enrichment of misses
+# --------------------------------------------------------------------------
+
+# A `not-found` entity is researched again after this many days
+# (town-profile.yaml → enrichment.retry_not_found_days).
+RETRY_NOT_FOUND_DAYS = 14
+
+
+def retry_not_found_days() -> int:
+    from engine.derive_helpers import load_town_profile
+    try:
+        days = int(((load_town_profile().get("enrichment") or {})
+                    .get("retry_not_found_days", RETRY_NOT_FOUND_DAYS)))
+    except (TypeError, ValueError):
+        days = RETRY_NOT_FOUND_DAYS
+    return max(days, 1)
+
+
+def retry_not_found(conn: sqlite3.Connection, enrich, limit: int = 10,
+                    days: Optional[int] = None,
+                    now: Optional[datetime] = None) -> dict[str, int]:
+    """Research again up to `limit` venues/businesses/communities (not live
+    mirrors) that came back `not-found` at least `days` ago (default
+    `retry_not_found_days()`), oldest first: each is put back to `pending`
+    and `enrich(conn, kind, uid)` → status runs it. A lookup that didn't run
+    (`deferred`, or it raised) puts it back to `not-found` with its old date,
+    so the next run tries again. One `re-enrich` activity per entity.
+    Returns a count per outcome."""
+    from engine.derive_helpers import record_activity
+    days = retry_not_found_days() if days is None else days
+    cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=days)).isoformat(
+        timespec="seconds")
+    rows = []
+    for kind, table in TABLES.items():
+        rows += [(r[2] or "", kind, table, r[0], r[1]) for r in conn.execute(
+            f"SELECT entity_uid, name, enriched_at FROM {table} "
+            "WHERE enrichment_status = 'not-found' AND COALESCE(source_kind, '') != 'live' "
+            "AND COALESCE(enriched_at, '') < ?", (cutoff,))]
+    counts: dict[str, int] = {}
+    for enriched_at, kind, table, uid, name in sorted(rows)[:max(limit, 0)]:
+        conn.execute(f"UPDATE {table} SET enrichment_status = 'pending' WHERE entity_uid = ?",
+                     (uid,))
+        try:
+            status = enrich(conn, kind, uid)
+        except Exception as e:  # noqa: BLE001 — tried again next run
+            status = "deferred"
+            print(f"  re-enrich {kind} {uid[:12]} failed: {str(e)[:120]}")
+        if status == "deferred":
+            conn.execute(f"UPDATE {table} SET enrichment_status = 'not-found', enriched_at = ? "
+                         "WHERE entity_uid = ? AND enrichment_status = 'pending'",
+                         (enriched_at or None, uid))
+        record_activity(conn, "entity-sync", "re-enrich", f"{kind}:{uid}",
+                        detail=f"{name}: not-found since {enriched_at or '?'} → {status}")
+        conn.commit()
+        counts[status] = counts.get(status, 0) + 1
+    return counts
