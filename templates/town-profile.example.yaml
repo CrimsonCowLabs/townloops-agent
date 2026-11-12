@@ -122,7 +122,10 @@ discovery:
 #                              # status change (a new seed starts at 0.5), scaled down by a
 #                              # health alert and dedup losses; a trial's score is the
 #                              # smoothed share of its listed events that passed judgement
-#     approve: 0.2             # a proposed seed's trial must score this (and pass ≥1 event)
+#     approve: 0.2             # a proposed seed's trial must score this (and pass ≥1 event);
+#                              # only upcoming events within horizon_days count
+#     many_upcoming: 20        # a trial listing this many upcoming events is never
+#                              # low-yield: one passing event approves it
 #     syndicator: 0.45         # below this an approved seed is demoted to syndicator
 #     retire: 0.3              # below this it is retired (re-probed first under a health alert)
 #   series_reject_streak: 3    # a Series rejected this many times in a row is skipped

@@ -235,10 +235,13 @@ In supervised mode only the adapter step runs, and only proposes (see Adapters).
 - **Proposed seeds** (feeds first, `--trials` per run, default 2) are dry-run:
   scrape, extract, and judge the listed events as event-find would (an
   adapter seed through its adapter). The
-  trial's score — the smoothed share of listed events that are real upcoming
+  trial's score — the smoothed share of its *upcoming* events (within the
+  horizon; a feed's past and far-future entries don't count) that are real
   in-town events, `(passed + 1) / (judged + 2)`, stored as its starting
   `trust_score` — must reach `seed_trust.approve` (default 0.2) with at least
-  one passing; short of it is `trial-low-yield`. An error page
+  one passing; short of it is `trial-low-yield` — except that a listing with
+  `seed_trust.many_upcoming` (default 20) upcoming events or more is never
+  low-yield: one passing approves it (`trial-many-upcoming`). An error page
   (`trial-not-found`), bot wall (`trial-challenge`), empty page or empty
   listing, or nothing usable is a rejection. A 2xx alone never approves.
 - **Trust** (`trust_score`, 0..1) is refreshed from moderator outcomes since
