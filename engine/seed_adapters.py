@@ -22,7 +22,8 @@ Every adapter name is resolved through `registry()`.
 prompt returns (title, local-wall-clock `date`/`end_at`, venue, location,
 description, categories, tags, source_url; optionally `image_url` +
 `image_alt` — `feed_image` — when the feed carries a picture with its alt
-text: Tribe's `image`; Showare gives only a file name, no URL, so none) — so
+text: Tribe's `image`; Showare gives only a file name, no URL, so none;
+Carbonhouse's only alt is the title, so none) — so
 they go through event-find's
 one upsert / cancellation / vanish / source-health / judgement path — plus
 `page`, the text those quote-check against. Anything short of the whole
@@ -439,6 +440,192 @@ def showare(seed: dict, config: dict, get_json: GetJson) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Carbonhouse venue sites (arenas, event centers): an /events page of
+# `.eventItem` cards in `.eventList__wrapper`, more cards from
+# /events/events_ajax/<offset> (a JSON string of card HTML, "" past the end),
+# and each card's detail page — showings, `.event_description`, a JSON-LD
+# Event. Ported from SLT's town adapter `tahoeblue_events` (Tahoe Blue Event
+# Center), which read only the start time.
+# ---------------------------------------------------------------------------
+
+CARBONHOUSE_PAGE_SIZE = 12
+CARBONHOUSE_MAX_PAGES = 100
+CARBONHOUSE_AJAX_PATH = "/events/events_ajax/"
+CARBONHOUSE_AJAX_PARAMS = {"category": 0, "venue": 0, "team": 0, "exclude": "",
+                           "came_from_page": "event-list-page"}
+# A JSON-LD end further than this from its start is a CMS default or an
+# unset field (1969-12-31), not the event's end (engine/time_plausibility).
+CARBONHOUSE_MAX_DURATION = timedelta(hours=14)
+
+
+def _soup(text: str):
+    from bs4 import BeautifulSoup
+    return BeautifulSoup(text, "html.parser")
+
+
+def _ch_clean(value) -> str:
+    return " ".join(value.replace("\xa0", " ").split()) if value else ""
+
+
+def _ch_card_date(card) -> Optional[str]:
+    parts = [card.select_one(f".m-date__{k}") for k in ("month", "day", "year")]
+    if any(p is None for p in parts):
+        return None
+    month, day, year = (_ch_clean(p.get_text(" ")) for p in parts)
+    try:
+        return datetime.strptime(f"{month} {day} {year.lstrip('/ ')}", "%b %d %Y").date().isoformat()
+    except ValueError:
+        return None
+
+
+def _ch_clock(text: str) -> Optional[str]:
+    try:
+        return datetime.strptime(_ch_clean(text).replace(" ", ""), "%I:%M%p").strftime("%H:%M")
+    except ValueError:
+        return None
+
+
+def _ch_start_time(soup, date: str) -> Optional[str]:
+    """The showing on `date`'s local start time ("19:00"), or None. A page
+    with one occurrence may carry it only in its sidebar."""
+    for showing in soup.select(".event_showings li"):
+        date_node, time_node = showing.select_one(".showings_date"), showing.select_one(".time")
+        if date_node is None or time_node is None:
+            continue
+        text = _ch_clean(date_node.get_text(" ")).replace("/", "")
+        for fmt in ("%A, %b %d %Y", "%a, %b %d %Y"):
+            try:
+                if datetime.strptime(text, fmt).date().isoformat() == date:
+                    return _ch_clock(time_node.get_text(" "))
+            except ValueError:
+                pass
+    date_node = soup.select_one(".sidebar_event_date")
+    start_node = soup.select_one(".sidebar_event_starts span")
+    if date_node is None or start_node is None:
+        return None
+    try:
+        day = datetime.strptime(_ch_clean(date_node.get_text(" ")).replace(",", "").replace(
+            "Date ", ""), "%a %b %d %Y").date().isoformat()
+    except ValueError:
+        return None
+    return _ch_clock(start_node.get_text(" ")) if day == date else None
+
+
+def _ch_ld_event(soup) -> dict:
+    for node in soup.select('script[type="application/ld+json"]'):
+        try:
+            data = json.loads(node.string or "")
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("@type") == "Event":
+            return data
+    return {}
+
+
+def _ch_local(value) -> Optional[datetime]:
+    """An ISO time with offset as a naive town-local wall clock."""
+    try:
+        dt = datetime.fromisoformat(str(value).strip())
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        return dt
+    return dt.astimezone(_tz.gettz(town_tz_name())).replace(tzinfo=None)
+
+
+def _ch_end(ld: dict, start: str) -> Optional[str]:
+    """The JSON-LD end, only when its own start is this showing's and it
+    falls after it, within CARBONHOUSE_MAX_DURATION."""
+    ld_start, ld_end = _ch_local(ld.get("startDate")), _ch_local(ld.get("endDate"))
+    if ld_start is None or ld_end is None or ld_start.isoformat(timespec="seconds") != start:
+        return None
+    if not (ld_start < ld_end <= ld_start + CARBONHOUSE_MAX_DURATION):
+        return None
+    return ld_end.isoformat(timespec="seconds")
+
+
+def _ch_place(ld: dict, config: dict) -> tuple[Optional[str], Optional[str]]:
+    """(venue, location): config wins, else the JSON-LD Event's Place."""
+    place = ld.get("location") if isinstance(ld.get("location"), dict) else {}
+    addr = place.get("address") if isinstance(place.get("address"), dict) else {}
+    venue = config.get("venue") or html_text(place.get("name"))
+    where = config.get("location") or location(
+        _ch_clean(addr.get("streetAddress")) or None, _ch_clean(addr.get("addressLocality")) or None,
+        _ch_clean(addr.get("addressRegion")) or None, _ch_clean(addr.get("postalCode")) or None)
+    return venue, where
+
+
+def _ch_cards(seed: dict, fetch: "Fetch", max_pages: int) -> list:
+    listing = _soup(fetch.get_text(seed["url"])).select_one(".eventList__wrapper")
+    if listing is None:
+        raise AdapterError("event listing is missing")
+    cards = list(listing.select(":scope > .eventItem"))
+    endpoint = urljoin(seed["url"], CARBONHOUSE_AJAX_PATH)
+    for page in range(1, max_pages + 1):
+        try:
+            body = fetch.get_text(urljoin(endpoint, str(page * CARBONHOUSE_PAGE_SIZE)),
+                                  CARBONHOUSE_AJAX_PARAMS)
+        except AdapterError as exc:
+            # The first offset past the listing answers an empty JSON
+            # string, which the blocked-page guard names a near-empty body.
+            if str(exc) == blocked_page.NEAR_EMPTY:
+                return cards
+            raise
+        try:
+            fragment = json.loads(body)
+        except ValueError:
+            raise AdapterError("events_ajax response is not a JSON string") from None
+        if fragment == "":
+            return cards
+        if not isinstance(fragment, str):
+            raise AdapterError("events_ajax response is not HTML")
+        page_cards = _soup(fragment).select(".eventItem")
+        if not page_cards:
+            raise AdapterError("events_ajax returned non-empty HTML without event cards")
+        cards.extend(page_cards)
+    raise AdapterError(f"event listing exceeds {max_pages * CARBONHOUSE_PAGE_SIZE} events")
+
+
+def carbonhouse(seed: dict, config: dict, fetch: "Fetch") -> list[dict]:
+    """One event per card: its title and date, the start of that date's
+    showing, and from its detail page the description, venue/address and —
+    when plausible — the end the JSON-LD Event gives. Categories are left to
+    event-read-detail: a card names none."""
+    events: list[dict] = []
+    seen: set = set()
+    pages: dict[str, Any] = {}
+    for card in _ch_cards(seed, fetch, config.get("max_pages") or CARBONHOUSE_MAX_PAGES):
+        link = card.select_one("h3.title a[href]")
+        date = _ch_card_date(card)
+        if link is None or date is None:
+            continue
+        source_url = urljoin(seed["url"], link.get("href"))
+        if (source_url, date) in seen:
+            continue
+        seen.add((source_url, date))
+        if source_url not in pages:
+            pages[source_url] = _soup(fetch.get_text(source_url))
+        soup = pages[source_url]
+        clock = _ch_start_time(soup, date)
+        start = f"{date}T{clock}:00" if clock else date
+        ld = _ch_ld_event(soup)
+        venue, where = _ch_place(ld, config)
+        about = soup.select_one(".event_description")
+        events.append({
+            "title": _ch_clean(link.get_text(" ")) or None,
+            "date": start,
+            "end_at": _ch_end(ld, start) if clock else None,
+            "venue": venue,
+            "location": where,
+            "description": html_text(str(about)) if about is not None else None,
+            "categories": [],
+            "tags": [],
+            "source_url": source_url,
+        })
+    return events
+
+
+# ---------------------------------------------------------------------------
 # The registry: one entry per adapter
 # ---------------------------------------------------------------------------
 
@@ -450,6 +637,10 @@ class Param:
 
 def _http_url(v) -> Optional[str]:
     return None if is_http_url(v) else "must be an http(s) URL"
+
+
+def _text(v) -> Optional[str]:
+    return None if isinstance(v, str) and v.strip() else "must be non-blank text"
 
 
 def _positive_int(v) -> Optional[str]:
@@ -482,6 +673,12 @@ ADAPTERS: dict[str, Adapter] = {
         "max_performances": Param("refuse a list longer than this "
                                   f"(default {SHOWARE_MAX_PERFORMANCES})", _positive_int),
     }, feed_types=("showare",)),
+    "carbonhouse": Adapter(carbonhouse, {
+        "venue": Param("the venue name (default: the detail page's JSON-LD Place)", _text),
+        "location": Param("the street address (default: the JSON-LD Place's)", _text),
+        "max_pages": Param("refuse a listing with more than this many card pages "
+                           f"(default {CARBONHOUSE_MAX_PAGES})", _positive_int),
+    }),
 }
 
 

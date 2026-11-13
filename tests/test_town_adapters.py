@@ -414,7 +414,7 @@ class TestTestAdapterCli:
         got = _last(out)
         assert rc == 0
         assert {a["name"]: a["source"] for a in got["adapters"]} == {
-            "tribe": "shared", "showare": "shared", "clock": "town"}
+            "tribe": "shared", "showare": "shared", "carbonhouse": "shared", "clock": "town"}
         assert got["shadowed"] == ["tribe"] and "broken.py" in got["errors"]
 
 

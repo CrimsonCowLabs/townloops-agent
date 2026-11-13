@@ -201,7 +201,9 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     can't null `end_at`; `live_patch.flag_unclearable_end`), never a duplicate or a vanished event),
     `seed_adapters.py` (per-seed deterministic reader keyed by `event_seeds.adapter`, NULL = `generic` Firecrawl → LLM;
     its events take event-find's one path, a partial read is a failed run; `tribe`, `showare` (one event per
-    performance, paged by `perfCount`) — add an `Adapter` entry to
+    performance, paged by `perfCount`), `carbonhouse` (arena/event-center sites: listing cards + events_ajax pages +
+    each detail page's description, showing time and JSON-LD place/end — an end only when the page shows the start
+    and it is within 14h) — add an `Adapter` entry to
     `ADAPTERS`: reader, config `params` (`check_config`), the probed `feed_types` it reads (`for_feed`). A town's own
     adapters are `$HERMES_HOME/adapters/<name>.py` exposing `ADAPTER`, loaded at lookup by `registry()` — the one
     name resolver (`read`, `check_config`, `for_feed`, `seeds.set_adapter`/`assign_adapters`); a shared adapter of the

@@ -1,0 +1,9 @@
+{
+  "https://www.tahoeblueeventcenter.com/events": "listing.html",
+  "https://www.tahoeblueeventcenter.com/events/events_ajax/12?category=0&venue=0&team=0&exclude=&came_from_page=event-list-page": "ajax-12.json",
+  "https://www.tahoeblueeventcenter.com/events/events_ajax/24?category=0&venue=0&team=0&exclude=&came_from_page=event-list-page": "ajax-24.json",
+  "https://www.tahoeblueeventcenter.com/events/detail/lake-tahoe-lakers-vs-vernal-oilers": "detail-lake-tahoe-lakers-vs-vernal-oilers.html",
+  "https://www.tahoeblueeventcenter.com/events/detail/tahoe-knight-monsters-2026-27-schedule-5": "detail-tahoe-knight-monsters-2026-27-schedule-5.html",
+  "https://www.tahoeblueeventcenter.com/events/detail/sparkle-shine-invitational-tour": "detail-sparkle-shine-invitational-tour.html",
+  "https://www.tahoeblueeventcenter.com/events/detail/journey": "detail-journey.html"
+}
