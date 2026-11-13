@@ -439,6 +439,37 @@ def _runs(conn):
     return [dict(r) for r in conn.execute("SELECT * FROM source_runs ORDER BY id")]
 
 
+class TestCarbonhouse:
+    """The capture itself is tests/fixtures/adapters/carbonhouse/ (Tahoe
+    Blue Event Center); these are the rules it can't show."""
+
+    LD = {"startDate": "2026-12-18T19:00:00-08:00", "endDate": "2026-12-18T22:00:00-08:00"}
+
+    @pytest.fixture(autouse=True)
+    def _tz(self, monkeypatch):
+        monkeypatch.setenv("AGENT_TZ", "America/Los_Angeles")
+
+    def test_a_plausible_json_ld_end_for_this_showing_is_kept(self):
+        assert seed_adapters._ch_end(self.LD, "2026-12-18T19:00:00") == "2026-12-18T22:00:00"
+
+    @pytest.mark.parametrize("ld, start", [
+        ({**LD, "endDate": "1969-12-31T16:00:00-08:00"}, "2026-12-18T19:00:00"),   # unset
+        ({**LD, "endDate": "2026-12-18T19:00:00-08:00"}, "2026-12-18T19:00:00"),   # no length
+        ({**LD, "endDate": "2026-12-20T19:00:00-08:00"}, "2026-12-18T19:00:00"),   # a run's end
+        (LD, "2026-12-19T19:00:00"),                    # another showing's JSON-LD
+        ({"startDate": LD["startDate"]}, "2026-12-18T19:00:00"),
+    ])
+    def test_any_other_end_is_none(self, ld, start):
+        assert seed_adapters._ch_end(ld, start) is None
+
+    def test_config_names_the_venue_over_the_json_ld(self):
+        ld = {"location": {"name": "Arena", "address": {"streetAddress": "1 Main St",
+                                                         "addressLocality": "Stateline"}}}
+        assert seed_adapters._ch_place(ld, {}) == ("Arena", "1 Main St, Stateline")
+        assert seed_adapters._ch_place(ld, {"venue": "Big Arena", "location": "x"}) \
+            == ("Big Arena", "x")
+
+
 class TestEventFindWiring:
     def test_adapter_events_are_upserted_pending_and_the_run_recorded(self, conn, find):
         assert find() == 0
