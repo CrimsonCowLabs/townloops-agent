@@ -296,3 +296,136 @@ class TestPipeline:
         assert event_state.next_state_for("read-detail") == "detail-read"
         assert event_state.next_action_for("detail-read") == "extract-venue"
         assert "detail-read" in event_state.IN_FLIGHT_STATES
+
+
+# --------------------------------------------------------------------------
+# The blanks a listing or an adapter left: description, categories, tags
+# --------------------------------------------------------------------------
+
+ABOUT = "A quartet from Reno plays standards and originals in the lounge all night."
+FILLED_PAGE = (f"# Jazz Night\n\n{ABOUT}\n\nAdd to Google Calendar\n\n"
+               "Subscribe to our newsletter for more great shows every single week.\n")
+
+
+def vocabulary(state):
+    (state / "categories.json").write_text(json.dumps(
+        [{"slug": "live-music", "name": "Live Music"}, {"slug": "sports", "name": "Sports"}]))
+
+
+def answer(**parsed):
+    return Stub(FILLED_PAGE, raw=json.dumps({"accessibility_quotes": [], **parsed}))
+
+
+class TestDetailDescription:
+    def test_the_pages_sentences_about_the_event_are_kept(self):
+        assert event_detail.detail_description([ABOUT], FILLED_PAGE) == ABOUT
+
+    @pytest.mark.parametrize("quote", [
+        "Subscribe to our newsletter for more great shows every single week.",
+        "Add to Google Calendar",
+        "Jazz Night",                              # too short to describe anything
+    ])
+    def test_page_furniture_is_dropped(self, quote):
+        assert event_detail.detail_description([quote], FILLED_PAGE) is None
+
+    def test_a_sentence_not_on_the_page_is_dropped(self):
+        assert event_detail.detail_description(
+            ["A beloved trio returns for one night only to the lounge."], FILLED_PAGE) is None
+
+
+class TestFillsBlanks:
+    def test_a_blank_description_is_asked_for_and_kept_apart_from_the_listings(self, conn):
+        ev = stage(conn)
+        stub = answer(description_quotes=[ABOUT])
+        assert run(conn, ev, stub).fields["detail_description"] == ABOUT
+        assert '"description_quotes"' in stub.prompts[0]
+        r = row(conn, ev)
+        assert r["detail_description"] == ABOUT
+        assert r["description"] == "" and r["content_hash"] == ev["content_hash"]
+
+    def test_a_listing_description_is_not_asked_for_again(self, conn):
+        ev = {"title": "Jazz Night", "date": "2026-10-09T20:00:00", "source_url": DETAIL_URL,
+              "description": ABOUT}
+        upsert_event(conn, "Tahoe Arts", ev)
+        stub = answer()
+        run(conn, dict(conn.execute("SELECT * FROM events").fetchone()), stub)
+        assert '"description_quotes"' not in stub.prompts[0]
+
+    def test_categories_come_only_from_the_towns_vocabulary(self, conn, tmp_state_dir):
+        vocabulary(tmp_state_dir)
+        ev = stage(conn)
+        stub = answer(categories=["live-music", "opera"], tags=["Jazz", "Lounge"])
+        run(conn, ev, stub)
+        assert "live-music (Live Music)" in stub.prompts[0]
+        r = row(conn, ev)
+        assert json.loads(r["category_slugs"]) == ["live-music"]
+        assert r["category_slug"] == "live-music"
+        assert json.loads(r["tags"]) == ["jazz", "lounge"]
+
+    def test_categories_the_row_has_are_neither_asked_for_nor_replaced(self, conn, tmp_state_dir):
+        vocabulary(tmp_state_dir)
+        upsert_event(conn, "Tahoe Arts", {"title": "Jazz Night", "date": "2026-10-09T20:00:00",
+                                          "source_url": DETAIL_URL, "categories": ["sports"],
+                                          "tags": ["x"]})
+        ev = dict(conn.execute("SELECT * FROM events").fetchone())
+        stub = answer(categories=["live-music"], tags=["jazz"])
+        run(conn, ev, stub)
+        assert '"categories"' not in stub.prompts[0] and '"tags"' not in stub.prompts[0]
+        r = row(conn, ev)
+        assert json.loads(r["category_slugs"]) == ["sports"] and json.loads(r["tags"]) == ["x"]
+
+    def test_no_page_of_its_own_is_classified_from_its_text_without_a_fetch(
+            self, conn, tmp_state_dir):
+        vocabulary(tmp_state_dir)
+        ev = stage(conn, source_url=None)
+        stub = Stub(raw=json.dumps({"categories": ["live-music"], "tags": []}))
+        assert run(conn, ev, stub).status == "no-detail-page"
+        assert stub.fetched == []
+        [prompt] = stub.prompts
+        assert prompt.startswith("Classify this local event") and "Title: Jazz Night" in prompt
+        assert json.loads(row(conn, ev)["category_slugs"]) == ["live-music"]
+
+    def test_a_failed_classification_fills_nothing(self, conn, tmp_state_dir):
+        vocabulary(tmp_state_dir)
+        ev = stage(conn, source_url=None)
+        assert run(conn, ev, Stub(llm_ok=False)).status == "no-detail-page"
+        assert row(conn, ev)["category_slugs"] is None
+
+
+class TestBackfill:
+    def _read_before(self, conn, monkeypatch):
+        """An event read before the detail read asked for its blanks."""
+        ev = stage(conn)
+        conn.execute("UPDATE events SET detail_read_status = 'read', detail_read_url = ?, "
+                     "date_utc = '2999-01-01T00:00:00+00:00', state = 'entities-enriched' "
+                     "WHERE event_uid = ?", (DETAIL_URL, ev["event_uid"]))
+        monkeypatch.setattr(event_detail, "cached_page",
+                            lambda uid: FILLED_PAGE if uid == ev["event_uid"] else None)
+        return dict(row(conn, ev))
+
+    def test_it_asks_only_the_blanks_of_the_cached_page(self, conn, tmp_state_dir, monkeypatch):
+        vocabulary(tmp_state_dir)
+        ev = self._read_before(conn, monkeypatch)
+        stub = Stub(raw=json.dumps({"description_quotes": [ABOUT], "categories": ["live-music"]}))
+        assert [c["event_uid"] for c in event_detail.backfill_candidates(conn, 10)] \
+            == [ev["event_uid"]]
+        found = event_detail.backfill(conn, ev, llm=stub.llm)
+        assert set(found) == {"detail_description", "category_slugs"}
+        assert stub.fetched == [] and '"accessibility_quotes"' not in stub.prompts[0]
+        r = row(conn, ev)
+        assert r["detail_description"] == ABOUT
+        assert json.loads(r["category_slugs"]) == ["live-music"]
+
+    def test_the_skill_tries_each_event_once(self, conn, tmp_state_dir, monkeypatch):
+        vocabulary(tmp_state_dir)
+        ev = self._read_before(conn, monkeypatch)
+        mod = _skill(conn, monkeypatch, Stub(raw="{}"))
+        assert mod.main(["backfill", "--limit", "5"]) == 0
+        assert event_detail.backfill_candidates(conn, 10) == []
+        assert row(conn, ev)["detail_description"] is None
+
+    def test_a_shipped_or_complete_event_is_no_candidate(self, conn, monkeypatch):
+        ev = self._read_before(conn, monkeypatch)
+        conn.execute("UPDATE events SET townloops_slug = 'jazz' WHERE event_uid = ?",
+                     (ev["event_uid"],))
+        assert event_detail.backfill_candidates(conn, 10) == []

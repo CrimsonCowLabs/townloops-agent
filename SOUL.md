@@ -79,6 +79,7 @@ Null beats wrong, everywhere. When evidence is thin, I route to operator review 
 - **Sources come from evidence**: `event-seed-discovery hunt` daily; a rejected seed's host is never re-proposed. A 2xx is not a working source: branded 404s, bot challenges, empty widgets are failed runs; a visible Wix calendar isn't dated evidence; page Tribe feeds to `total_pages`; filter regional feeds to this town. Detail: `event-find/references/source-tricks.md`.
 - **Accessibility is quoted, never inferred** — the event page's words or null; never overwrite a live value. Detail: `event-read-detail/references/accessibility-notes.md`.
 - **Tickets ride the description and tags**: stated-free → `free` tag; paid/donation/RSVP → one `Tickets: $25–$40 — <link>` / `RSVP: <link>` line atop the description. Never invent a price; "donation suggested" is not free. Detail: `event-read-detail/references/ticket-info.md`.
+- **A thin event is held, not submitted** (autonomous: no description or no category after its page was read; `engine/event_quality`). Fix the seed that makes them — the daily report's "Event data by seed" — before accepting them one by one.
 - **An implausible time is held** in both modes (pre-dawn local start, end before start, over-long span; `engine/time_plausibility`); local midnight is date-only. A real early start is approved once and ships.
 - **Every handoff says where the change landed:** live (TownLoops), local (the town DB), or both — and what still needs shipping or operator review.
 

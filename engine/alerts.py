@@ -25,7 +25,8 @@ EXAMPLES = 5
 
 @dataclass(frozen=True)
 class Alert:
-    kind: str            # circuit | api-freeze | paused | held | cancellation | job | source-health | analyst-run
+    kind: str            # circuit | api-freeze | paused | held | cancellation | job | source-health
+                         # | data-quality | analyst-run
     text: str
     needs_you: bool      # only the operator can clear it
 
@@ -69,6 +70,9 @@ def standing(conn: sqlite3.Connection) -> list[Alert]:
         out.append(Alert("source-health", f"seed {seed['name']} (#{seed['seed_id']}) "
                                           f"{source_health.LABELS.get(seed['health_status'], seed['health_status'])}: "
                                           f"{seed['health_note']}", False))
+    from engine import event_quality
+    for seed in event_quality.thin_seeds(conn):
+        out.append(Alert("data-quality", event_quality.thin_text(seed), False))
     # The latest run that ended — until a later one ends ok.
     last = conn.execute("SELECT id, status, started_at, notes FROM analyst_runs "
                         "WHERE status != 'running' ORDER BY id DESC LIMIT 1").fetchone()

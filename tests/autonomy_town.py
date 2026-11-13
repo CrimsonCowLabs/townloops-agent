@@ -34,9 +34,12 @@ from tests.fake_townloops import FakeAPI
 ROOT = Path(__file__).resolve().parent.parent
 SKILLS = ROOT / "skills" / "business"
 
+# Fixture events carry one-line descriptions ("A race."): the thin-event
+# hold (engine/event_quality) is off unless a test is about it
+# (tests/test_event_quality.py turns it on).
 PROFILE = {"slug": "slt", "name": "South Lake Tahoe", "region": "California",
            "name_aliases": ["SLT", "Stateline"], "operating_mode": "autonomous",
-           "autonomy": {}}
+           "autonomy": {"hold_thin_events": False}}
 
 
 def soon(days: int = 7, hour: int = 19) -> str:

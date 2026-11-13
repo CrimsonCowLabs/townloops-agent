@@ -44,7 +44,7 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     next run; a file another process applied first is skipped). Pending migrations run at the start of every cron
     entry point: the heartbeat drain (`run_migrations`) and each DB-writing `scripts/*.py` wrapper (`db.migrate()`;
     new wrappers call it too). Every DB-touching docker no_agent job in `cron/jobs.json` runs a wrapper,
-    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 032).
+    never a skill directly; `tests/test_cron_migrate.py` enforces both. Migrations are **SQLite-specific** (`engine/migrations/NNN_*.sql`, currently through 033).
   - `event_state.py` — the linear event state machine (`found → metadata-extracted → approved →
     detail-read → venue-derived → hosts-derived → people-derived → entities-enriched → shipped`, plus `declined`
     and `stuck-<state>`). Advancement is **optimistic locking**: `UPDATE ... WHERE state = <old>`;
@@ -220,6 +220,11 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     workqueue attempt instead of parking the event. The same pass keeps the stated `price` (quote-checked,
     must state a cost) and ticket/RSVP link `rsvp_url` (on the page, never a homepage); `event_tickets.py`
     turns them into the `free` tag or one `Tickets: …`/`RSVP: …` line atop the shipped description —
+    built at ship time (as is the description itself when the listing gave none: the page's own quote-checked
+    sentences, `detail_description`, kept apart from `description`). The pass also asks only the blanks a
+    listing or adapter left — `detail_description`, categories from the town's vocabulary, tags (fill-blank;
+    no page of its own → one text-only classify call); `event-read-detail backfill` asks them of events read
+    before, from the cached page —
     built at ship time, so the local description and content hash never change — and, only when the
     wording is unambiguous (`typed_price`: free / "$15" / "$10–$20"), TownLoops' typed `price_kind`/
     `price_min_cents`/`price_max_cents`; the pass also keeps a quote-checked `age_restriction`
@@ -251,7 +256,14 @@ Three layers, repo-root is the Python import root (`pythonpath = .` in `pytest.i
     a live row is held before ship), `gate` before read-detail and ship. Held via `review_hold` (verdict
     `autonomy.judge_times`, digest "Held — implausible time"); an approval after the hold accepts *those* times —
     new times are checked afresh, a source that corrects them releases the hold),
-    `review_hold.py` (the one hold-for-review lifecycle; a `Kind` per reason — `PROVENANCE`, `TIMES` — each keeping
+    `event_quality.py` (what a useful event has, the one place: `missing` — no description (listing's, else the
+    page's `detail_description`; `description()` is what ship sends) or no category from the town's vocabulary;
+    price/end/access/tickets are never rules. `gate` before ship, autonomous only and not yet live → held via
+    `review_hold` (`COMPLETENESS`, "Held — thin event" grouped by seed; `autonomy.hold_thin_events`); `record`
+    after event-find releases a hold a re-read filled. `by_seed`/`thin_seeds`: per-seed fill rates of events past
+    the detail read → the daily report's "Event data by seed" + a `data-quality` standing alert — an adapter
+    that drops a field shows up here),
+    `review_hold.py` (the one hold-for-review lifecycle; a `Kind` per reason — `PROVENANCE`, `TIMES`, `COMPLETENESS` — each keeping
     its rules/evidence in its own module; a third reason is one more `KINDS` entry. Held = pending at
     `metadata-extracted` + `extra_json.<key>.status` `held-for-review` in both modes, approval cleared
     (`event_state.reopen_for_review`); `hold` is False when the event moved on first — the caller exits

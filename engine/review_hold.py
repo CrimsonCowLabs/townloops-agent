@@ -1,8 +1,9 @@
 """An event held for the operator's review — one lifecycle, several reasons.
 
 A `Kind` is one reason an event can be held: a source mismatch (#45,
-engine/event_provenance) or an implausible time (#46,
-engine/time_plausibility). Each kind keeps its own rules and evidence in its
+engine/event_provenance), an implausible time (#46,
+engine/time_plausibility) or a thin event — no description or category
+(engine/event_quality). Each kind keeps its own rules and evidence in its
 own module; this is what they share:
 
 - the mark: `extra_json[<kind.key>]` with `status` `held-for-review` (pending,
@@ -54,7 +55,8 @@ class Kind:
 
 PROVENANCE = Kind("provenance", "provenance: ", "source mismatch", autonomy.judge_provenance)
 TIMES = Kind("time_check", "times: ", "implausible time", autonomy.judge_times)
-KINDS = (PROVENANCE, TIMES)
+COMPLETENESS = Kind("completeness", "thin: ", "thin event", autonomy.judge_thin)
+KINDS = (PROVENANCE, TIMES, COMPLETENESS)
 
 
 def not_held_sql(kind: Kind) -> str:

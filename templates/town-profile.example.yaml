@@ -139,6 +139,9 @@ operating_mode: autonomous
 #   verdict_max_age_days: 30   # harvest approves a discovered organisation only on a
 #                              # verify verdict this recent; an older one (or one the CMO
 #                              # import copied in) is re-verified first
+#   hold_thin_events: true     # an event with no description or no category, even after
+#                              # its own page was read, is held for you, not submitted
+#                              # (engine/event_quality); false submits it anyway
 # zip_codes: ["96150"]         # optional: a listed ZIP outside these is out of town
 
 # The daily analyst run (skills/business/town-analyst, cron job
