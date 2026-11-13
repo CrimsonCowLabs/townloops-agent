@@ -39,6 +39,19 @@ event-reconcile only see the seed's listing page; this reads the event's own
   (og:image:alt, an ImageObject caption) that describes the picture — never the
   event's title, "event image" or a file name — and never a logo/icon/
   placeholder. It replaces a listing card's or feed's picture.
+- `events.detail_description` — only when the listing (or an adapter's feed)
+  gave no description, or one under 40 characters: the page's own sentences
+  about the event (what happens, who plays, what to expect), each quote-checked
+  against the page; dates, prices, ticket and calendar buttons, newsletters and
+  other events never count. Kept apart from `description` (the listing's text,
+  in the content hash), so a re-read neither loses it nor reads as a change.
+  event-ship sends it while `description` is blank (`engine/event_quality`).
+- `events.category_slugs` / `events.tags` — only when the row has none: 1–3
+  categories picked from the town's vocabulary (`state/categories.json`;
+  anything else is dropped) and up to 5 tags. An event with no page of its own
+  (`no-detail-page`) gets them from one text-only Codex call over its title,
+  venue and description instead — no fetch. Adapter rows carry no
+  classification of their own, so this is where most of them get one.
 - `detail_read_status` / `detail_read_url` / `detail_read_at` — the pass is
   recorded, so a page is read once per `source_url`, not every tick.
 
@@ -97,6 +110,13 @@ stored value.
 
 ```
 read.py --event-uid <uid>
+read.py backfill [--limit 20] [--dry-run]
 ```
 
 Exit codes: 0 read / skipped / gave up, 1 retry, 2 event not found.
+
+`backfill` — events already past the detail read, not live, upcoming, that
+would be held as thin (`engine/event_quality.missing`): asks only their blanks
+of the cached page (no Firecrawl; one Codex call each), or classifies one with
+no page from its text. Each event is tried once (`detail-backfill` activity).
+Run it after the detail read learns a new field or an adapter is fixed.

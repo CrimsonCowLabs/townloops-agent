@@ -25,7 +25,7 @@ from typing import Callable, Optional
 from engine import autonomy, egress, notify
 from engine import db as _db
 from engine.derive_helpers import load_town_profile, parse_extra_json
-from engine import event_detail, event_groups, event_provenance
+from engine import event_detail, event_groups, event_provenance, event_quality
 from engine import event_state
 from engine import inspection, live_patch
 from engine import lock as _lock
@@ -423,6 +423,22 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
                      "start is fine) or decline it: the dashboard, or `autonomy accept|decline <uid>`:"]
         md_lines += [f"- {h['title']} — {h['date']} (`{h['event_uid']}`): "
                      + "; ".join(h["reasons"]) for h in times_held]
+    # Held for review, every night until the operator resolves them: no
+    # description or no category — one line per seed, since a thin seed
+    # holds all its events (engine/event_quality).
+    thin_held = event_quality.held_for_review(conn)
+    if thin_held:
+        md_lines += ["", "## Held — thin event",
+                     "Not submitted: no description or no category even after reading its own "
+                     "page. Fix the seed's adapter, or approve (ships as it is) or decline each: "
+                     "the dashboard, or `autonomy accept|decline <uid>`:"]
+        by_seed: dict[str, list[dict]] = {}
+        for h in thin_held:
+            by_seed.setdefault(h["seed"] or "?", []).append(h)
+        for seed, rows in sorted(by_seed.items(), key=lambda kv: -len(kv[1])):
+            reasons = sorted({r for h in rows for r in h["reasons"]})
+            md_lines.append(f"- {seed} — {len(rows)} event(s), {'; '.join(reasons)}:")
+            md_lines += [f"  - {h['title']} — {h['date']} (`{h['event_uid']}`)" for h in rows]
     provenance_live = event_provenance.live_mismatches(conn)
     if provenance_live:
         md_lines += ["", "## Live — source mismatch",
@@ -478,6 +494,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
            + "\n" if proposals else "")
         + (f"held for source mismatch: {len(provenance_held)}\n" if provenance_held else "")
         + (f"held for an implausible time: {len(times_held)}\n" if times_held else "")
+        + (f"held as thin: {len(thin_held)}\n" if thin_held else "")
         + (f"live with a source mismatch: {len(provenance_live)}\n" if provenance_live else "")
         + (f"live end times to clear: {len(ends)}\n" if ends else "")
         + (f"egress hosts: +{egress_added} added, {len(egress_changes) - egress_added} removed\n"
@@ -498,6 +515,7 @@ def summary(conn: Optional[sqlite3.Connection] = None, hours: int = 24) -> dict:
         "provenance_held": provenance_held,
         "provenance_live": provenance_live,
         "times_held": times_held,
+        "thin_held": thin_held,
         "unclearable_ends": ends,
         "egress_changes": egress_changes,
         "shipped": shipped_counts,

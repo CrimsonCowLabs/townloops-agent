@@ -80,7 +80,11 @@ a big `harvest`) gets a `--limit` or runs in the background; I check it later.
    status = 'approved' AND (last_scraped_at IS NULL OR last_scraped_at <
    date('now'))`. A hold (provenance, implausible time) I resolve only after
    re-reading its page; if the page doesn't settle it, a notebook line, not
-   a guess. A stuck event: find the cause (source, adapter, data), fix it,
+   a guess. A thin-event hold (no description or category) is a seed
+   problem first: the report's "Event data by seed" names the seed — fix its
+   adapter so its rows carry what the feed has, then
+   `event-read-detail backfill --limit 20`; accept one only when its own
+   page truly says nothing more. A stuck event: find the cause (source, adapter, data), fix it,
    then `operator-requeue --queue-id N`.
 
 5. **Organisations and venues.**

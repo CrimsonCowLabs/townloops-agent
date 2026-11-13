@@ -11,7 +11,10 @@ and carries the ref; a `409 ingest_ref_taken` means "already shipped": the
 event is bound to the slug it names, with no second request. A row found by
 the pre-ref fallbacks is given the ref (set-once PATCH). An event whose
 times are implausible (engine/time_plausibility) and not accepted by the
-operator is held for review instead — nothing is sent.
+operator is held for review instead — nothing is sent. So is a thin one
+in autonomous mode (engine/event_quality: no description, no category) not
+yet live. Its description is the listing's, else its own page's
+(`detail_description`, engine/event_quality.description).
 
 TownLoops Series (ADR 0007, `engine/series.py`): an event joins a Series
 only by TownLoops auto-linking its title at create, so the title it ships
@@ -47,7 +50,8 @@ from typing import Any, Optional
 
 from engine import autonomy
 from engine import categories as cats
-from engine import event_dedup, event_detail, event_state, event_tickets, images, time_plausibility
+from engine import (event_dedup, event_detail, event_quality, event_state, event_tickets, images,
+                    time_plausibility)
 from engine import live_index
 from engine.derive_helpers import (
     iso_utc_now, load_event, open_db, parse_event_uid_arg, parse_extra_json, record_activity,
@@ -151,7 +155,7 @@ def _event_payload(row) -> dict:
         "title": row["title"] or row["name"],
         "start_at": row["date_utc"],
     }
-    description = event_tickets.with_ticket_line(row["description"], _ticket_line(row))
+    description = event_tickets.with_ticket_line(event_quality.description(row), _ticket_line(row))
     if description:
         payload["description"] = description
     if row["end_at_utc"]:
@@ -859,7 +863,7 @@ def _reconcile_fill_overrides(event: dict, current: dict) -> dict[str, Any]:
     if notes and not current.get("accessibility_notes"):
         overrides["accessibility_notes"] = notes
     described = event_tickets.with_ticket_line(
-        current.get("description") or event.get("description"), line)
+        current.get("description") or event_quality.description(event), line)
     if line and described != current.get("description"):
         overrides["description"] = described
     tags = event_tickets.live_tags(list(current.get("tags") or []), event.get("price"))
@@ -968,6 +972,19 @@ def main() -> int:
         print(f"event {event_uid[:12]}: held for review — " + why)
         # rc 0 with ok=False: the hold moved it to metadata-extracted, so the
         # drain's optimistic advance (from entities-enriched) is a no-op.
+        return 0
+
+    thin = event_quality.gate(conn, event, live=bool(_reconcile_change(event)))
+    if thin:
+        # Autonomous: a thin event waits for the operator, not the
+        # moderation queue (engine/event_quality). Same contract as above.
+        why = "; ".join(thin.reasons)
+        if not thin.held:
+            print(f"event {event_uid[:12]}: hold not applied, event moved on ({why}) — not now")
+            return RC_DEFERRED
+        record_activity(conn, _WORKER, "ship-event", event_uid, ok=False,
+                        error="held for review: " + why)
+        print(f"event {event_uid[:12]}: held for review — " + why)
         return 0
 
     # API not configured: marked shipped locally only, its ref as the

@@ -77,6 +77,7 @@ class Settings:
     series_publish_streak: int = 3     # published in a row → a well-established Series
     stuck_retries: int = 2             # backoff retries before a stuck event is resolved
     verdict_max_age_days: int = 30     # an older discovery verify verdict is re-verified
+    hold_thin_events: bool = True      # no description/category → held, not submitted
 
     @property
     def autonomous(self) -> bool:
@@ -119,6 +120,7 @@ def settings(profile: Optional[dict] = None) -> Settings:
         series_publish_streak=num(a, "series_publish_streak", d.series_publish_streak),
         stuck_retries=num(a, "stuck_retries", d.stuck_retries),
         verdict_max_age_days=num(a, "verdict_max_age_days", d.verdict_max_age_days),
+        hold_thin_events=bool(a.get("hold_thin_events", d.hold_thin_events)),
     )
 
 
@@ -1048,6 +1050,19 @@ def judge_times(evidence: dict, s: Settings) -> Decision:
     if not s.autonomous:
         return await_operator("implausible time", evidence)
     return Decision("hold", "implausible-time", evidence)
+
+
+def judge_thin(evidence: dict, s: Settings) -> Decision:
+    """An event with no description or no category
+    (engine/event_quality's `evidence["rules"]`) is held for review rather
+    than submitted — the moderation queue is no place to find out a source
+    says nothing about it. Pending for the operator until approved
+    (shipped as it is) or declined."""
+    if not evidence.get("rules"):
+        return Decision("ship", "complete", evidence)
+    if not s.autonomous:
+        return await_operator("thin event", evidence)
+    return Decision("hold", "thin-event", evidence)
 
 
 # --------------------------------------------------------------------------

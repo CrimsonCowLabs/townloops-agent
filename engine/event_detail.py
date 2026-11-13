@@ -23,6 +23,15 @@ source_url, not every tick; a page that is just the seed's listing (or no
 source_url) is never fetched. The page text is cached (`cached_page`) for
 the host/people derivation (engine/event_people).
 
+The same call fills what the listing (or an adapter's feed) left blank —
+engine/event_quality's rules: the page's own sentences about the event as
+`detail_description` (quote-checked; never dates, prices, ticket
+boilerplate or other events — event-ship sends it while `description` is
+blank), categories from the town's vocabulary and tags — fill-blank, like
+the listing's classification. An event with no page of its own gets its
+categories from one text-only call over its title, venue and description.
+`backfill` asks the same of events already read, from the cached page.
+
 A page that itself says the event is cancelled or postponed
 (autonomy.cancellation_evidence) ends the read there, without the Codex
 call: the event is declined with the page's sentence as the reason
@@ -38,7 +47,8 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 from urllib.parse import urlsplit
 
-from engine import autonomy, event_cancel, event_provenance, images, time_plausibility
+from engine import autonomy, categories as cats, event_cancel, event_provenance, event_quality, \
+    images, time_plausibility
 from engine.derive_helpers import iso_utc_now, seed_name_of
 from engine.event_extract import codex_exec, firecrawl_page
 from engine.event_provenance import canon_url as _canon
@@ -56,6 +66,8 @@ FETCH_TIMEOUT_S = 25
 CODEX_TIMEOUT_S = 40
 PAGE_CHARS = 12000
 PRICE_MAX = 300
+# Room under the API's description limit for event-ship's ticket line.
+DESCRIPTION_MAX = 1500
 
 # Keys asked of the LLM, one prompt line each.
 DETAIL_FIELDS = {
@@ -91,6 +103,25 @@ DETAIL_FIELDS = {
 
 # What makes a sentence about access. A bare "accessible"/"accessibility" is
 # not enough ("accessible by trail", "committed to digital accessibility").
+# Asked for only what the event lacks (`_blank_fields`).
+DESCRIPTION_FIELD = (
+    "JSON array of sentences copied word for word from the page that say what "
+    "this event is: what happens, who performs or leads it, what to expect. "
+    "Copy the page's exact words, in page order. Never dates, times, addresses, "
+    "prices, ticket or RSVP instructions, other events, navigation, newsletter "
+    "or cookie text. [] if the page says nothing about the event itself"
+)
+CATEGORIES_FIELD = (
+    "JSON array of 1 to 3 category slugs that fit this event, chosen only from "
+    "this list (slug, then what it covers):\n{vocabulary}\n  [] if none fits"
+)
+TAGS_FIELD = (
+    "JSON array of up to 5 short lowercase labels for this event — the activity, "
+    "genre or audience (\"hockey\", \"bluegrass\", \"kids\") — from what it says. "
+    "[] if unsure"
+)
+CLASSIFY_FIELDS = 3   # at most this many categories asked for
+
 _ACCESS_TERMS = re.compile(
     r"wheel\s?chair|step[- ]free|\bASL\b|sign[- ]language|caption|audio[- ]descri"
     r"|assist(?:ed|ive)[- ]listening|hearing[- ]loop|induction[- ]loop|braille"
@@ -148,6 +179,37 @@ def ticket_price(quote, page: str) -> Optional[str]:
 
 _SENTENCE_END = re.compile(r"[!?;]|\.(?!\d)")
 
+# A sentence that is the page's furniture, not the event: calendar and
+# share buttons, ticket boilerplate, newsletters, legal lines.
+_BOILERPLATE = re.compile(
+    r"cookie|newsletter|subscribe|sign[- ]up|add to (?:google |apple |outlook )?calendar"
+    r"|tap here|click here|privacy|terms of (?:use|service)|all rights reserved|copyright|©"
+    r"|follow us|share (?:this|on)|(?:buy|get|purchase) (?:your )?tickets|tickets? (?:are )?"
+    r"(?:now )?(?:on sale|available)|view (?:the )?(?:full|all|more)|read more|learn more"
+    r"|opens in a new tab|ticketmaster|box office", re.IGNORECASE)
+_WORD = re.compile(r"[A-Za-z]{2,}")
+_MIN_DESCRIPTION_WORDS = 5
+
+
+def _describes(sentence: str) -> bool:
+    return len(_WORD.findall(sentence)) >= _MIN_DESCRIPTION_WORDS \
+        and not _BOILERPLATE.search(sentence)
+
+
+def detail_description(quotes, page: str) -> Optional[str]:
+    """The quotes that are on `page` and describe the event (not its
+    furniture), in page order, joined and cut on a quote boundary. None
+    when none survive."""
+    return join_quotes(quotes, page, _describes, DESCRIPTION_MAX)
+
+
+def classification(parsed: dict) -> tuple[list[str], list[str]]:
+    """(category_slugs, tags) from an LLM answer: categories only the
+    town's own slugs, tags as slugs."""
+    slugs = cats.normalize_category_slugs(parsed.get("categories"), cats.town_category_slugs())
+    tags = cats.normalize_tags(parsed.get("tags"))
+    return slugs[:CLASSIFY_FIELDS], tags[:5]
+
 
 def age_of(quote, page: str) -> Optional[str]:
     """'adults_only' | 'all_ages' when `quote` is on `page` and states it
@@ -200,8 +262,27 @@ def seed_urls(conn: sqlite3.Connection, event: dict) -> set[str]:
     return {u for u in (_canon(r[0]) for r in rows.fetchall()) if u}
 
 
-def build_detail_prompt(event: dict, url: str, markdown: str) -> str:
-    keys = "\n".join(f'  "{k}": {v}' for k, v in DETAIL_FIELDS.items())
+def _blank_fields(event: dict) -> dict:
+    """The prompt keys for what `event` lacks: a description (the listing's
+    is too short and no page gave one yet), categories (the town has a
+    vocabulary and the event none of it), tags."""
+    out = {}
+    if len(event_quality.description(event) or "") < event_quality.MIN_DESCRIPTION_CHARS:
+        out["description_quotes"] = DESCRIPTION_FIELD
+    vocabulary = cats.town_categories()
+    if vocabulary and not event_quality.categories(event):
+        out["categories"] = CATEGORIES_FIELD.format(vocabulary=cats.prompt_vocabulary(vocabulary))
+    if not cats.normalize_tags(event.get("tags")):
+        out["tags"] = TAGS_FIELD
+    return out
+
+
+def build_detail_prompt(event: dict, url: str, markdown: str,
+                        fields: Optional[dict] = None) -> str:
+    """The detail read's prompt: DETAIL_FIELDS plus the event's blanks, or
+    just `fields` (backfill)."""
+    fields = {**DETAIL_FIELDS, **_blank_fields(event)} if fields is None else fields
+    keys = "\n".join(f'  "{k}": {v}' for k, v in fields.items())
     return f"""Below is the scraped markdown of the detail page ({url}) for the event "{event.get('title') or event.get('name')}".
 
 Return ONLY a JSON object — no prose, no markdown, no code fence — with these keys:
@@ -221,7 +302,51 @@ def _extract(parsed: dict, page: str, seeds: set[str]) -> dict:
         "price": ticket_price(parsed.get("price_quote"), page),
         "rsvp_url": ticket_url(parsed.get("ticket_url"), page, seeds),
         "age_restriction": age_of(parsed.get("age_quote"), page),
+        "detail_description": detail_description(parsed.get("description_quotes"), page),
     }
+
+
+def _record_classification(conn, event: dict, parsed: dict) -> dict:
+    """Categories and tags where the row has none (an operator's or the
+    listing's choice stays) — not source content: no hash change."""
+    slugs, tags = classification(parsed)
+    if not slugs and not tags:
+        return {}
+    cats_json, tags_json = cats.to_json(slugs), cats.to_json(tags)
+    conn.execute(
+        "UPDATE events SET "
+        "category_slug = CASE WHEN category_slugs IS NULL AND ? IS NOT NULL THEN ? "
+        "  ELSE category_slug END, "
+        "category_slugs = COALESCE(category_slugs, ?), tags = COALESCE(tags, ?) "
+        "WHERE event_uid = ?",
+        (cats_json, slugs[0] if slugs else None, cats_json, tags_json, event["event_uid"]))
+    return {"category_slugs": slugs or None, "tags": tags or None}
+
+
+def build_classify_prompt(event: dict, vocabulary: list[dict]) -> str:
+    """No page of its own: categories and tags from what the event says."""
+    keys = "\n".join([
+        '  "categories": ' + CATEGORIES_FIELD.format(vocabulary=cats.prompt_vocabulary(vocabulary)),
+        '  "tags": ' + TAGS_FIELD])
+    lines = [f"Title: {event.get('title') or event.get('name') or ''}",
+             f"Venue: {event.get('venue_name') or event.get('venue_raw') or ''}",
+             f"Description: {(event.get('description') or '')[:1500]}"]
+    return ("Classify this local event for a town calendar. Return ONLY a JSON object — "
+            f"no prose, no markdown, no code fence — with these keys:\n{keys}\n\n"
+            + "\n".join(lines) + "\n")
+
+
+def classify_from_text(conn, event: dict, llm: Callable) -> dict:
+    """Categories (and tags) for an event with none and no page to read,
+    from one Codex call over its own title, venue and description. A failed
+    call fills nothing — event-ship's thin-event hold catches what stays
+    blank."""
+    vocabulary = cats.town_categories()
+    if not vocabulary or event_quality.categories(event):
+        return {}
+    ok, out, _err = llm(build_classify_prompt(event, vocabulary), timeout_s=CODEX_TIMEOUT_S)
+    parsed = parse_object(out) if ok else None
+    return _record_classification(conn, event, parsed) if parsed else {}
 
 
 def _record_image(conn, event: dict, image: Optional[images.Image]) -> dict:
@@ -275,7 +400,7 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         return _hold(conn, event, hold_now, url)
     if not canon or canon in seeds:
         _record(conn, event, "no-detail-page", url, {})
-        return DetailResult("no-detail-page")
+        return DetailResult("no-detail-page", fields=classify_from_text(conn, event, llm))
     if event.get("detail_read_status") == "read" and event.get("detail_read_url") == url:
         return DetailResult("already-read")
 
@@ -311,10 +436,55 @@ def read_detail(conn: sqlite3.Connection, event: dict, *, final_attempt: bool,
         return DetailResult("retry", error=err)
     fields = _extract(parsed, markdown, seeds)
     _record(conn, event, "read", url, fields)
+    fields.update(_record_classification(conn, event, parsed))
     fields.update(_record_image(conn, event, images.page_image(
         page.get("html"), page.get("metadata"), url, event.get("title") or event.get("name"))))
     cache_page(event["event_uid"], markdown)
     return DetailResult("read", fields=fields)
+
+
+def backfill(conn: sqlite3.Connection, event: dict, *, llm: Optional[Callable] = None) -> dict:
+    """An event read before the detail read asked for its blanks: ask now,
+    from the cached page (no fetch) — else, with no page, classify it from
+    its own text. Only the blank fields; returns what was filled."""
+    llm = llm or codex_exec
+    fields = _blank_fields(event)
+    if not fields:
+        return {}
+    markdown = cached_page(event["event_uid"])
+    if not markdown:
+        return classify_from_text(conn, event, llm)
+    ok, out, _err = llm(build_detail_prompt(event, event.get("source_url") or "", markdown,
+                                            fields), timeout_s=CODEX_TIMEOUT_S)
+    parsed = parse_object(out) if ok else None
+    if not parsed:
+        return {}
+    found = {"detail_description": detail_description(parsed.get("description_quotes"),
+                                                      markdown)}
+    if found["detail_description"]:
+        conn.execute("UPDATE events SET detail_description = COALESCE(detail_description, ?) "
+                     "WHERE event_uid = ?", (found["detail_description"], event["event_uid"]))
+    found.update(_record_classification(conn, event, parsed))
+    return {k: v for k, v in found.items() if v}
+
+
+BACKFILL_ACTION = "detail-backfill"   # agent_activity: tried once, not again
+
+
+def backfill_candidates(conn: sqlite3.Connection, limit: int) -> list[dict]:
+    """Upcoming events past their detail read, not live yet, that would be
+    held as thin (engine/event_quality.missing) and haven't been backfilled
+    before — soonest first."""
+    from engine.derive_helpers import dict_rows
+    rows = dict_rows(conn,
+        "SELECT * FROM events e WHERE detail_read_status IN ('read', 'no-detail-page') "
+        "AND townloops_slug IS NULL AND state NOT IN ('declined', 'shipped') "
+        "AND COALESCE(status, '') NOT IN ('duplicate', 'superseded') "
+        "AND (date_utc IS NULL OR date_utc >= ?) "
+        "AND NOT EXISTS (SELECT 1 FROM agent_activity a WHERE a.action = ? "
+        "                AND a.target = e.event_uid) "
+        "ORDER BY date_utc, event_uid", (iso_utc_now(), BACKFILL_ACTION))
+    return [r for r in rows if event_quality.missing(r)][:limit]
 
 
 def _hold(conn, event: dict, disagreed: list[str], url: Optional[str]) -> DetailResult:

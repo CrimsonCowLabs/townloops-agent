@@ -20,8 +20,9 @@ from typing import NamedTuple, Optional
 
 import yaml
 
-from engine import (autonomy, event_cancel, event_dedup, event_provenance, event_state, inspection,
-                    review_hold, seed_adapters, source_health, time_plausibility)
+from engine import (autonomy, event_cancel, event_dedup, event_provenance, event_quality,
+                    event_state, inspection, review_hold, seed_adapters, source_health,
+                    time_plausibility)
 from engine import lock as _lock
 from engine.derive_helpers import parse_extra_json, seed_ref
 from engine.event_extract import (  # noqa: F401 — re-exported for callers/tests
@@ -332,6 +333,7 @@ def _find(conn: sqlite3.Connection, args) -> int:
             uid = _event_uid(seed_name, evt["title"], evt["date"])
             event_provenance.record_extraction(conn, uid, evt)
             time_plausibility.record(conn, uid)
+            event_quality.record(conn, uid)
             seen_uids.append(uid)
             listed_dates.append(evt["date"])
             listed = event_cancel.record_listing(conn, uid, said, seed_name)

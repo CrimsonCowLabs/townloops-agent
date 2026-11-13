@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
-from engine import alerts, analyst_runs, live_index
+from engine import alerts, analyst_runs, event_quality, live_index
 from engine.derive_helpers import dict_rows as _rows
 
 EXAMPLES = 5
@@ -44,7 +44,8 @@ def build(conn: sqlite3.Connection, since: str, *, narrative: Optional[str] = No
     other = [a for a in standing if not a.needs_you]
     c = {"sources": _sources(conn, since), "events": _events(conn, since),
          "entities": _entities(conn, since), "holds": _holds(conn),
-         "failures": _failures(conn, since), "ambiguous": _ambiguous(conn)}
+         "failures": _failures(conn, since), "ambiguous": _ambiguous(conn),
+         "quality": event_quality.by_seed(conn, now)}
     runs = analyst_runs.recent(conn, since)
 
     md = [f"# {town} — analyst report {now:%Y-%m-%d}",
@@ -83,6 +84,14 @@ def build(conn: sqlite3.Connection, since: str, *, narrative: Optional[str] = No
            f"- enriched {n['enriched']} ("
            + (", ".join(f"{k} {v}" for k, v in sorted(n["enriched_by_kind"].items())) or "none")
            + f"), {n['with_image']} with an image"]
+
+    q = c["quality"]
+    md += ["", "## Event data by seed",
+           f"_Share of each seed's events from the last {event_quality.SEED_WINDOW.days} days, "
+           "after its detail read, carrying each field. **Bold**: under "
+           f"{event_quality.SEED_THIN_RATE:.0%} on a field a submission needs (autonomous: "
+           "its events missing it are held as thin)._"]
+    md += event_quality.table(q) if q else ["- no events read yet"]
 
     h = c["holds"]
     md += ["", "## Holds",

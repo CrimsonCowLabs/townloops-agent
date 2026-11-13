@@ -441,6 +441,7 @@ Unique `sqlite_autoindex_event_workqueue_1`: (event_uid, next_action)
 | ingest_ref | TEXT |  |  |  |  |
 | image_alt | TEXT |  |  |  |  |
 | age_restriction | TEXT |  |  |  |  |
+| detail_description | TEXT |  |  |  |  |
 
 Index `idx_events_approval`: (approval_status)
 

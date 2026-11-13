@@ -200,6 +200,15 @@ it (another worker or the operator moved it first), ship exits 75 — not now,
 retried — so it is never advanced to shipped unsent. An approval after the
 hold ships it with those times.
 
+A thin event (autonomous mode, not yet live: no description, or no category
+from the town's vocabulary, even after event-read-detail read its page — the
+rules live only in `engine/event_quality.py`) is held the same way, with a
+`thin: …` note (`thin-event` hold decision), instead of reaching the
+moderation queue. An approval after the hold ships it as it is;
+`autonomy.hold_thin_events: false` turns the hold off. The description sent
+is the listing's, else — blank or under 40 characters — the page's
+`detail_description`.
+
 ## Categories and tags
 
 The event goes out with `category_slugs` (all of its categories) and `tags`;
